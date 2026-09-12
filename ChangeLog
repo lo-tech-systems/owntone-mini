@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- change: the pipe input buffer is now sized by duration (3 seconds),
+  whatever the stream's sample rate or bit depth, instead of a fixed byte
+  count that meant only 1 second of buffering once 32-bit pipe input was
+  added
+- change: the buffered AirPlay 2 encoder no longer drops audio to catch up
+  after a stall; its backlog is drained instead. A warning is logged if it
+  falls more than a second behind, and a hard limit still applies, but only
+  against sustained overload that would otherwise grow the queue without
+  bound
+
 ## Version 1.2.1
 
 Changes since 1.2.0:

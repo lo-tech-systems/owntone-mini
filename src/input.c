@@ -39,9 +39,15 @@
 #include "commands.h"
 #include "input.h"
 
-// Disallow further writes to the buffer when its size exceeds this threshold.
-// The below gives us room to buffer 2 seconds of 48000/16/2 audio.
-#define INPUT_BUFFER_THRESHOLD STOB(96000, 16, 2)
+// Disallow further writes to the buffer once it holds this much audio, in
+// milliseconds. Expressed as a duration rather than a fixed byte count
+// because the buffer's byte size must mean the same amount of time
+// regardless of the stream's sample rate or bit depth -- a fixed byte
+// threshold does not (it is why this buffer used to cover 2.0 s at
+// 48000/16/2 but only 1.0 s once 32-bit pipe input was added). The
+// equivalent byte count is tracked in input_buffer.capacity_bytes and kept
+// up to date with the current write quality; see input_buffer_capacity().
+#define INPUT_BUFFER_CAPACITY_MS 3000
 // How long (in nsec) to wait when the input buffer is full before looping
 #define INPUT_LOOP_TIMEOUT_NSEC 10000000
 // How long (in sec) to keep an input open without the player reading from it
@@ -90,6 +96,10 @@ struct input_buffer
   // Quality of write/read data
   struct media_quality cur_write_quality;
   struct media_quality cur_read_quality;
+
+  // INPUT_BUFFER_CAPACITY_MS worth of bytes at cur_write_quality; kept in
+  // step with cur_write_quality (see input_buffer_capacity())
+  size_t capacity_bytes;
 
   size_t bytes_written;
   size_t bytes_read;
@@ -149,6 +159,30 @@ map_data_kind(int data_kind)
       default:
 	return -1;
     }
+}
+
+// Default write quality assumed before the input buffer has seen an actual
+// quality marker, i.e. at startup and briefly after a flush until the next
+// source's first write. Matches the pipe input module's own config defaults
+// (pipe_sample_rate 44100, pipe_bits_per_sample 16), so the common case is
+// already sized correctly; a source using a different configured format
+// corrects the capacity on its first write, see input_buffer_capacity().
+static struct media_quality input_buffer_default_quality = { .sample_rate = 44100, .bits_per_sample = 16, .channels = 2 };
+
+// Converts INPUT_BUFFER_CAPACITY_MS to a byte count at the given quality.
+// The intermediate is 64-bit so that even a much bigger capacity constant,
+// or an unexpectedly large quality, cannot wrap a 32-bit size_t before the
+// final cast (on today's targets size_t is 64-bit anyway, but this also
+// keeps the arithmetic itself from overflowing on a 32-bit build).
+static size_t
+input_buffer_capacity(struct media_quality *quality)
+{
+  // Casting the sample rate to uint64_t up front forces the whole STOB()
+  // expression to evaluate in 64 bits, rather than overflowing a 32-bit int
+  // before the result is captured.
+  uint64_t bytes_per_sec = STOB((uint64_t)quality->sample_rate, quality->bits_per_sample, quality->channels);
+
+  return (size_t)(bytes_per_sec * INPUT_BUFFER_CAPACITY_MS / 1000);
 }
 
 static void
@@ -288,10 +322,10 @@ markers_set(short flags, size_t write_size)
   if (flags & (INPUT_FLAG_EOF | INPUT_FLAG_ERROR))
     {
       // This controls when the player will open the next track in the queue
-      if (input_buffer.bytes_read + INPUT_BUFFER_THRESHOLD < input_buffer.bytes_written)
+      if (input_buffer.bytes_read + input_buffer.capacity_bytes < input_buffer.bytes_written)
 	// The player's read is behind, tell it to open when it reaches where
 	// we are minus the buffer size
-	marker_add(input_buffer.bytes_written - INPUT_BUFFER_THRESHOLD, INPUT_FLAG_START_NEXT, NULL);
+	marker_add(input_buffer.bytes_written - input_buffer.capacity_bytes, INPUT_FLAG_START_NEXT, NULL);
       else
 	// The player's read is close to our write, so open right away
 	marker_add(input_buffer.bytes_read, INPUT_FLAG_START_NEXT, NULL);
@@ -358,6 +392,7 @@ flush(short *flagptr)
 
   memset(&input_buffer.cur_read_quality, 0, sizeof(struct media_quality));
   memset(&input_buffer.cur_write_quality, 0, sizeof(struct media_quality));
+  input_buffer.capacity_bytes = input_buffer_capacity(&input_buffer_default_quality);
 
   input_buffer.bytes_read = 0;
   input_buffer.bytes_written = 0;
@@ -576,7 +611,7 @@ input_write(struct evbuffer *evbuf, struct media_quality *quality, short flags)
       input_now_reading.open = false;
     }
 
-  if ((evbuffer_get_length(input_buffer.evbuf) > INPUT_BUFFER_THRESHOLD) && evbuf)
+  if ((evbuffer_get_length(input_buffer.evbuf) > input_buffer.capacity_bytes) && evbuf)
     {
       buffer_full_cb();
 
@@ -592,6 +627,7 @@ input_write(struct evbuffer *evbuf, struct media_quality *quality, short flags)
   if (quality && !quality_is_equal(quality, &input_buffer.cur_write_quality))
     {
       input_buffer.cur_write_quality = *quality;
+      input_buffer.capacity_bytes = input_buffer_capacity(quality);
       flags |= INPUT_FLAG_QUALITY;
     }
 
@@ -671,14 +707,14 @@ wait_buffer_ready(void)
   pthread_mutex_lock(&input_buffer.mutex);
 
   // Is the buffer full? Then wait for a read or for loop_timeout to elapse
-  if (evbuffer_get_length(input_buffer.evbuf) > INPUT_BUFFER_THRESHOLD)
+  if (evbuffer_get_length(input_buffer.evbuf) > input_buffer.capacity_bytes)
     {
       buffer_full_cb();
 
       ts = timespec_reltoabs(input_loop_timeout);
       pthread_cond_timedwait(&input_buffer.cond, &input_buffer.mutex, &ts);
 
-      if (evbuffer_get_length(input_buffer.evbuf) > INPUT_BUFFER_THRESHOLD)
+      if (evbuffer_get_length(input_buffer.evbuf) > input_buffer.capacity_bytes)
 	{
 	  pthread_mutex_unlock(&input_buffer.mutex);
 	  return -1;
@@ -773,7 +809,7 @@ input_read(void *data, size_t size, short *flag, void **flagdata)
   if (*flag || (debug_elapsed > 10 * one_sec_size))
     {
       debug_elapsed = 0;
-      DPRINTF(E_DBG, L_PLAYER, "READ %zu bytes (%d/%d/%d), WROTE %zu bytes (%d/%d/%d), DIFF %zu, SIZE %zu/%d, FLAGS %04x\n",
+      DPRINTF(E_DBG, L_PLAYER, "READ %zu bytes (%d/%d/%d), WROTE %zu bytes (%d/%d/%d), DIFF %zu, SIZE %zu/%zu, FLAGS %04x\n",
         input_buffer.bytes_read,
         input_buffer.cur_read_quality.sample_rate,
         input_buffer.cur_read_quality.bits_per_sample,
@@ -784,7 +820,7 @@ input_read(void *data, size_t size, short *flag, void **flagdata)
         input_buffer.cur_write_quality.channels,
         input_buffer.bytes_written - input_buffer.bytes_read,
         evbuffer_get_length(input_buffer.evbuf),
-        INPUT_BUFFER_THRESHOLD,
+        input_buffer.capacity_bytes,
         *flag);
     }
 #endif
@@ -877,6 +913,7 @@ input_init(void)
   // Prepare input buffer
   CHECK_ERR(L_PLAYER, mutex_init(&input_buffer.mutex));
   CHECK_ERR(L_PLAYER, pthread_cond_init(&input_buffer.cond, NULL));
+  input_buffer.capacity_bytes = input_buffer_capacity(&input_buffer_default_quality);
 
   CHECK_NULL(L_PLAYER, evbase_input = event_base_new());
   CHECK_NULL(L_PLAYER, input_buffer.evbuf = evbuffer_new());

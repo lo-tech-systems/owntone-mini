@@ -39,14 +39,26 @@
 // Input quantum: the encode feed size used by the buffered AirPlay 2
 // transport, one RTP packet's worth of samples.
 #define ENCODER_SAMPLES_PER_QUANTUM 352
-// In-queue bound, in milliseconds of audio at the encoder's quality.
-#define ENCODER_QUEUE_MAX_MS 500
-// Sustained-overload escalation: if this many quanta are dropped within one
-// stats window, latch failed so the caller can tear the owning session(s)
-// down cleanly instead of drifting forever.
-#define ENCODER_DROP_FAIL_THRESHOLD 100
 // Log cadence for the periodic stats line, in encoded quanta.
 #define ENCODER_STATS_INTERVAL_QUANTA 4096
+
+// Backlog, in milliseconds of audio at the encoder's quality, above which a
+// WARN is logged so a stall shows up in the log while it is still being
+// absorbed. Rate-limited to ENCODER_STALL_WARN_INTERVAL_S per encoder.
+#define ENCODER_STALL_WARN_MS 1000
+#define ENCODER_STALL_WARN_INTERVAL_S 5
+
+// Hard backstop on the in-queue, in milliseconds of audio at the encoder's
+// quality. pcm_write() no longer drops audio to stay under a soft cap, so
+// the queue is expected to grow while catching up after a stall; this is
+// not a normal operating limit but a bound on memory under sustained
+// overload (input arriving faster than the encoder can ever keep up, for
+// as long as that lasts). Crossing it latches enc->failed, which trips the
+// existing "Buffered encoder ... failed" teardown path upstream. The value
+// sits comfortably above the largest legitimate catch-up backlog: the
+// input buffer's capacity (3 s) plus the FIFO (well under 1 s), plus
+// margin.
+#define ENCODER_QUEUE_FAIL_MS 5000
 
 struct airplay_encoder
 {
@@ -54,7 +66,6 @@ struct airplay_encoder
   enum airplay_buffered_kind kind;
   struct media_quality quality;
   uint32_t quantum_bytes;     // bytes for one ENCODER_SAMPLES_PER_QUANTUM quantum
-  uint32_t queue_max_samples; // ENCODER_QUEUE_MAX_MS worth of samples
   pthread_t tid;
 
   // --- worker-thread-private (never touched by the caller after start) ---
@@ -76,11 +87,15 @@ struct airplay_encoder
   // stats
   uint32_t stat_quanta;
   uint32_t stat_frames;
-  uint32_t stat_drops;
-  uint32_t stat_window_drops;
   uint32_t stat_queue_highwater_samples;
   uint64_t stat_encode_ns_total;
   uint64_t stat_encode_ns_max;
+
+  // Stall telemetry: rate-limits the backlog WARN in pcm_write(), and
+  // tracks the peak backlog seen since the last one was logged.
+  struct timespec stall_warn_last;
+  bool stall_warned;
+  uint32_t stall_warn_peak_samples;
 };
 
 
@@ -92,25 +107,42 @@ timespec_diff_ns(struct timespec *t0, struct timespec *t1)
   return (uint64_t)(t1->tv_sec - t0->tv_sec) * 1000000000UL + (uint64_t)(t1->tv_nsec - t0->tv_nsec);
 }
 
-// Caller holds the lock. Emits and resets the periodic debug stats line every
-// ENCODER_STATS_INTERVAL_QUANTA quanta.
-static void
-encoder_stats_log(struct airplay_encoder *enc)
+// Values needed for the periodic stats line, snapshotted under the lock so
+// the DPRINTF itself can run after it is released.
+struct encoder_stats_snapshot
 {
+  uint32_t quanta;
+  uint32_t frames;
   uint64_t avg_us;
   uint64_t max_us;
+  uint32_t queue_hw_ms;
+};
 
+// Caller holds the lock. True (with *out filled in) every
+// ENCODER_STATS_INTERVAL_QUANTA quanta, i.e. when the periodic debug stats
+// line is due.
+static bool
+encoder_stats_snapshot_take(struct airplay_encoder *enc, struct encoder_stats_snapshot *out)
+{
   if (enc->stat_quanta == 0 || enc->stat_quanta % ENCODER_STATS_INTERVAL_QUANTA != 0)
-    return;
+    return false;
 
-  avg_us = (enc->stat_encode_ns_total / enc->stat_quanta) / 1000;
-  max_us = enc->stat_encode_ns_max / 1000;
+  out->quanta = enc->stat_quanta;
+  out->frames = enc->stat_frames;
+  out->avg_us = (enc->stat_encode_ns_total / enc->stat_quanta) / 1000;
+  out->max_us = enc->stat_encode_ns_max / 1000;
+  out->queue_hw_ms = (uint32_t)((uint64_t)enc->stat_queue_highwater_samples * 1000 / enc->quality.sample_rate);
 
-  DPRINTF(E_DBG, L_AIRPLAY, "Encoder (kind %d): %u quanta, %u frames, avg %" PRIu64 " us, max %" PRIu64 " us, queue hw %u samples, drops %u\n",
-          enc->kind, enc->stat_quanta, enc->stat_frames, avg_us, max_us, enc->stat_queue_highwater_samples, enc->stat_drops);
+  return true;
+}
 
-  // One stats window has elapsed - the next drop should warn again.
-  enc->stat_window_drops = 0;
+// No lock required - operates only on the snapshot and the encoder's
+// immutable kind.
+static void
+encoder_stats_log(struct encoder_stats_snapshot *s, enum airplay_buffered_kind kind)
+{
+  DPRINTF(E_DBG, L_AIRPLAY, "Encoder (kind %d): %u quanta, %u frames, avg %" PRIu64 " us, max %" PRIu64 " us, queue hw %u ms\n",
+          kind, s->quanta, s->frames, s->avg_us, s->max_us, s->queue_hw_ms);
 }
 
 // Frees a detached frame list. The list must already be unlinked from the
@@ -140,6 +172,7 @@ encoder_thread_run(void *arg)
   struct airplay_encoded_frame *frames_tail;
   struct airplay_encoded_frame *next;
   transcode_frame *xframe;
+  struct encoder_stats_snapshot stats;
   struct timespec t0;
   struct timespec t1;
   uint32_t gen;
@@ -210,7 +243,12 @@ encoder_thread_run(void *arg)
         {
           // Not enough input samples yet to complete an encoded frame (AAC
           // accumulates to a 1024-sample frame).
-          encoder_stats_log(enc);
+          if (encoder_stats_snapshot_take(enc, &stats))
+            {
+              pthread_mutex_unlock(&enc->lock);
+              encoder_stats_log(&stats, enc->kind);
+              pthread_mutex_lock(&enc->lock);
+            }
           continue;
         }
 
@@ -304,7 +342,12 @@ encoder_thread_run(void *arg)
           encoder_frame_list_free(frames_head);
         }
 
-      encoder_stats_log(enc);
+      if (encoder_stats_snapshot_take(enc, &stats))
+        {
+          pthread_mutex_unlock(&enc->lock);
+          encoder_stats_log(&stats, enc->kind);
+          pthread_mutex_lock(&enc->lock);
+        }
     }
 
   pthread_mutex_unlock(&enc->lock);
@@ -366,7 +409,6 @@ airplay_encoder_start(struct airplay_encoder **enc_p, enum airplay_buffered_kind
   enc->kind = kind;
   enc->quality = *quality;
   enc->quantum_bytes = STOB(ENCODER_SAMPLES_PER_QUANTUM, quality->bits_per_sample, quality->channels);
-  enc->queue_max_samples = (uint32_t)((uint64_t)quality->sample_rate * ENCODER_QUEUE_MAX_MS / 1000);
 
   enc->rawbuf = malloc(enc->quantum_bytes);
   enc->encoded_buffer = evbuffer_new();
@@ -410,6 +452,7 @@ airplay_encoder_stop(struct airplay_encoder **enc_p)
   struct airplay_encoder *enc = *enc_p;
   uint64_t avg_us;
   uint64_t max_us;
+  uint32_t queue_hw_ms;
 
   if (!enc)
     return;
@@ -421,10 +464,13 @@ airplay_encoder_stop(struct airplay_encoder **enc_p)
 
   pthread_join(enc->tid, NULL);
 
+  // The worker thread has exited, so enc is now only touched by this
+  // (the caller's) thread and no lock is needed to read it.
   avg_us = enc->stat_quanta ? (enc->stat_encode_ns_total / enc->stat_quanta) / 1000 : 0;
   max_us = enc->stat_encode_ns_max / 1000;
-  DPRINTF(E_INFO, L_AIRPLAY, "Encoder (kind %d) stopped: %u quanta, %u frames, avg %" PRIu64 " us, max %" PRIu64 " us, queue hw %u samples, drops %u\n",
-          enc->kind, enc->stat_quanta, enc->stat_frames, avg_us, max_us, enc->stat_queue_highwater_samples, enc->stat_drops);
+  queue_hw_ms = (uint32_t)((uint64_t)enc->stat_queue_highwater_samples * 1000 / enc->quality.sample_rate);
+  DPRINTF(E_INFO, L_AIRPLAY, "Encoder (kind %d) stopped: %u quanta, %u frames, avg %" PRIu64 " us, max %" PRIu64 " us, queue hw %u ms\n",
+          enc->kind, enc->stat_quanta, enc->stat_frames, avg_us, max_us, queue_hw_ms);
 
   transcode_encode_cleanup(&enc->encode_ctx);
   free(enc->rawbuf);
@@ -441,20 +487,21 @@ airplay_encoder_stop(struct airplay_encoder **enc_p)
 void
 airplay_encoder_pcm_write(struct airplay_encoder *enc, uint8_t *buf, size_t bufsize, int samples)
 {
-  bool warn_drop = false;
+  struct timespec now;
+  uint32_t backlog_ms;
+  uint32_t warn_peak_ms = 0;
+  bool log_failed = false;
+  bool log_stall = false;
 
   pthread_mutex_lock(&enc->lock);
 
-  while (enc->pcm_samples + (uint32_t)samples > enc->queue_max_samples && enc->pcm_samples >= ENCODER_SAMPLES_PER_QUANTUM)
+  // Once failed, the encoder thread has (or is about to have) torn itself
+  // down and the caller is tearing down the sessions above us; there is no
+  // point queuing more PCM that will never be encoded.
+  if (enc->failed)
     {
-      evbuffer_drain(enc->pcm, enc->quantum_bytes);
-      enc->pcm_samples -= ENCODER_SAMPLES_PER_QUANTUM;
-      enc->stat_drops++;
-      enc->stat_window_drops++;
-      if (enc->stat_window_drops == 1)
-        warn_drop = true;
-      if (enc->stat_window_drops > ENCODER_DROP_FAIL_THRESHOLD)
-        enc->failed = true;
+      pthread_mutex_unlock(&enc->lock);
+      return;
     }
 
   evbuffer_add(enc->pcm, buf, bufsize);
@@ -462,11 +509,49 @@ airplay_encoder_pcm_write(struct airplay_encoder *enc, uint8_t *buf, size_t bufs
   if (enc->pcm_samples > enc->stat_queue_highwater_samples)
     enc->stat_queue_highwater_samples = enc->pcm_samples;
 
+  backlog_ms = (uint32_t)((uint64_t)enc->pcm_samples * 1000 / enc->quality.sample_rate);
+
+  if (backlog_ms > ENCODER_QUEUE_FAIL_MS)
+    {
+      // Sustained overload, not a stall we can catch up from: latch failed
+      // so the caller tears the sessions down instead of the queue growing
+      // without bound. Log once, on the transition.
+      enc->failed = true;
+      log_failed = true;
+    }
+  else if (backlog_ms > ENCODER_STALL_WARN_MS)
+    {
+      if (enc->pcm_samples > enc->stall_warn_peak_samples)
+        enc->stall_warn_peak_samples = enc->pcm_samples;
+
+      // clock_gettime() is only worth its cost while we're actually in (or
+      // considering warning about) a stall, which should be rare.
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      if (!enc->stall_warned || timespec_diff_ns(&enc->stall_warn_last, &now) >= (uint64_t)ENCODER_STALL_WARN_INTERVAL_S * 1000000000UL)
+        {
+          log_stall = true;
+          warn_peak_ms = (uint32_t)((uint64_t)enc->stall_warn_peak_samples * 1000 / enc->quality.sample_rate);
+          enc->stall_warned = true;
+          enc->stall_warn_last = now;
+          enc->stall_warn_peak_samples = 0;
+        }
+    }
+  else
+    {
+      // Backlog is back under the warn threshold: re-arm, so a later,
+      // distinct stall warns right away (subject to the interval below)
+      // instead of being silenced by this one's rate limit.
+      enc->stall_warned = false;
+      enc->stall_warn_peak_samples = 0;
+    }
+
   pthread_cond_signal(&enc->cond);
   pthread_mutex_unlock(&enc->lock);
 
-  if (warn_drop)
-    DPRINTF(E_WARN, L_AIRPLAY, "Encoder (kind %d): PCM in-queue full, dropping oldest audio\n", enc->kind);
+  if (log_failed)
+    DPRINTF(E_LOG, L_AIRPLAY, "Encoder (kind %d): PCM backlog %u ms exceeds the hard limit, failing\n", enc->kind, backlog_ms);
+  else if (log_stall)
+    DPRINTF(E_WARN, L_AIRPLAY, "Encoder (kind %d): PCM backlog %u ms, catching up\n", enc->kind, warn_peak_ms);
 }
 
 struct airplay_encoded_frame *
@@ -507,6 +592,12 @@ airplay_encoder_flush(struct airplay_encoder *enc)
   encoder_frame_list_free(enc->frames_head);
   enc->frames_head = NULL;
   enc->frames_tail = NULL;
+
+  // The queue is empty, so any earlier stall is over; a later one is a
+  // distinct event and should warn on its own terms.
+  enc->stall_warned = false;
+  memset(&enc->stall_warn_last, 0, sizeof(enc->stall_warn_last));
+  enc->stall_warn_peak_samples = 0;
 
   pthread_mutex_unlock(&enc->lock);
 }

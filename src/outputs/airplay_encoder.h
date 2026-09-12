@@ -49,9 +49,11 @@ airplay_encoder_start(struct airplay_encoder **enc, enum airplay_buffered_kind k
 void
 airplay_encoder_stop(struct airplay_encoder **enc);
 
-// Player thread. Copies PCM into the bounded in-queue; never blocks. On
-// overflow drops the OLDEST whole quanta first (buffered audio tolerates
-// this). samples must describe buf per quality given at start.
+// Player thread. Copies PCM into the in-queue; never blocks and never drops
+// audio to catch up. The queue is only bounded as a memory backstop against
+// sustained overload: past that point pcm_write() stops queuing and the
+// encoder is marked failed (airplay_encoder_failed()) so the caller tears
+// its sessions down. samples must describe buf per quality given at start.
 void
 airplay_encoder_pcm_write(struct airplay_encoder *enc, uint8_t *buf, size_t bufsize, int samples);
 
