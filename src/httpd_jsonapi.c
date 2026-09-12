@@ -1064,6 +1064,10 @@ struct httpd_module httpd_jsonapi =
   .name = "JSON API",
   .type = MODULE_JSONAPI,
   .logdomain = L_WEB,
+  // Clients poll this API (now-playing status etc.) far more often than the
+  // other httpd modules, so its per-request line in httpd.c is quieter than
+  // the E_DBG default to avoid drowning out everything else at that level.
+  .req_log_severity = E_SPAM,
   .subpaths = { "/api/", NULL },
   .handlers = adm_handlers,
   .init = jsonapi_init,

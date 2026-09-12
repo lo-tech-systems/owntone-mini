@@ -349,7 +349,7 @@ request_async_cb(void *arg)
 {
   struct httpd_request *hreq = *(struct httpd_request **)arg;
 
-  DPRINTF(E_DBG, hreq->module->logdomain, "%s request '%s'\n", hreq->module->name, hreq->uri);
+  DPRINTF(hreq->module->req_log_severity ? hreq->module->req_log_severity : E_DBG, hreq->module->logdomain, "%s request '%s'\n", hreq->module->name, hreq->uri);
 
   // Some handlers require an evbase to schedule events
   hreq->evbase = worker_evbase_get();
@@ -385,7 +385,7 @@ request_cb(struct httpd_request *hreq, void *arg)
     }
   else if (hreq->module)
     {
-      DPRINTF(E_DBG, hreq->module->logdomain, "%s request: '%s'\n", hreq->module->name, hreq->uri);
+      DPRINTF(hreq->module->req_log_severity ? hreq->module->req_log_severity : E_DBG, hreq->module->logdomain, "%s request: '%s'\n", hreq->module->name, hreq->uri);
       hreq->evbase = httpd_backend_evbase_get(hreq->backend);
       hreq->module->request(hreq);
     }

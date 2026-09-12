@@ -11,6 +11,18 @@ ExecStart=@sbindir@/owntone -f
 # autostream_monitor.service for the rest of the ladder.
 Nice=-12
 
+# Allow the process to lock its pages in RAM (mlockall(), done once it has
+# dropped root) so the audio threads don't stall on page faults under
+# memory pressure.
+#
+# Locked pages can't be swapped out, so once locked, MemorySwapMax below is
+# not usable headroom for this process -- MemoryMax is the effective
+# ceiling. Separately, many Raspberry Pi kernels boot with the memory
+# cgroup controller disabled, in which case neither MemoryMax nor
+# MemorySwapMax is enforced at all; mlockall() itself doesn't depend on
+# that controller.
+LimitMEMLOCK=infinity
+
 # Constrain the upper limit of memory/swap that can be used; this prevents 
 # the server from consuming all system memory (in event of bug/malformed user
 # curl/SMARTPL query etc) that would hang/freeze low resource and headless (ie 

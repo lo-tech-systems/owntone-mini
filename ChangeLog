@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- change: log lines are now written by a dedicated background thread, and
+  repetitive messages are throttled, so the audio threads never wait on a
+  slow log file/disk
+- change: the server now locks its process memory once it has dropped
+  privileges, so the audio threads aren't delayed by page faults under
+  memory pressure. Requires `LimitMEMLOCK=infinity` in the service unit
+  (set in the bundled unit file; existing installs need a redeploy of it).
+  Locked memory can't be swapped, so `MemoryMax` becomes the effective
+  ceiling rather than `MemoryMax` plus `MemorySwapMax`
 - change: the pipe input buffer is now sized by duration (3 seconds),
   whatever the stream's sample rate or bit depth, instead of a fixed byte
   count that meant only 1 second of buffering once 32-bit pipe input was

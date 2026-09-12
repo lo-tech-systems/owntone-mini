@@ -117,6 +117,13 @@ struct httpd_module
   enum httpd_modules type;
   char initialized;
   int logdomain;
+  // Severity for the generic per-request line logged in httpd.c. 0 doubles
+  // as E_FATAL, but no module would want every request logged at that
+  // severity, so 0 is repurposed here to mean "unset": that line logs at
+  // E_DBG as before. A module can lower it (e.g. JSON API, polled every
+  // second or so by clients) so its request noise doesn't compete with
+  // everything else at debug level.
+  int req_log_severity;
 
   // Null-terminated list of URL subpath that the module accepts e.g., /subpath/morepath/file.mp3
   const char *subpaths[16];

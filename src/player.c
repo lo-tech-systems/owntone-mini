@@ -1189,7 +1189,53 @@ playback_cb(int fd, short what, void *arg)
   else
     {
       if (overrun > 1) // An overrun of 1 is no big deal
-	DPRINTF(E_WARN, L_PLAYER, "Output delay detected: player is %" PRIu64 " ticks behind, catching up\n", overrun);
+	{
+	  // This fires once per catch-up, which can be as often as every tick
+	  // under sustained output pressure, so it is throttled to one line
+	  // per 5 seconds. Unlike DPRINTF_THROTTLED(), the summary line
+	  // reports the worst overrun seen during the suppressed window
+	  // rather than just a count, since that is the more useful number
+	  // here -- so this call site keeps its own static state instead of
+	  // using the generic macro. playback_cb() only ever runs on the
+	  // player thread, so no locking is needed for it.
+	  static unsigned int pb_delay_last_emit;
+	  static unsigned int pb_delay_suppressed;
+	  static uint64_t pb_delay_max_overrun;
+	  unsigned int pb_delay_now;
+
+	  // Gate on the same check DPRINTF() applies internally, so that when
+	  // E_WARN/L_PLAYER is filtered out this costs nothing beyond that
+	  // check -- and so the clock is never read for a line that will not
+	  // be logged anyway.
+	  if (logger_wants(E_WARN, L_PLAYER))
+	    {
+	      if (overrun > pb_delay_max_overrun)
+		pb_delay_max_overrun = overrun;
+
+	      // Monotonic, not time(NULL): a wall-clock step (NTP, DST, a
+	      // manual clock set) must not be able to stall this throttle
+	      // open or make it fire early.
+	      pb_delay_now = logger_now_s();
+	      // pb_delay_last_emit == 0 means "never emitted", not a real
+	      // timestamp: the clock counts from boot, so without this check
+	      // a first hit landing within 5 seconds of boot would otherwise
+	      // be wrongly suppressed.
+	      if (pb_delay_last_emit == 0 || pb_delay_now - pb_delay_last_emit >= 5)
+		{
+		  if (pb_delay_suppressed > 0)
+		    DPRINTF(E_WARN, L_PLAYER, "Output delay detected: player is %" PRIu64 " ticks behind, catching up (max %" PRIu64 " ticks, %u similar suppressed)\n",
+			    overrun, pb_delay_max_overrun, pb_delay_suppressed);
+		  else
+		    DPRINTF(E_WARN, L_PLAYER, "Output delay detected: player is %" PRIu64 " ticks behind, catching up\n", overrun);
+
+		  pb_delay_last_emit = pb_delay_now;
+		  pb_delay_suppressed = 0;
+		  pb_delay_max_overrun = 0;
+		}
+	      else
+		pb_delay_suppressed++;
+	    }
+	}
 
       pb_write_recovery = false;
     }
@@ -1229,7 +1275,9 @@ playback_cb(int fd, short what, void *arg)
 	  ts.tv_sec = 0;
 	  ts.tv_nsec = 1000000000UL * (uint64_t)nsamples / pb_session.quality.sample_rate;
 
-	  DPRINTF(E_DBG, L_PLAYER, "Incomplete read, wanted %zu, got %d (samples=%d/time=%lu), deficit %zu\n", pb_session.bufsize, nbytes, nsamples, ts.tv_nsec, pb_session.read_deficit);
+	  // Can fire on every tick while the source is running dry, so throttled
+	  // to one line per 5 seconds (see DPRINTF_THROTTLED() in logger.h).
+	  DPRINTF_THROTTLED(5, E_DBG, L_PLAYER, "Incomplete read, wanted %zu, got %d (samples=%d/time=%lu), deficit %zu", pb_session.bufsize, nbytes, nsamples, ts.tv_nsec, pb_session.read_deficit);
 
 	  pb_session.pts = timespec_add(pb_session.pts, ts);
 	}

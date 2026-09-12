@@ -37,6 +37,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/mman.h>
 #include <signal.h>
 #include <limits.h>
 #include <grp.h>
@@ -206,6 +207,31 @@ daemonize(bool background, char *pidfile)
     }
 
   return 0;
+}
+
+// Pin the process's pages in RAM so the real-time audio threads don't stall
+// on page faults if the system comes under memory pressure and starts
+// reclaiming file-backed/swapped pages. MCL_ONFAULT locks pages only as
+// they are actually touched, so the cost is the process's working set
+// rather than every mapped page (the unused parts of libraries stay
+// unlocked); MCL_FUTURE extends that to memory allocated later on. Must be
+// called after daemonize() -- locks are not inherited across its fork() --
+// and needs the unit's LimitMEMLOCK raised, since the daemon drops root
+// privileges shortly after this runs.
+static void
+lock_process_memory(void)
+{
+#ifdef MCL_ONFAULT
+  int ret;
+
+  ret = mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT);
+  if (ret < 0)
+    DPRINTF(E_WARN, L_MAIN, "Could not lock process memory: %s\n", strerror(errno));
+  else
+    DPRINTF(E_LOG, L_MAIN, "Locked process memory (pages pinned once touched)\n");
+#else
+  DPRINTF(E_WARN, L_MAIN, "mlockall(MCL_ONFAULT) not available on this platform; process memory will not be locked\n");
+#endif
 }
 
 
@@ -562,6 +588,12 @@ main(int argc, char **argv)
       ret = EXIT_FAILURE;
       goto daemon_fail;
     }
+
+  // Both of these must run after daemonize(): memory locks and the log
+  // writer thread are not inherited across its fork(), and need to be in
+  // place before the real-time worker threads (player, httpd) start below.
+  lock_process_memory();
+  logger_async_start();
 
   /* Initialize event base (after forking) */
   CHECK_NULL(L_MAIN, evbase_main = event_base_new());
