@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## Version 1.3.0
+
+Changes since 1.2.1:
 
 - fix: a memory leak on the encrypted AirPlay 2 control connection. Every
   encrypted request and decrypted response leaked its buffer, which added up
