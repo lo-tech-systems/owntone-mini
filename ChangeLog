@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- fix: a memory leak on the encrypted AirPlay 2 control connection. Every
+  encrypted request and decrypted response leaked its buffer, which added up
+  to several megabytes an hour on an Apple TV receiving now-playing updates
+  with artwork
 - change: log lines are now written by a dedicated background thread, and
   repetitive messages are throttled, so the audio threads never wait on a
   slow log file/disk

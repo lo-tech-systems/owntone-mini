@@ -1290,6 +1290,8 @@ rtsp_cipher(struct evbuffer *outbuf, struct evbuffer *inbuf, void *arg, int encr
 
   evbuffer_drain(inbuf, processed);
   evbuffer_add(outbuf, out, out_len);
+  // evbuffer_add() copies; the cipher output is ours to free
+  free(out);
 
   return 0;
 
