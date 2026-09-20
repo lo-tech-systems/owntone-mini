@@ -56,9 +56,11 @@
   "</body>\n</html>\n"
 
 extern struct httpd_module httpd_jsonapi;
+extern struct httpd_module httpd_dacp;
 
 static struct httpd_module *httpd_modules[] = {
     &httpd_jsonapi,
+    &httpd_dacp,
     NULL
 };
 

@@ -17,6 +17,7 @@
 #define L_FFMPEG      14
 #define L_PLAYER      16
 #define L_RAOP        17
+#define L_DACP        18
 #define L_WEB         29
 #define L_AIRPLAY     30
 

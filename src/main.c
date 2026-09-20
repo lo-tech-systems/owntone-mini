@@ -42,6 +42,7 @@
 #include <limits.h>
 #include <grp.h>
 #include <stdint.h>
+#include <inttypes.h>
 
 #ifdef HAVE_SIGNALFD
 # include <sys/signalfd.h>
@@ -639,6 +640,22 @@ main(int argc, char **argv)
       ret = EXIT_FAILURE;
       goto httpd_fail;
     }
+
+  // Advertise the classic DACP control service so AirPlay receivers can
+  // find their way back to us to report a volume change made on the
+  // receiver itself. The group name has to be this exact format for
+  // receivers to recognize it. Not fatal if it fails - it just means
+  // receivers won't discover the endpoint.
+  {
+    char dacp_name[32];
+    char *txt[] = { "txtvers=1", "Ver=131077", "DbId=1", "OSsi=0x2012E", NULL };
+
+    snprintf(dacp_name, sizeof(dacp_name), "iTunes_Ctrl_%016" PRIX64, libhash);
+
+    ret = mdns_register(dacp_name, "_dacp._tcp", config_get_int("port", 3689), txt);
+    if (ret < 0)
+      DPRINTF(E_LOG, L_MAIN, "Could not register DACP control service via mDNS\n");
+  }
 
 #ifdef HAVE_SIGNALFD
   /* Set up signal fd */

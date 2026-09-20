@@ -44,6 +44,7 @@ owntone_SOURCES = main.c \
 	httpd_libevhttp.c \
 	httpd.c httpd.h httpd_internal.h \
 	httpd_jsonapi.c \
+	httpd_dacp.c \
 	transcode.c transcode.h \
 	misc.c misc.h \
 	misc_json.c misc_json.h \

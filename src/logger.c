@@ -65,7 +65,7 @@ static uint32_t logger_repeat_counter;
 static uint32_t logger_last_hash;
 static char *logfilename;
 static FILE *logfile;
-static char *labels[] = { "config", "-", "-", "httpd", "-", "main", "mdns", "misc", "-", "-", "xcode", "event", "-", "-", "ffmpeg", "-", "player", "raop", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "web", "airplay", "-" };
+static char *labels[] = { "config", "-", "-", "httpd", "-", "main", "mdns", "misc", "-", "-", "xcode", "event", "-", "-", "ffmpeg", "-", "player", "raop", "dacp", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "web", "airplay", "-" };
 static char *severities[] = { "FATAL", "LOG", "WARN", "INFO", "DEBUG", "SPAM" };
 static char *format_labels[] = { "default", "logfmt" };
 

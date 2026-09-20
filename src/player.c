@@ -3358,6 +3358,9 @@ volume_setraw_speaker(void *arg, int *retval)
       return COMMAND_END;
     }
 
+  // Apply to the whole group, not just this device - a volume reported by
+  // a HomePod group's Apple TV leader should be reflected on its followers
+  // too, the same way a volume set by a client is.
   *retval = speaker_group_volume_set(device, volume, -1, device_volume_cb);
 
   if (*retval > 0)
