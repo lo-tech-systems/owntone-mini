@@ -145,6 +145,13 @@ struct output_group
 
 static struct output_group *outputs_group_list;
 
+// Forward declarations: group_types_reapply() below needs the effective-type
+// resolution logic, which is defined further down the file.
+static enum output_types
+effective_type_resolve(struct output_device *device);
+static void
+effective_candidate_apply(struct output_device *canonical);
+
 
 /* ----------------------------- Mode helpers ------------------------------- */
 
@@ -203,6 +210,30 @@ output_group_free_all(void)
   outputs_group_list = NULL;
 }
 
+// Resets the membership fields that output_group_refresh() recomputes on
+// every pass (member_ids, members_count, leader_known, leader_id and name),
+// while keeping the struct itself - and its id and last_logged_* fields - so
+// a group that is still present after the rebuild is recognised as unchanged
+// and its "state updated" logging is not re-triggered on every mDNS refresh.
+static void
+output_group_reset_all(void)
+{
+  struct output_group *group;
+
+  for (group = outputs_group_list; group; group = group->next)
+    {
+      free(group->member_ids);
+      group->member_ids = NULL;
+      group->members_count = 0;
+
+      group->leader_known = false;
+      group->leader_id = 0;
+
+      free(group->name);
+      group->name = NULL;
+    }
+}
+
 static struct output_group *
 output_group_find_or_add(const char *group_id)
 {
@@ -230,6 +261,39 @@ output_group_member_add(struct output_group *group, uint64_t device_id)
   CHECK_NULL(L_PLAYER, member_ids = realloc(group->member_ids, (group->members_count + 1) * sizeof(uint64_t)));
   group->member_ids = member_ids;
   group->member_ids[group->members_count++] = device_id;
+}
+
+// Removes groups that ended this pass' rebuild with no members left (e.g. a
+// group's last member was removed by mDNS), freeing the struct outright -
+// unlike output_group_reset_all(), which keeps a still-present group's struct
+// around for its last_logged_* fields.
+static void
+output_group_prune_empty(void)
+{
+  struct output_group *group;
+  struct output_group *prev = NULL;
+  struct output_group *next;
+
+  for (group = outputs_group_list; group; group = next)
+    {
+      next = group->next;
+      if (group->members_count == 0)
+        {
+          if (prev)
+            prev->next = next;
+          else
+            outputs_group_list = next;
+
+          free(group->id);
+          free(group->name);
+          free(group->member_ids);
+          free(group);
+        }
+      else
+        {
+          prev = group;
+        }
+    }
 }
 
 // Clears only the computed group membership fields — those written by
@@ -309,6 +373,28 @@ candidate_promote_as_proxy_leader(struct output_device *tv_candidate,
     }
 }
 
+// Re-resolves and re-applies the effective output type for every device with
+// no active session. candidate_promote_as_proxy_leader() above can set
+// is_grouped on the Apple TV's candidate for the first time, which changes
+// what effective_type_resolve()'s group-cohesion rule returns for it - but
+// outputs_device_add() already resolved and applied the canonical device's
+// type before the group existed, so without this the Apple TV would stay on
+// the RAOP backend until its next mDNS re-advertisement.
+static void
+group_types_reapply(void)
+{
+  struct output_device *device;
+
+  for (device = outputs_device_list; device; device = device->next)
+    {
+      if (device->session)
+        continue;
+
+      if (effective_type_resolve(device) != device->type)
+        effective_candidate_apply(device);
+    }
+}
+
 static void
 output_group_refresh(void)
 {
@@ -353,7 +439,10 @@ output_group_refresh(void)
         }
     }
 
-  output_group_free_all();
+  // Reset rather than free+recreate the groups, so a group that survives this
+  // pass keeps its last_logged_* fields and the "state updated" log below
+  // only fires on a genuine change, not on every unchanged mDNS re-advertisement.
+  output_group_reset_all();
 
   for (device = outputs_device_list; device; device = device->next)
     {
@@ -443,7 +532,9 @@ output_group_refresh(void)
 
       candidate_promote_as_proxy_leader(tv_candidate, tv_device, group);
 
-      DPRINTF(E_INFO, L_PLAYER,
+      // Left at E_DBG: the "AirPlay stereo group state updated" log below
+      // already reports leader changes at E_INFO.
+      DPRINTF(E_DBG, L_PLAYER,
               "AirPlay TV proxy group: Apple TV '%s' (id=%" PRIu64 ") linked as leader for HomePod group gid=%s, name='%s'\n",
               tv_device->name, tv_device->id, group->id, group->name ? group->name : "(unknown)");
     }
@@ -528,6 +619,15 @@ output_group_refresh(void)
           group->last_logged_state_valid = true;
         }
     }
+
+  // A group that lost its last member during output_group_reset_all() above
+  // and was never rebuilt is now dead weight; drop it.
+  output_group_prune_empty();
+
+  // The synthetic leader promotion above may have changed how the leader's
+  // canonical device should resolve; bring it (and anything else affected) up
+  // to date immediately rather than waiting for the next mDNS pass.
+  group_types_reapply();
 }
 
 static struct output_device *
@@ -808,18 +908,26 @@ effective_candidate_apply(struct output_device *canonical)
                 candidate->name, candidate->type_name);
     }
 
+  // requires_auth reflects whichever backend the canonical is switching to:
+  // RAOP learns it from the mDNS TXT record at discovery, so the candidate is
+  // authoritative for it. AirPlay 2 instead learns it at runtime, mid-session
+  // (HomeKit PIN pairing need surfaces there, not from mDNS), so switching
+  // onto AirPlay 2 must start clear rather than inherit whatever a previous
+  // RAOP candidate carried; re-applying the same AirPlay 2 candidate must not
+  // clobber a value already learned at runtime, so that case is left alone.
+  // canonical->type still holds the pre-switch type here - it is only
+  // overwritten below.
+  if (candidate->type == OUTPUT_TYPE_RAOP)
+    canonical->requires_auth = candidate->requires_auth;
+  else if (canonical->type != OUTPUT_TYPE_AIRPLAY)
+    canonical->requires_auth = 0;
+
   canonical->type      = candidate->type;
   canonical->type_name = candidate->type_name;
 
   canonical->has_password  = candidate->has_password;
   canonical->password      = candidate->password;
   canonical->has_video     = candidate->has_video;
-  // requires_auth is sticky: AirPlay 2 learns it at runtime on the canonical
-  // (HomeKit PIN pairing need surfaces mid-session, not from mDNS), so a fresh
-  // candidate - which never carries it for AirPlay 2 - must not clear it. RAOP
-  // candidates may legitimately carry it from the mDNS TXT record, hence OR
-  // rather than a plain overwrite.
-  canonical->requires_auth = canonical->requires_auth || candidate->requires_auth;
   // v6_disabled is a permanent, sticky flag: once a backend has fallen back from
   // IPv6 to IPv4 (see start_retry) it must not be cleared by a later mDNS
   // re-advertisement, or the failed IPv6 endpoint would be retried indefinitely.
@@ -2522,4 +2630,6 @@ outputs_deinit(void)
 
   for (i = 0; i < ARRAY_SIZE(output_buffer.data); i++)
     evbuffer_free(output_buffer.data[i].evbuf);
+
+  output_group_free_all();
 }

@@ -125,6 +125,7 @@ struct output_device
   char *group_name;
   char *raw_gid;        // Raw mDNS gid, used to cross-reference TV proxy groups
   uint64_t group_leader_id;
+  unsigned tv_proxy_reconnects;  // Automatic leader reconnects since it last streamed
 
   // Type of the device, will be used to determine which output backend to call
   enum output_types type;
@@ -145,6 +146,10 @@ struct output_device
   unsigned has_password:1;
   unsigned has_video:1;
   unsigned requires_auth:1;
+  // Set when a session start ended in OUTPUT_STATE_PASSWORD (the device has
+  // just asked for a PIN or password); cleared when a later start or
+  // authorize completes with any other state.
+  unsigned pin_pending:1;
   unsigned v6_disabled:1;
   unsigned prevent_playback:1;
   unsigned busy:1;

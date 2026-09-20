@@ -8,7 +8,20 @@
   once the Apple TV has connected, so playback is gated on the Apple TV the
   same way it is for an Apple sender. Previously the Apple TV was skipped on
   some paths and started on others, so the PIN prompt never surfaced and
-  artwork never reached the TV
+  artwork never reached the TV. The followers wait until the Apple TV is
+  actually streaming, and an Apple TV that drops its session before that
+  (some reject the first anchor of a fresh session) is reconnected a few
+  times automatically
+- fix: the Apple TV in such a group is kept on AirPlay 2 from the moment the
+  group is recognised, instead of possibly starting out on the classic
+  protocol whose pairing key AirPlay 2 cannot use
+- fix: switching a device from the classic protocol to AirPlay 2 no longer
+  carries over the "requires authentication" flag learned from the classic
+  protocol's discovery record, which made the device look as if it were
+  waiting for a PIN before any pairing had been attempted
+- change: the outputs API reports `pin_pending` while a device is actually
+  asking for a PIN, so clients can prompt at the right moment; the group
+  state logging no longer repeats on every unchanged discovery pass
 
 ## Version 1.3.0
 

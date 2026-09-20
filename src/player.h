@@ -38,6 +38,7 @@ struct player_speaker_info {
   bool has_password;
   bool requires_auth;
   bool needs_auth_key;
+  bool pin_pending;
 
   bool prevent_playback;
   bool busy;

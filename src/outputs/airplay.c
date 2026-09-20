@@ -531,6 +531,9 @@ struct airplay_session
   // alive (a failed data write kills the session), and it makes anchor and
   // data failures distinguishable in the logs.
   bool anchor_confirmed;
+  // Set once session_streaming_report() has told the player
+  // OUTPUT_STATE_STREAMING for this session, so it is only reported once.
+  bool streaming_reported;
   // The rtptime named by this session's anchor - delivery starts exactly at
   // this frame (see the gate in buffered_frame_send). Equals the write head
   // for a first/frozen anchor, or a slightly-future join point when joining
@@ -1342,6 +1345,25 @@ session_status(struct airplay_session *session)
 
   outputs_cb(session->callback_id, session->device_id, state);
   session->callback_id = -1;
+}
+
+// Reports OUTPUT_STATE_STREAMING to the player once per session, when audio
+// is actually flowing: for a realtime session on the first write in
+// STREAMING state, for a buffered session once the receiver has accepted
+// the SETRATEANCHORTIME anchor. Deferred until the player has registered a
+// callback, so it is re-checked on every write.
+static void
+session_streaming_report(struct airplay_session *session)
+{
+  if (session->streaming_reported || session->state != AIRPLAY_STATE_STREAMING)
+    return;
+  if (session->buffered_mode && !session->anchor_confirmed)
+    return;
+  if (session->callback_id < 0)
+    return;
+
+  session->streaming_reported = true;
+  session_status(session);
 }
 
 static void
@@ -6950,7 +6972,8 @@ airplay_write(struct output_buffer *obuf)
 	  sequence_start(AIRPLAY_SEQ_SEND_ANCHOR, session, NULL, "anchor");
 	  session->anchor_pending = false;
 	}
-      // Make a cb?
+
+      session_streaming_report(session);
     }
 }
 

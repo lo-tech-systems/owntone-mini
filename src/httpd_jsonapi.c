@@ -549,6 +549,7 @@ speaker_to_json(struct player_speaker_info *spk)
   json_object_object_add(output, "has_password", json_object_new_boolean(spk->has_password));
   json_object_object_add(output, "requires_auth", json_object_new_boolean(spk->requires_auth));
   json_object_object_add(output, "needs_auth_key", json_object_new_boolean(spk->needs_auth_key));
+  json_object_object_add(output, "pin_pending", json_object_new_boolean(spk->pin_pending));
   json_object_object_add(output, "volume", json_object_new_int(spk->absvol));
   json_object_object_add(output, "offset_ms", json_object_new_int(spk->offset_ms));
   json_object_object_add(output, "format", json_object_new_string(media_format_to_string(spk->format)));
