@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## Version 1.4.0 - 2026-09-20
 
+- change: the player logs a fixed-size histogram of playback-tick jitter at
+  info level every 5 minutes while playing, summarising how late each tick
+  fired, to make player-thread scheduling gaps diagnosable
 - fix: the server no longer locks every page it will ever touch. Only the
   mappings present at startup are pinned, glibc is limited to two heaps, and
   the heap is trimmed when the last session ends, so the footprint no longer
