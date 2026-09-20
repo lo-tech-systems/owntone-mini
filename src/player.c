@@ -1155,6 +1155,26 @@ source_read(int *nbytes, int *nsamples, uint8_t *buf, int len)
   return 0;
 }
 
+// Player-thread tick jitter: a fixed-size histogram of how late each
+// playback tick fires relative to the nominal player_tick_interval.
+// Updated only from playback_cb(), which runs solely on the player thread
+// (see the note in that function), so plain non-atomic state is fine here.
+// Summarised to the log and reset every PB_JITTER_LOG_INTERVAL_SEC, rather
+// than kept forever, so this stays fixed-size and cheap - no heap
+// allocation, no unbounded growth over time.
+#define PB_JITTER_NBUCKETS 11
+#define PB_JITTER_LOG_INTERVAL_SEC 300
+
+static const uint32_t pb_jitter_edges_ms[PB_JITTER_NBUCKETS - 1] =
+  { 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000 };
+static const struct timespec pb_jitter_log_interval = { PB_JITTER_LOG_INTERVAL_SEC, 0 };
+
+static uint64_t pb_jitter_buckets[PB_JITTER_NBUCKETS];
+static uint64_t pb_jitter_ticks;
+static uint64_t pb_jitter_max_us;
+static struct timespec pb_jitter_last_tick;
+static struct timespec pb_jitter_last_log;
+
 static void
 playback_cb(int fd, short what, void *arg)
 {
@@ -1254,6 +1274,58 @@ playback_cb(int fd, short what, void *arg)
 	}
 
       pb_write_recovery = false;
+    }
+
+  // Player-thread tick jitter measurement (fixed-size histogram, see the
+  // static state above). Only reached for ticks that get past the delay
+  // reset/abort handling above, i.e. "normal" ticks.
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  if (pb_jitter_last_tick.tv_sec == 0 && pb_jitter_last_tick.tv_nsec == 0)
+    {
+      // First tick seen (or just (re)started): nothing to compare against
+      // yet, but seed the log window so it starts counting from here.
+      pb_jitter_last_log = ts;
+    }
+  else
+    {
+      struct timespec delta;
+      int64_t delta_us;
+      int64_t tick_us;
+      int64_t late_us;
+      int bucket;
+
+      delta = timespec_sub(ts, pb_jitter_last_tick);
+      delta_us = (int64_t)delta.tv_sec * 1000000L + delta.tv_nsec / 1000L;
+      tick_us = (int64_t)player_tick_interval.tv_sec * 1000000L + player_tick_interval.tv_nsec / 1000L;
+      late_us = delta_us - tick_us;
+      if (late_us < 0)
+	late_us = 0;
+
+      if ((uint64_t)late_us > pb_jitter_max_us)
+	pb_jitter_max_us = (uint64_t)late_us;
+
+      for (bucket = 0; bucket < PB_JITTER_NBUCKETS - 1; bucket++)
+	if (late_us < (int64_t)pb_jitter_edges_ms[bucket] * 1000L)
+	  break;
+
+      pb_jitter_buckets[bucket]++;
+      pb_jitter_ticks++;
+    }
+  pb_jitter_last_tick = ts;
+
+  if (pb_jitter_ticks > 0 && timespec_cmp(timespec_sub(ts, pb_jitter_last_log), pb_jitter_log_interval) >= 0)
+    {
+      DPRINTF(E_INFO, L_PLAYER, "tick jitter (last %ds): ticks=%" PRIu64 " max=%.1fms buckets[<1,1-2,2-5,5-10,10-20,20-50,50-100,100-200,200-500,500-1k,>1k]="
+	      "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n",
+	      PB_JITTER_LOG_INTERVAL_SEC, pb_jitter_ticks, pb_jitter_max_us / 1000.0,
+	      pb_jitter_buckets[0], pb_jitter_buckets[1], pb_jitter_buckets[2], pb_jitter_buckets[3], pb_jitter_buckets[4],
+	      pb_jitter_buckets[5], pb_jitter_buckets[6], pb_jitter_buckets[7], pb_jitter_buckets[8], pb_jitter_buckets[9],
+	      pb_jitter_buckets[10]);
+
+      memset(pb_jitter_buckets, 0, sizeof(pb_jitter_buckets));
+      pb_jitter_ticks = 0;
+      pb_jitter_max_us = 0;
+      pb_jitter_last_log = ts;
     }
 
 #ifdef DEBUG_PLAYER
