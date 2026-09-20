@@ -116,10 +116,10 @@
 // with Homepods and ATV4's dropping connections, so it is also a workaround.
 #define PLAYER_SPEAKER_RESURRECT_TIME 5
 
-// Some Apple TVs reject the first anchor after a fresh session and close the
-// connection, then accept a second session a few seconds later. A TV proxy
-// group leader that drops its session is reconnected after this many
-// seconds, for at most this many consecutive attempts.
+// An Apple TV leading a HomePod group commonly closes its first session
+// shortly after the HomePods join, then accepts a new session a few seconds
+// later. A TV proxy group leader that drops its session is reconnected after
+// this many seconds, for at most this many consecutive attempts.
 #define PLAYER_TV_PROXY_RECONNECT_TIME 3
 #define PLAYER_TV_PROXY_RECONNECT_MAX 3
 
@@ -143,10 +143,12 @@
 // and every start path talks to it. The HomePod members are hidden followers
 // that no start path may touch directly - tv_proxy_follower_skip() gates
 // this - and are instead started by tv_proxy_followers_start() once the
-// Apple TV's session reports OUTPUT_STATE_STREAMING, i.e. audio is actually
-// flowing, not merely connected. Followers are stopped together with the
-// leader, and volume commands go to the leader and then fan out to the
-// followers.
+// Apple TV's session reports connected, i.e. pairing has succeeded. The Apple
+// TV commonly drops that first session once the HomePods join and is
+// reconnected automatically (see PLAYER_TV_PROXY_RECONNECT_TIME); the
+// reconnect budget is reset once it streams. Followers are stopped together
+// with the leader, and volume commands go to the leader and then fan out to
+// the followers.
 
 //#define DEBUG_PLAYER 1
 
@@ -1535,11 +1537,10 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
       if (outputs_sessions_count() == 0 && pb_session.playing_now->data_kind != DATA_KIND_PIPE)
 	pb_suspend();
 
-      // Some Apple TVs reject the first anchor after a fresh session and
-      // close the connection, then accept a second session a few seconds
-      // later. Reconnect the leader directly, bounded by
-      // PLAYER_TV_PROXY_RECONNECT_MAX; the counter is reset in
-      // tv_proxy_followers_start() once the leader streams, so the retries
+      // The Apple TV leading a group commonly closes its first session once
+      // the HomePods join, then accepts a new one a few seconds later.
+      // Reconnect the leader directly, bounded by PLAYER_TV_PROXY_RECONNECT_MAX;
+      // the counter is reset below once the leader streams, so the retries
       // are bounded per outage.
       if (outputs_device_is_tv_proxy_group(device) && outputs_device_is_stereo_leader(device) && device->selected
           && device->tv_proxy_reconnects < PLAYER_TV_PROXY_RECONNECT_MAX)
@@ -1569,7 +1570,11 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
       outputs_device_cb_set(device, device_streaming_cb);
 
       if (status == OUTPUT_STATE_STREAMING)
-	tv_proxy_followers_start(device);
+	{
+	  // Audio is flowing, so the leader's reconnect budget starts afresh
+	  device->tv_proxy_reconnects = 0;
+	  tv_proxy_followers_start(device);
+	}
     }
 
  out:
@@ -1659,10 +1664,12 @@ device_shutdown_cb(struct output_device *device, enum output_device_state status
 }
 
 // Starts the hidden followers of a TV proxy group once the leader (the Apple
-// TV) is actually streaming audio. Called from device_activate_cb() and
-// device_streaming_cb() when the leader's session reports
-// OUTPUT_STATE_STREAMING. A follower that fails to start is logged and
-// skipped - it must not affect the leader's session or the pending command.
+// TV) has connected, i.e. its pairing succeeded. Called from
+// device_activate_cb() when the leader's session reports connected (or
+// streaming), and again from device_streaming_cb() when it reports streaming,
+// which restarts any follower that was lost in between. A follower that fails to start is logged
+// and skipped - it must not affect the leader's session or the pending
+// command.
 static void
 tv_proxy_followers_start(struct output_device *leader)
 {
@@ -1674,10 +1681,6 @@ tv_proxy_followers_start(struct output_device *leader)
     return;
   if (player_state != PLAY_PLAYING)
     return;
-
-  // The leader is confirmed streaming, so any past failed-session attempts
-  // are behind it; give a future drop a fresh set of reconnect attempts.
-  leader->tv_proxy_reconnects = 0;
 
   group_id = outputs_device_group_id(leader);
   if (!group_id)
@@ -1701,7 +1704,7 @@ tv_proxy_followers_start(struct output_device *leader)
       if (cur->session)
 	continue;
 
-      DPRINTF(E_INFO, L_PLAYER, "TV proxy: Apple TV '%s' streaming, starting follower '%s'\n",
+      DPRINTF(E_INFO, L_PLAYER, "TV proxy: Apple TV '%s' up, starting follower '%s'\n",
               outputs_device_display_name(leader), outputs_device_display_name(cur));
 
       ret = outputs_device_start(cur, device_streaming_cb, false);
@@ -1758,12 +1761,12 @@ device_activate_cb(struct output_device *device, enum output_device_state status
   // completion of) a successful activation, so a PIN is no longer pending.
   device->pin_pending = 0;
 
-  // Once the Apple TV's session is actually streaming audio, bring its hidden
+  // Once the Apple TV's session is up (pairing done), bring its hidden
   // HomePod followers online too. This is a no-op unless device is a TV proxy
   // group leader, and tv_proxy_followers_start() itself checks player_state,
   // so a probe (which never reaches PLAY_PLAYING) will not start any
   // followers here.
-  if (status == OUTPUT_STATE_STREAMING)
+  if (status == OUTPUT_STATE_CONNECTED || status == OUTPUT_STATE_STREAMING)
     tv_proxy_followers_start(device);
 
   // If we were just probing or doing device verification this is a no-op, since

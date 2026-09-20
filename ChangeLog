@@ -8,10 +8,9 @@
   once the Apple TV has connected, so playback is gated on the Apple TV the
   same way it is for an Apple sender. Previously the Apple TV was skipped on
   some paths and started on others, so the PIN prompt never surfaced and
-  artwork never reached the TV. The followers wait until the Apple TV is
-  actually streaming, and an Apple TV that drops its session before that
-  (some reject the first anchor of a fresh session) is reconnected a few
-  times automatically
+  artwork never reached the TV. The Apple TV commonly drops its first
+  session once the HomePods join; it is reconnected automatically a few
+  seconds later
 - fix: the Apple TV in such a group is kept on AirPlay 2 from the moment the
   group is recognised, instead of possibly starting out on the classic
   protocol whose pairing key AirPlay 2 cannot use
