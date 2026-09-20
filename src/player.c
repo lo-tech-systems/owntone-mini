@@ -2820,11 +2820,10 @@ speaker_get_byactiveremote(void *arg, int *retval)
   struct output_device *device;
   uint32_t i;
 
+  // Hidden group members are addressed by their own Active-Remote as well,
+  // so this lookup does not filter on visibility; only the index does.
   for (device = outputs_list(), i = 0; device; device = device->next)
     {
-      if (!speaker_visible(device))
-        continue;
-
       if ((uint32_t)device->id == spk_param->active_remote)
 	{
 	  device_to_speaker_info(spk_param->spk_info, device, i);
@@ -2832,7 +2831,8 @@ speaker_get_byactiveremote(void *arg, int *retval)
 	  return COMMAND_END;
 	}
 
-      i++;
+      if (speaker_visible(device))
+        i++;
     }
 
   // No output device found with matching id
@@ -3335,6 +3335,33 @@ volume_setabs_speaker(void *arg, int *retval)
   return COMMAND_END;
 }
 
+// Records a volume on every member of device's group without sending it to
+// any of them. Used for a level the devices report themselves: they already
+// play at it, and the Apple TV leading a group has already applied it to the
+// other members, so sending it back would only cause churn.
+static void
+speaker_group_volume_register(struct output_device *device, int absvol)
+{
+  struct output_device *cur;
+  const char *group_id;
+
+  outputs_device_volume_register(device, absvol, -1);
+
+  group_id = outputs_device_group_id(device);
+  if (!group_id)
+    return;
+
+  for (cur = outputs_list(); cur; cur = cur->next)
+    {
+      const char *cur_gid = outputs_device_group_id(cur);
+
+      if (cur == device || !cur_gid || strcmp(cur_gid, group_id) != 0)
+        continue;
+
+      outputs_device_volume_register(cur, absvol, -1);
+    }
+}
+
 static enum command_state
 volume_setraw_speaker(void *arg, int *retval)
 {
@@ -3358,13 +3385,11 @@ volume_setraw_speaker(void *arg, int *retval)
       return COMMAND_END;
     }
 
-  // Apply to the whole group, not just this device - a volume reported by
-  // a HomePod group's Apple TV leader should be reflected on its followers
-  // too, the same way a volume set by a client is.
-  *retval = speaker_group_volume_set(device, volume, -1, device_volume_cb);
+  // A raw volume is the device reporting its own level (see the DACP
+  // endpoint), so record it on the whole group rather than sending it back.
+  speaker_group_volume_register(device, volume);
 
-  if (*retval > 0)
-    return COMMAND_PENDING; // async
+  *retval = 0;
 
   return COMMAND_END;
 }

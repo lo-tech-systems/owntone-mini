@@ -4,8 +4,8 @@
 
 - change: volume changes made on an AirPlay receiver itself (for example with
   the Apple TV remote) are now reported back over the classic DACP control
-  service, which the server advertises again for that purpose, and applied
-  to the receiver's group so clients see the new level
+  service, which the server advertises again for that purpose, and recorded
+  for the receiver's whole group so clients see the new level
 - change: HomePods that are grouped behind an Apple TV are now driven through
   the Apple TV, which owns pairing (the PIN prompt), artwork and now-playing;
   the HomePods are hidden and started only once the Apple TV is ready, so
