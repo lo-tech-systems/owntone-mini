@@ -126,6 +126,10 @@ struct output_device
   char *raw_gid;        // Raw mDNS gid, used to cross-reference TV proxy groups
   uint64_t group_leader_id;
   unsigned tv_proxy_reconnects;  // Automatic leader reconnects since it last streamed
+  // One-shot override set by the player to start a TV proxy leader's real
+  // session even though no follower is streaming yet; consumed by
+  // outputs_device_start().
+  unsigned tv_proxy_start_direct:1;
 
   // Type of the device, will be used to determine which output backend to call
   enum output_types type;
@@ -502,9 +506,18 @@ outputs_device_is_tv_proxy_group(struct output_device *device);
 
 // A TV proxy group has one leader (the Apple TV, which owns the session) and
 // one or more followers (the HomePods, which are hidden and only started once
-// the leader's session is connected). This distinguishes the two roles.
+// the leader has cleared pairing). This distinguishes the two roles.
 bool
 outputs_device_is_tv_proxy_follower(struct output_device *device);
+
+bool
+outputs_device_is_tv_proxy_leader(struct output_device *device);
+
+// True once any follower of leader's TV proxy group has a session and is
+// actually streaming audio. Used to gate when the leader's own session may
+// start for real.
+bool
+outputs_device_tv_proxy_followers_streaming(struct output_device *leader);
 
 const char *
 outputs_device_display_name(struct output_device *device);

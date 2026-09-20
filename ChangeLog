@@ -3,14 +3,16 @@
 ## Unreleased
 
 - change: HomePods that are grouped behind an Apple TV are now driven through
-  the Apple TV. Its session is started first and owns pairing (the PIN
-  prompt), artwork and now-playing; the HomePods are hidden and only started
-  once the Apple TV has connected, so playback is gated on the Apple TV the
-  same way it is for an Apple sender. Previously the Apple TV was skipped on
-  some paths and started on others, so the PIN prompt never surfaced and
-  artwork never reached the TV. The Apple TV commonly drops its first
-  session once the HomePods join; it is reconnected automatically a few
-  seconds later
+  the Apple TV, which owns pairing (the PIN prompt), artwork and now-playing;
+  the HomePods are hidden and started only once the Apple TV is ready, so
+  playback is gated on the Apple TV the same way it is for an Apple sender.
+  Previously the Apple TV was skipped on some paths and started on others,
+  so the PIN prompt never surfaced and artwork never reached the TV. The
+  Apple TV is probed first, so a missing PIN still blocks the whole group;
+  the HomePods then start, and the Apple TV's own session joins once they
+  are streaming, which it does cleanly (an Apple TV session that already
+  exists when the HomePods connect is closed by the Apple TV). A leader
+  that drops its session is reconnected automatically
 - fix: the Apple TV in such a group is kept on AirPlay 2 from the moment the
   group is recognised, instead of possibly starting out on the classic
   protocol whose pairing key AirPlay 2 cannot use

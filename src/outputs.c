@@ -675,6 +675,14 @@ outputs_device_is_tv_proxy_follower(struct output_device *device)
   return meta && meta->is_tv_proxy_group && !(meta->is_grouped && meta->is_group_leader);
 }
 
+bool
+outputs_device_is_tv_proxy_leader(struct output_device *device)
+{
+  struct output_device *meta = group_meta_device(device);
+
+  return meta && meta->is_tv_proxy_group && meta->is_grouped && meta->is_group_leader;
+}
+
 const char *
 outputs_device_display_name(struct output_device *device)
 {
@@ -692,6 +700,29 @@ outputs_device_group_id(struct output_device *device)
   struct output_device *meta = group_meta_device(device);
 
   return meta ? meta->group_id : NULL;
+}
+
+bool
+outputs_device_tv_proxy_followers_streaming(struct output_device *leader)
+{
+  struct output_device *cur;
+  const char *group_id = outputs_device_group_id(leader);
+  const char *cur_gid;
+
+  if (!group_id)
+    return false;
+
+  for (cur = outputs_device_list; cur; cur = cur->next)
+    {
+      if (cur == leader || !outputs_device_is_tv_proxy_follower(cur))
+        continue;
+
+      cur_gid = outputs_device_group_id(cur);
+      if (cur_gid && strcmp(cur_gid, group_id) == 0 && cur->session && cur->state == OUTPUT_STATE_STREAMING)
+        return true;
+    }
+
+  return false;
 }
 
 uint32_t
@@ -1865,6 +1896,24 @@ outputs_device_start(struct output_device *device, output_status_cb cb, bool onl
   if (!device->advertised)
     return -1;
 
+  // An Apple TV leading a HomePod group closes a session that already exists
+  // when the HomePods connect, but joins cleanly once they are streaming,
+  // so its own session is deferred until then - probing it in the meantime
+  // still runs the pairing exchange, so a missing PIN still gates the whole
+  // group and surfaces the prompt. tv_proxy_start_direct is the one-shot
+  // escape hatch the player uses when no follower can be brought up at all.
+  if (!only_probe && outputs_device_is_tv_proxy_leader(device))
+    {
+      if (device->tv_proxy_start_direct)
+        device->tv_proxy_start_direct = 0;
+      else if (!outputs_device_tv_proxy_followers_streaming(device))
+        {
+          DPRINTF(E_DBG, L_PLAYER, "TV proxy: probing '%s' first, its session starts once a follower is streaming\n",
+                  outputs_device_display_name(device));
+          only_probe = true;
+        }
+    }
+
   if (only_probe)
     ret = outputs[device->type]->device_probe(device, callback_add(device, cb));
   else
@@ -2274,8 +2323,8 @@ outputs_start(output_status_cb started_cb, output_status_cb stopped_cb, bool onl
 	continue;
 
       // Followers are hidden members of a TV proxy group; the player starts
-      // them itself once the group leader's (the Apple TV's) session reports
-      // connected, so skip them here.
+      // them itself once the group leader's (the Apple TV's) probe succeeds,
+      // so skip them here.
       if (outputs_device_is_tv_proxy_follower(device))
 	continue;
 
