@@ -3604,6 +3604,7 @@ static void
 raop_cb_startup_record(struct evrtsp_request *req, void *arg)
 {
   struct raop_session *rs = arg;
+  struct output_device *device;
   const char *param;
   int ret;
 
@@ -3636,7 +3637,12 @@ raop_cb_startup_record(struct evrtsp_request *req, void *arg)
   rs->state = RAOP_STATE_RECORD;
 
   /* Set initial volume */
-  raop_set_volume_internal(rs, rs->volume, raop_cb_startup_volume);
+  // The level may have changed since the session captured it at creation,
+  // typically because a client sets the volume right after enabling the
+  // output while the handshake is still running, so always send the
+  // device's current level.
+  device = outputs_device_get(rs->device_id);
+  raop_set_volume_internal(rs, device ? device->volume : rs->volume, raop_cb_startup_volume);
 
   return;
 
@@ -4925,6 +4931,8 @@ raop_write(struct output_buffer *obuf)
 {
   struct raop_master_session *rms;
   struct raop_session *rs;
+  struct output_device *device;
+  int ret;
   int i;
 
   for (rms = raop_master_sessions; rms; rms = rms->next)
@@ -4969,6 +4977,25 @@ raop_write(struct output_buffer *obuf)
 
       rs->state = RAOP_STATE_STREAMING;
       // Make a cb?
+
+      // Catches a volume set that arrived while the session was still
+      // starting (the RECORD response handler captures device->volume when
+      // it sends the startup volume, but a client commonly sets the volume
+      // right after enabling the output, before the handshake completes,
+      // and raop_set_volume_one() drops that set because the session is
+      // not yet connected). Re-sent here, once audio starts flowing.
+      device = outputs_device_get(rs->device_id);
+      if (device && device->volume != rs->volume)
+	{
+	  DPRINTF(E_INFO, L_RAOP, "Volume of '%s' changed during session start (%d -> %d), re-sending\n",
+	          rs->devname, rs->volume, device->volume);
+
+	  // Don't use session_failure() on error here - this loop is
+	  // iterating over raop_sessions, and session_failure() frees rs.
+	  ret = raop_set_volume_internal(rs, device->volume, raop_cb_set_volume);
+	  if (ret < 0)
+	    DPRINTF(E_WARN, L_RAOP, "Could not re-send volume to '%s'\n", rs->devname);
+	}
     }
 }
 

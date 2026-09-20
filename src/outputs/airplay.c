@@ -1366,6 +1366,31 @@ session_streaming_report(struct airplay_session *session)
   session_status(session);
 }
 
+// Catches a volume set that arrived while the session was still starting
+// (session_make() captures device->volume at session creation, but a client
+// commonly sets the volume right after enabling the output, before the
+// handshake completes, and airplay_set_volume_one() drops that set because
+// the session is not yet connected). Called once per CONNECTED->STREAMING
+// transition, so any such change is re-sent as soon as audio starts
+// flowing. The sequence completes through session_status(), which hands any
+// registered player callback the current state, the same as the streaming
+// report does.
+static void
+session_volume_resync(struct airplay_session *session)
+{
+  struct output_device *device;
+
+  device = outputs_device_get(session->device_id);
+  if (!device || device->volume == session->volume)
+    return;
+
+  DPRINTF(E_INFO, L_AIRPLAY, "Volume of '%s' changed during session start (%d -> %d), re-sending\n",
+          session->devname, session->volume, device->volume);
+
+  // payload_make_set_volume() refreshes session->volume itself
+  sequence_start(AIRPLAY_SEQ_SEND_VOLUME, session, NULL, "volume_resync");
+}
+
 static void
 master_session_free(struct airplay_master_session *ams)
 {
@@ -3579,9 +3604,18 @@ payload_make_teardown(struct evrtsp_request *req, struct airplay_session *sessio
 static int
 payload_make_set_volume(struct evrtsp_request *req, struct airplay_session *session, void *arg)
 {
+  struct output_device *device;
   float raop_volume;
   char volstr[32];
   int ret;
+
+  // The level may have changed since the session captured it at creation,
+  // typically because a client sets the volume right after enabling the
+  // output while the handshake is still running, so always send the
+  // device's current level.
+  device = outputs_device_get(session->device_id);
+  if (device)
+    session->volume = device->volume;
 
   raop_volume = airplay_volume_from_pct(session->volume, session->devname);
 
@@ -6960,6 +6994,8 @@ airplay_write(struct output_buffer *obuf)
 	      session->mrp->paused = false;
 	      sequence_start(AIRPLAY_SEQ_SEND_NOWPLAYING_PROGRESS, session, airplay_cur_metadata, "POST /command (NowPlayingInfo update, resume)");
 	    }
+
+	  session_volume_resync(session);
 	}
 
       // Buffered receivers don't start playing until they've received a

@@ -30,6 +30,10 @@
 - change: the outputs API reports `pin_pending` while a device is actually
   asking for a PIN, so clients can prompt at the right moment; the group
   state logging no longer repeats on every unchanged discovery pass
+- fix: a volume set while an output's session was still starting was lost,
+  leaving the receiver at the level of its previous session. Both AirPlay
+  backends now send the device's current level at start, and a change that
+  lands during the handshake is re-sent once audio starts flowing
 
 ## Version 1.3.0
 
