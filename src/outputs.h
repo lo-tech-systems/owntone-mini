@@ -585,6 +585,11 @@ outputs_stop_delayed_cancel(void);
 int
 outputs_sessions_count(void);
 
+// Reports the AirPlay backend's buffered-encoder admission state, for
+// memory/diagnostic logging.
+void
+airplay_encoder_budget_get(int *in_use, int *budget);
+
 void
 outputs_write(void *buf, size_t bufsize, int nsamples, struct media_quality *quality, struct timespec *pts);
 

@@ -81,6 +81,7 @@
 #include "listener.h"
 #include "commands.h"
 #include "mdns.h"
+#include "memstats.h"
 
 // Audio and metadata outputs
 #include "outputs.h"
@@ -3408,6 +3409,14 @@ input_config_reload_cmd(void *arg, int *retval)
   return COMMAND_END;
 }
 
+static enum command_state
+memstats_log_cmd(void *arg, int *retval)
+{
+  memstats_log(NULL);
+  *retval = 0;
+  return COMMAND_END;
+}
+
 // Backends can have async teardowns (e.g. RTSP session close) that complete
 // via callbacks dispatched on the player event loop. Tearing outputs down
 // from another thread would race those callbacks over the same session
@@ -3436,6 +3445,12 @@ int
 player_input_config_reload(void)
 {
   return commands_exec_sync(cmdbase, input_config_reload_cmd, NULL, NULL);
+}
+
+int
+player_memstats_log(void)
+{
+  return commands_exec_sync(cmdbase, memstats_log_cmd, NULL, NULL);
 }
 
 

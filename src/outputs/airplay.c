@@ -7017,6 +7017,15 @@ airplay_write(struct output_buffer *obuf)
     }
 }
 
+// Reports the current buffered-encoder admission state, for memory and
+// diagnostic logging elsewhere.
+void
+airplay_encoder_budget_get(int *in_use, int *budget)
+{
+  *in_use = encoder_cost_in_use;
+  *budget = encoder_cost_budget;
+}
+
 // Scores the host's encode capacity so the admission budget (ENCODER_COST_*)
 // scales with the board instead of assuming every core is equally fast. Core
 // count alone is wrong across the fleet: a clock-limited board with cores

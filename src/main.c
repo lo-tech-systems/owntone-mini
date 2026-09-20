@@ -68,6 +68,7 @@
 #include "player.h"
 #include "worker.h"
 #include "ptpd.h"
+#include "memstats.h"
 
 #define PIDFILE  STATEDIR "/run/owntone.pid"
 
@@ -212,10 +213,11 @@ daemonize(bool background, char *pidfile)
 
 // Pin the process's pages in RAM so the real-time audio threads don't stall
 // on page faults if the system comes under memory pressure and starts
-// reclaiming file-backed/swapped pages. MCL_ONFAULT locks pages only as
-// they are actually touched, so the cost is the process's working set
-// rather than every mapped page (the unused parts of libraries stay
-// unlocked); MCL_FUTURE extends that to memory allocated later on. Must be
+// reclaiming file-backed/swapped pages. Locking the current mappings (code,
+// libraries, the initial heap) as they are touched keeps those threads off
+// disk; future mappings are deliberately NOT locked (no MCL_FUTURE), so
+// per-session heap growth stays reclaimable and the process footprint does
+// not ratchet up with the high-water mark of transient allocations. Must be
 // called after daemonize() -- locks are not inherited across its fork() --
 // and needs the unit's LimitMEMLOCK raised, since the daemon drops root
 // privileges shortly after this runs.
@@ -225,11 +227,11 @@ lock_process_memory(void)
 #ifdef MCL_ONFAULT
   int ret;
 
-  ret = mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT);
+  ret = mlockall(MCL_CURRENT | MCL_ONFAULT);
   if (ret < 0)
     DPRINTF(E_WARN, L_MAIN, "Could not lock process memory: %s\n", strerror(errno));
   else
-    DPRINTF(E_LOG, L_MAIN, "Locked process memory (pages pinned once touched)\n");
+    DPRINTF(E_LOG, L_MAIN, "Locked process memory (current mappings, pinned once touched)\n");
 #else
   DPRINTF(E_WARN, L_MAIN, "mlockall(MCL_ONFAULT) not available on this platform; process memory will not be locked\n");
 #endif
@@ -641,6 +643,8 @@ main(int argc, char **argv)
       goto httpd_fail;
     }
 
+  memstats_init();
+
   // Advertise the classic DACP control service so AirPlay receivers can
   // find their way back to us to report a volume change made on the
   // receiver itself. The group name has to be this exact format for
@@ -729,6 +733,10 @@ main(int argc, char **argv)
   httpd_deinit();
 
  httpd_fail:
+  // Stop the memory statistics tick before the player goes away: the tick
+  // posts commands to the player thread from the worker thread.
+  memstats_deinit();
+
   DPRINTF(E_LOG, L_MAIN, "Player deinit\n");
   player_deinit();
 

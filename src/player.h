@@ -71,6 +71,11 @@ player_get_status(struct player_status *status);
 int
 player_input_config_reload(void);
 
+// Runs memstats_log(NULL) on the player thread, as required since it reads
+// output session state.
+int
+player_memstats_log(void);
+
 void
 player_speaker_enumerate(spk_enum_cb cb, void *arg);
 

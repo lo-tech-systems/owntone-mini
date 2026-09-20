@@ -29,6 +29,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <time.h>
+#include <malloc.h>
 
 #include <event2/event.h>
 
@@ -38,6 +39,7 @@
 #include "worker.h"
 #include "outputs.h"
 #include "owntone_config.h"
+#include "memstats.h"
 #include "db.h"
 
 extern struct output_definition output_raop;
@@ -1619,6 +1621,15 @@ outputs_device_session_remove(uint64_t device_id)
   device = outputs_device_get(device_id);
   if (device)
     device->session = NULL;
+
+  // With no sessions left, give the allocator a chance to hand pages back
+  // to the system instead of holding onto this session's high-water mark.
+  if (outputs_sessions_count() == 0)
+    {
+      malloc_trim(0);
+      DPRINTF(E_DBG, L_PLAYER, "Last session ended, trimmed the heap\n");
+      memstats_log("last session ended");
+    }
 
   return;
 }

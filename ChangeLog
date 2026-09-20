@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- fix: the server no longer locks every page it will ever touch. Only the
+  mappings present at startup are pinned, glibc is limited to two heaps, and
+  the heap is trimmed when the last session ends, so the footprint no longer
+  grows with each session until the system runs out of memory
+- change: a memory line is logged at info level every 5 minutes while
+  playing and hourly when idle (and when the last session ends), giving
+  resident, peak and locked size, heap in use and held, malloc arenas,
+  sessions, encoder budget, system available memory and swap
 - change: volume changes made on an AirPlay receiver itself (for example with
   the Apple TV remote) are now reported back over the classic DACP control
   service, which the server advertises again for that purpose, and recorded
