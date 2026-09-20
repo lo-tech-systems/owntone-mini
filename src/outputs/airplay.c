@@ -5040,8 +5040,10 @@ response_handler_flush_buffered(struct evrtsp_request *req, struct airplay_sessi
   // mapping no longer holds; the next anchor establishes a fresh one
   session->master_session->buffered_anchor_mapped = false;
   // Queued-but-unsent frames would otherwise carry seqnums past flushUntilSeq,
-  // and the receiver keeps those instead of discarding them.
-  if (session->master_session && session->master_session->encoder)
+  // and the receiver keeps those instead of discarding them. A live session
+  // always has a master session (session_make() fails without one), hence no
+  // NULL test here, matching the unconditional accesses above.
+  if (session->master_session->encoder)
     airplay_encoder_flush(session->master_session->encoder);
   return AIRPLAY_SEQ_CONTINUE;
 }
