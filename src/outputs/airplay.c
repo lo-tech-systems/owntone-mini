@@ -4903,6 +4903,8 @@ handle_timingpeerinfo(uint32_t *slave_id, plist_t response, const char *local_v4
       ret = ptpd_slave_add(slave_id, peer_straddress);
       if (ret == 0)
 	return 0;
+
+      DPRINTF(E_WARN, L_AIRPLAY, "Could not add timing peer '%s', trying the next address\n", peer_straddress);
     }
 
  error:
