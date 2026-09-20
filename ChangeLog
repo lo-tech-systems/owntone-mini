@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- change: HomePods that are grouped behind an Apple TV are now driven through
+  the Apple TV. Its session is started first and owns pairing (the PIN
+  prompt), artwork and now-playing; the HomePods are hidden and only started
+  once the Apple TV has connected, so playback is gated on the Apple TV the
+  same way it is for an Apple sender. Previously the Apple TV was skipped on
+  some paths and started on others, so the PIN prompt never surfaced and
+  artwork never reached the TV
+
 ## Version 1.3.0
 
 Changes since 1.2.1:

@@ -495,6 +495,12 @@ outputs_device_is_stereo_leader(struct output_device *device);
 bool
 outputs_device_is_tv_proxy_group(struct output_device *device);
 
+// A TV proxy group has one leader (the Apple TV, which owns the session) and
+// one or more followers (the HomePods, which are hidden and only started once
+// the leader's session is connected). This distinguishes the two roles.
+bool
+outputs_device_is_tv_proxy_follower(struct output_device *device);
+
 const char *
 outputs_device_display_name(struct output_device *device);
 

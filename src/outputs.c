@@ -297,7 +297,8 @@ candidate_promote_as_proxy_leader(struct output_device *tv_candidate,
   group->leader_known = true;
   output_group_member_add(group, tv_device->id);
 
-  // Tag HomePod member candidates so tv_proxy_device_skip() can gate them.
+  // Tag HomePod member candidates so outputs_device_is_tv_proxy_follower() can
+  // identify them as followers.
   for (device = outputs_device_list; device; device = device->next)
     {
       candidate = device->candidate_airplay2;
@@ -564,6 +565,14 @@ outputs_device_is_tv_proxy_group(struct output_device *device)
   struct output_device *meta = group_meta_device(device);
 
   return meta && meta->is_tv_proxy_group;
+}
+
+bool
+outputs_device_is_tv_proxy_follower(struct output_device *device)
+{
+  struct output_device *meta = group_meta_device(device);
+
+  return meta && meta->is_tv_proxy_group && !(meta->is_grouped && meta->is_group_leader);
 }
 
 const char *
@@ -2154,6 +2163,12 @@ outputs_start(output_status_cb started_cb, output_status_cb stopped_cb, bool onl
   for (device = outputs_device_list; device; device = device->next)
     {
       if (!device->selected)
+	continue;
+
+      // Followers are hidden members of a TV proxy group; the player starts
+      // them itself once the group leader's (the Apple TV's) session reports
+      // connected, so skip them here.
+      if (outputs_device_is_tv_proxy_follower(device))
 	continue;
 
       ret = outputs_device_start(device, started_cb, only_probe);

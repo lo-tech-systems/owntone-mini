@@ -131,13 +131,14 @@
 // know if they should only probe the device, or fully start it.
 #define PLAYER_ONLY_PROBE (player_state != PLAY_PLAYING)
 
-// When HomePods are routed via an Apple TV ("TV proxy" topology), OwnTone
-// connects directly to the HomePods and bypasses the Apple TV. The Apple TV
-// rejects direct AirPlay audio streams when HomePods are set as its output,
-// so sending it a session causes OUTPUT_STATE_FAILED and the device appears
-// deselected to clients. The HomePods accept direct streams and relay them.
-// tv_proxy_device_skip() gates this: the Apple TV (group leader) is skipped
-// for start/stop/volume operations; HomePod members are not.
+// When HomePods are routed via an Apple TV ("TV proxy" topology), the Apple
+// TV is the primary session: it owns pairing/PIN, artwork and now-playing,
+// and every start path talks to it. The HomePod members are hidden followers
+// that no start path may touch directly - tv_proxy_follower_skip() gates
+// this - and are instead started by tv_proxy_followers_start() once the
+// Apple TV's session reports OUTPUT_STATE_CONNECTED (or STREAMING). Followers
+// are stopped together with the leader, and volume commands go to the leader
+// and then fan out to the followers.
 
 //#define DEBUG_PLAYER 1
 
@@ -1627,6 +1628,57 @@ device_shutdown_cb(struct output_device *device, enum output_device_state status
   commands_exec_end(cmdbase, retval);
 }
 
+// Starts the hidden followers of a TV proxy group once the leader (the Apple
+// TV) has connected. Called from device_activate_cb() when the leader's
+// session reaches OUTPUT_STATE_CONNECTED or OUTPUT_STATE_STREAMING. A
+// follower that fails to start is logged and skipped - it must not affect the
+// leader's session or the pending command.
+static void
+tv_proxy_followers_start(struct output_device *leader)
+{
+  struct output_device *cur;
+  const char *group_id;
+  int ret;
+
+  if (!outputs_device_is_tv_proxy_group(leader) || !outputs_device_is_stereo_leader(leader))
+    return;
+  if (player_state != PLAY_PLAYING)
+    return;
+
+  group_id = outputs_device_group_id(leader);
+  if (!group_id)
+    return;
+
+  for (cur = outputs_list(); cur; cur = cur->next)
+    {
+      const char *cur_gid;
+
+      if (cur == leader)
+	continue;
+
+      cur_gid = outputs_device_group_id(cur);
+      if (!cur_gid || strcmp(cur_gid, group_id) != 0)
+	continue;
+
+      if (!outputs_device_is_tv_proxy_follower(cur))
+	continue;
+      if (!cur->selected)
+	continue;
+      if (cur->session)
+	continue;
+
+      DPRINTF(E_INFO, L_PLAYER, "TV proxy: Apple TV '%s' connected, starting follower '%s'\n",
+              outputs_device_display_name(leader), outputs_device_display_name(cur));
+
+      ret = outputs_device_start(cur, device_streaming_cb, false);
+      if (ret < 0)
+	{
+	  DPRINTF(E_WARN, L_PLAYER, "TV proxy: could not start follower '%s'\n", outputs_device_display_name(cur));
+	  continue;
+	}
+    }
+}
+
 static void
 device_activate_cb(struct output_device *device, enum output_device_state status)
 {
@@ -1666,6 +1718,13 @@ device_activate_cb(struct output_device *device, enum output_device_state status
 	retval = -1;
       goto out;
     }
+
+  // Once the Apple TV's session is up, bring its hidden HomePod followers
+  // online too. This is a no-op unless device is a TV proxy group leader, and
+  // tv_proxy_followers_start() itself checks player_state, so a probe (which
+  // never reaches PLAY_PLAYING) will not start any followers here.
+  if (status == OUTPUT_STATE_CONNECTED || status == OUTPUT_STATE_STREAMING)
+    tv_proxy_followers_start(device);
 
   // If we were just probing or doing device verification this is a no-op, since
   // there is no session any more
@@ -2335,18 +2394,17 @@ speaker_is_in_selected_set(struct output_device *device, uint64_t *ids, int nspk
   return false;
 }
 
-// Returns true for TV proxy group devices that should be skipped for
-// start/stop/volume. Only the Apple TV leader is skipped; HomePod members
-// receive sessions directly.
+// Returns true for TV proxy group followers (the HomePods). Followers must
+// never be started directly - they are started by tv_proxy_followers_start()
+// once the Apple TV's session is connected - so every start path calls this
+// to skip them.
 static bool
-tv_proxy_device_skip(struct output_device *device)
+tv_proxy_follower_skip(struct output_device *device)
 {
-  if (!outputs_device_is_tv_proxy_group(device))
-    return false;
-  if (!outputs_device_is_stereo_leader(device))
+  if (!outputs_device_is_tv_proxy_follower(device))
     return false;
 
-  DPRINTF(E_DBG, L_PLAYER, "TV proxy: skipping Apple TV leader '%s'\n",
+  DPRINTF(E_DBG, L_PLAYER, "TV proxy: deferring follower '%s' until the Apple TV is connected\n",
           outputs_device_display_name(device));
   return true;
 }
@@ -2421,7 +2479,7 @@ speaker_group_start(struct output_device *device, output_status_cb cb, bool only
       if (!cur_gid || strcmp(cur_gid, group_id) != 0)
         continue;
 
-      if (tv_proxy_device_skip(cur))
+      if (tv_proxy_follower_skip(cur))
         continue;
 
       ret = outputs_device_start(cur, cb, only_probe);
@@ -2460,9 +2518,6 @@ speaker_group_stop(struct output_device *device, output_status_cb cb)
       if (!cur_gid || strcmp(cur_gid, group_id) != 0)
         continue;
 
-      if (tv_proxy_device_skip(cur))
-        continue;
-
       ret = outputs_device_stop(cur, cb);
       if (ret > 0)
         {
@@ -2488,17 +2543,15 @@ speaker_group_volume_set(struct output_device *device, int absvol, int relvol, o
   int pending = 0;
   int successes = 0;
 
-  // Keep the logical group leader's cached volume in sync even when the
-  // transport command is redirected to the underlying HomePod members.
+  // Volume commands go to the group leader, then fan out to the followers so
+  // their cached volume (and hardware volume, where they support it) stays in
+  // sync with the leader's.
   outputs_device_volume_register(device, absvol, relvol);
-  if (!tv_proxy_device_skip(device))
-    {
-      ret = outputs_device_volume_set(device, cb);
-      if (ret > 0)
-        pending += ret;
-      else if (ret == 0)
-        successes++;
-    }
+  ret = outputs_device_volume_set(device, cb);
+  if (ret > 0)
+    pending += ret;
+  else if (ret == 0)
+    successes++;
 
   if (!outputs_device_is_tv_proxy_group(device))
     return (pending > 0) ? pending : (successes > 0 ? 0 : -1);
@@ -2516,8 +2569,6 @@ speaker_group_volume_set(struct output_device *device, int absvol, int relvol, o
       if (!cur_gid || strcmp(cur_gid, group_id) != 0)
         continue;
       if (!outputs_device_is_tv_proxy_group(cur))
-        continue;
-      if (tv_proxy_device_skip(cur))
         continue;
 
       outputs_device_volume_register(cur, absvol, relvol);
