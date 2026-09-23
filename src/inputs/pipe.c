@@ -58,7 +58,6 @@
 #include "logger.h"
 #include "owntone_config.h"
 #include "player.h"
-#include "worker.h"
 #include "commands.h"
 #include "artwork.h"
 
@@ -115,9 +114,9 @@ struct pipe_metadata_prepared
   struct input_metadata input_metadata;
   // Picture (artwork) data: the decoded bytes of the current picture, held
   // in RAM for the life of the session. parse_picture() replaces this buffer
-  // (never appends), and pipe_metadata_watch_del_locked() frees it at
-  // teardown. There is never a path or a file backing this -- consumers get
-  // a copy of the bytes via pipe_metadata_artwork_get(), never a filename.
+  // (never appends), and pipe_metadata_watch_del() frees it at teardown.
+  // There is never a path or a file backing this -- consumers get a copy of
+  // the bytes via pipe_metadata_artwork_get(), never a filename.
   uint8_t *pict;
   size_t pict_len;
   int pict_fmt; // ART_FMT_PNG / ART_FMT_JPEG, meaningful only when pict != NULL
@@ -149,13 +148,11 @@ struct pipe_metadata
   struct pipe_metadata_prepared prepared;
   // True if there is new metadata to push to the player
   bool is_new;
-  // .pipe and .evbuf are set up/torn down by pipe_metadata_watch_add()/
-  // pipe_metadata_watch_del(), which run as jobs on the (multi-threaded)
-  // worker pool, and are also read from the pipe thread in
-  // pipe_metadata_read_cb() and from the input thread in stop(). This mutex
-  // protects .pipe and .evbuf specifically (not .prepared, which has its own
-  // lock above).
-  pthread_mutex_t lock;
+  // .pipe and .evbuf are pipe-thread-only: pipe_metadata_watch_add()/
+  // pipe_metadata_watch_del() and pipe_metadata_read_cb() all run as commands
+  // or callbacks on the pipe thread's event base, so no lock is needed for
+  // them (unlike .prepared, which has its own lock above and is also read
+  // from the input thread).
 };
 
 union pipe_arg
@@ -1040,6 +1037,11 @@ pipe_watch_health_cb(evutil_socket_t fd, short event, void *arg)
   evtimer_add(pipe_watch_health_ev, &tv);
 }
 
+// Defined further down, in the metadata pipe handling section; forward
+// declared here so pipe_quiesce_cmd can also tear down the metadata watch.
+static void
+pipe_metadata_watch_del(void);
+
 // Runs on the pipe thread. Disarms every watch and the health timer and
 // latches pipe_quiesced, so that from this point nothing on the pipe thread
 // can start playback or re-arm a watch. State (the watch list, the command
@@ -1056,6 +1058,11 @@ pipe_quiesce_cmd(void *arg, int *retval)
 
   for (pipe = pipe_watch_list; pipe; pipe = pipe->next)
     watch_del(pipe);
+
+  // Nothing on the pipe thread must be able to fire into the player once
+  // shutdown has started. stop() still re-queues an idempotent del later;
+  // that is harmless.
+  pipe_metadata_watch_del();
 
   *retval = 0;
   return COMMAND_END;
@@ -1085,11 +1092,13 @@ pipe_thread_run(void *arg)
 
 
 /* --------------------------- METADATA PIPE HANDLING ----------------------- */
-/*                                Thread: worker                              */
+/*                                 Thread: pipe                               */
 
-// Caller must hold pipe_metadata.lock
+// Idempotent: safe to call when there is no metadata watch open. Runs on the
+// pipe thread only, so .pipe and .evbuf need no lock (see the struct
+// pipe_metadata comment).
 static void
-pipe_metadata_watch_del_locked(void)
+pipe_metadata_watch_del(void)
 {
   if (!pipe_metadata.pipe)
     return;
@@ -1099,20 +1108,28 @@ pipe_metadata_watch_del_locked(void)
   pipe_free(pipe_metadata.pipe);
   pipe_metadata.pipe = NULL;
 
+  // .prepared is also read from the input thread (see metadata_get() and
+  // pipe_metadata_artwork_get()), so the picture store must not be cleared
+  // without prepared.lock.
+  pthread_mutex_lock(&pipe_metadata.prepared.lock);
   pict_store_clear(&pipe_metadata.prepared);
 
   // A bundle interrupted by teardown must not leave the accumulator armed
   // for the next watch - its parts are gone with the evbuffer anyway.
   pipe_metadata.prepared.bundle_msg = 0;
   pipe_metadata.prepared.in_bundle = false;
+  pthread_mutex_unlock(&pipe_metadata.prepared.lock);
 }
 
-static void
-pipe_metadata_watch_del(void *arg)
+static enum command_state
+pipe_metadata_watch_del_cmd(void *arg, int *retval)
 {
-  pthread_mutex_lock(&pipe_metadata.lock);
-  pipe_metadata_watch_del_locked();
-  pthread_mutex_unlock(&pipe_metadata.lock);
+  (void)arg;
+
+  pipe_metadata_watch_del();
+
+  *retval = 0;
+  return COMMAND_END;
 }
 
 // Some metadata arrived on a pipe we watch
@@ -1123,36 +1140,36 @@ pipe_metadata_read_cb(evutil_socket_t fd, short event, void *arg)
   size_t len;
   int ret;
 
-  // .pipe and .evbuf are shared with the worker pool (add/del) and the input
-  // thread (stop), so use mutex. Lock ordering: pipe_metadata.lock (outer),
-  // then pipe_metadata.prepared.lock (inner) - never the reverse.
-  pthread_mutex_lock(&pipe_metadata.lock);
+  // arg is the pipe this event was armed for. A watch that gets torn down
+  // and replaced between the event firing and this callback running would
+  // otherwise read/close the new watch's fd under the old event - only act
+  // if the event we are running for is still the current one.
+  if (pipe_metadata.pipe != arg)
+    return;
 
   // The watch may have been torn down (and .pipe/.evbuf freed) between this
-  // event firing and the lock being acquired
+  // event firing and the callback running
   if (!pipe_metadata.pipe || !pipe_metadata.evbuf)
-    {
-      pthread_mutex_unlock(&pipe_metadata.lock);
-      return;
-    }
+    return;
 
   ret = evbuffer_read(pipe_metadata.evbuf, pipe_metadata.pipe->fd, PIPE_READ_MAX);
   if (ret < 0)
     {
+      // A spurious wakeup with nothing actually available yet is not a
+      // reason to tear the watch down - just wait for the next one.
       if (errno != EAGAIN)
-	pipe_metadata_watch_del_locked();
-      pthread_mutex_unlock(&pipe_metadata.lock);
-      return;
+	{
+	  pipe_metadata_watch_del();
+	  return;
+	}
+      goto readd;
     }
   else if (ret == 0)
     {
       // Reset the pipe
       ret = watch_reset(pipe_metadata.pipe);
       if (ret < 0)
-	{
-	  pthread_mutex_unlock(&pipe_metadata.lock);
-	  return;
-	}
+	return;
       goto readd;
     }
 
@@ -1164,9 +1181,9 @@ pipe_metadata_read_cb(evutil_socket_t fd, short event, void *arg)
       goto readd;
     }
 
-  // .parsed is shared with the input thread (see metadata_get), so use mutex.
-  // Note that this means _parse() must not do anything that could cause a
-  // deadlock (e.g. make a sync call to the player thread).
+  // .prepared is also read from the input thread (see metadata_get), so use
+  // mutex. Note that this means _parse() must not do anything that could
+  // cause a deadlock (e.g. make a sync call to the player thread).
   pthread_mutex_lock(&pipe_metadata.prepared.lock);
   ret = pipe_metadata_parse(&message, &pipe_metadata.prepared, pipe_metadata.evbuf);
   pthread_mutex_unlock(&pipe_metadata.prepared.lock);
@@ -1189,13 +1206,12 @@ pipe_metadata_read_cb(evutil_socket_t fd, short event, void *arg)
  readd:
   if (pipe_metadata.pipe && pipe_metadata.pipe->ev)
     event_add(pipe_metadata.pipe->ev, NULL);
-
-  pthread_mutex_unlock(&pipe_metadata.lock);
 }
 
-// Caller must hold pipe_metadata.lock
+// Runs on the pipe thread only, so .pipe and .evbuf need no lock (see the
+// struct pipe_metadata comment).
 static void
-pipe_metadata_watch_add_locked(const char *base_path)
+pipe_metadata_watch_add(const char *base_path)
 {
   char path[PATH_MAX];
   int ret;
@@ -1204,7 +1220,7 @@ pipe_metadata_watch_add_locked(const char *base_path)
   if ((ret < 0) || (ret > sizeof(path)))
     return;
 
-  pipe_metadata_watch_del_locked(); // Just in case we somehow already have a metadata pipe open
+  pipe_metadata_watch_del(); // Just in case we somehow already have a metadata pipe open
 
   pipe_metadata.pipe = pipe_create(path, 0, PIPE_METADATA, pipe_metadata_read_cb);
   pipe_metadata.evbuf = evbuffer_new();
@@ -1219,14 +1235,13 @@ pipe_metadata_watch_add_locked(const char *base_path)
     }
 }
 
-static void
-pipe_metadata_watch_add(void *arg)
+static enum command_state
+pipe_metadata_watch_add_cmd(void *arg, int *retval)
 {
-  char *base_path = arg;
+  pipe_metadata_watch_add((const char *)arg);
 
-  pthread_mutex_lock(&pipe_metadata.lock);
-  pipe_metadata_watch_add_locked(base_path);
-  pthread_mutex_unlock(&pipe_metadata.lock);
+  *retval = 0;
+  return COMMAND_END;
 }
 
 
@@ -1323,27 +1338,19 @@ pipe_path_validate(const char *path)
   return 0;
 }
 
+// The pipe thread and its command base are unconditional (started in init(),
+// stopped in deinit()), so this only ever needs to update the watch list -
+// to an empty one when autostart is off or there is no path.
 static int
 pipe_runtime_watch_update(const char *path, int autostart)
 {
   union pipe_arg cmdarg;
   struct pipe *new_pipelist;
-  bool watch_before;
-  bool watch_after;
   int ret;
 
-  watch_before = (pipe_autostart && pipe_path);
-  watch_after = (autostart && path);
-
-  if (!watch_before && !watch_after)
-    return 0;
-
-  new_pipelist = watch_after ? pipelist_create_path(path) : NULL;
-  if (watch_after && !new_pipelist)
+  new_pipelist = (autostart && path) ? pipelist_create_path(path) : NULL;
+  if (autostart && path && !new_pipelist)
     return -1;
-
-  if (!watch_before && watch_after)
-    pipe_thread_start();
 
   cmdarg.pipelist = new_pipelist;
   ret = commands_exec_sync(cmdbase, pipe_watch_update, NULL, &cmdarg);
@@ -1351,18 +1358,8 @@ pipe_runtime_watch_update(const char *path, int autostart)
     {
       if (new_pipelist)
 	pipe_free(new_pipelist);
-
-      if (!watch_before && watch_after)
-	{
-	  DPRINTF(E_LOG, L_PLAYER, "Pipe watch command failed after thread start; stopping pipe thread\n");
-	  if (cmdbase)
-	    pipe_thread_stop();
-	}
       return -1;
     }
-
-  if (watch_before && !watch_after)
-    pipe_thread_stop();
 
   return 0;
 }
@@ -1420,6 +1417,7 @@ static int
 setup(struct input_source *source)
 {
   struct pipe *pipe;
+  char *path_copy;
   int fd;
 
   fd = pipe_open(source->path, 0);
@@ -1433,7 +1431,13 @@ setup(struct input_source *source)
   pipe->fd = fd;
   pipe->is_autostarted = (source->id == pipe_autostart_id);
 
-  worker_execute(pipe_metadata_watch_add, source->path, strlen(source->path) + 1, 0);
+  // Best effort: metadata is a bonus, not a reason to fail playback, so an
+  // allocation failure here just means this session runs without it. The
+  // command frees path_copy once it has run; free it ourselves only if the
+  // dispatch itself failed, since then it never will.
+  path_copy = strdup(source->path);
+  if (path_copy && commands_exec_async(cmdbase, pipe_metadata_watch_add_cmd, path_copy) < 0)
+    free(path_copy);
 
   source->input_ctx = pipe;
 
@@ -1465,10 +1469,8 @@ stop(struct input_source *source)
       commands_exec_async(cmdbase, pipe_watch_reset, cmdarg);
     }
 
-  pthread_mutex_lock(&pipe_metadata.lock);
-  if (pipe_metadata.pipe)
-    worker_execute(pipe_metadata_watch_del, NULL, 0, 0);
-  pthread_mutex_unlock(&pipe_metadata.lock);
+  // Idempotent, so no need to check whether a watch is actually open.
+  commands_exec_async(cmdbase, pipe_metadata_watch_del_cmd, NULL);
 
   pipe_free(pipe);
 
@@ -1608,7 +1610,6 @@ init(void)
   int ret;
 
   CHECK_ERR(L_PLAYER, mutex_init(&pipe_metadata.prepared.lock));
-  CHECK_ERR(L_PLAYER, mutex_init(&pipe_metadata.lock));
 
   pipe_metadata.prepared.pict_fmt = -1;
 
@@ -1618,25 +1619,6 @@ init(void)
     return -1;
 
   pipe_autostart = config_get_bool("pipe_autostart", true);
-  if (pipe_autostart && pipe_path)
-    {
-      union pipe_arg *cmdarg;
-
-      cmdarg = malloc(sizeof(union pipe_arg));
-      if (!cmdarg)
-        return -1;
-
-      cmdarg->pipelist = pipelist_create();
-      if (!cmdarg->pipelist)
-        {
-          free(cmdarg);
-        }
-      else
-        {
-          pipe_thread_start();
-          commands_exec_async(cmdbase, pipe_watch_update, cmdarg);
-        }
-    }
 
   pipe_sample_rate = config_get_int("pipe_sample_rate", 44100);
   if (pipe_sample_rate != 44100 && pipe_sample_rate != 48000 && pipe_sample_rate != 88200 && pipe_sample_rate != 96000)
@@ -1652,21 +1634,46 @@ init(void)
       return -1;
     }
 
+  // Unconditional: setup()/stop() dispatch the metadata watch commands onto
+  // this thread's command base regardless of whether autostart watching is
+  // in use, so both must exist for the life of the process. Started only
+  // after the config validation above returns, so an invalid pipe config
+  // fails init without leaving the thread and its base running for the life
+  // of the process. The watch list itself may start out empty.
+  pipe_thread_start();
+
+  if (pipe_autostart && pipe_path)
+    {
+      union pipe_arg *cmdarg;
+
+      cmdarg = malloc(sizeof(union pipe_arg));
+      if (!cmdarg)
+        return -1;
+
+      cmdarg->pipelist = pipelist_create();
+      if (!cmdarg->pipelist)
+        {
+          free(cmdarg);
+        }
+      else
+        {
+          commands_exec_async(cmdbase, pipe_watch_update, cmdarg);
+        }
+    }
+
   return 0;
 }
 
 static void
 deinit(void)
 {
-  if (pipe_autostart && pipe_path)
-    pipe_thread_stop();
+  pipe_thread_stop();
 
   free(pipe_path);
   pipe_path = NULL;
   pipe_autostart_id = 0;
 
   CHECK_ERR(L_PLAYER, pthread_mutex_destroy(&pipe_metadata.prepared.lock));
-  CHECK_ERR(L_PLAYER, pthread_mutex_destroy(&pipe_metadata.lock));
 }
 
 struct input_definition input_pipe =
