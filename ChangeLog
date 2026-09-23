@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+[TODO: fold into the next version bump]
+
+- fix: the process footprint could still ratchet up over repeated grouped
+  playback sessions on top of the 1.4.0 fix. glibc's dynamic malloc
+  thresholds crept up after a large transient allocation was freed, so freed
+  heap was then retained by the allocator instead of being returned to the
+  OS; the service unit now freezes those thresholds low, and a heap trim
+  also runs periodically from the memory-stats tick, not only when the last
+  session ends
+- fix: the end-of-session heap trim ran before the session's own buffers had
+  actually been freed, so it reclaimed almost nothing; it is now deferred
+  until after the session is freed
+- fix: a receiver that kept its buffered AirPlay 2 data connection open but
+  stopped reading from it (as a HomePod does once its Apple TV leader takes
+  over the group) let the per-session send queue grow without limit; the
+  backlog is now capped, and the session is failed and reconnected if a
+  receiver stops draining it
+- change: when an Apple TV leads a HomePod group, its own session is now
+  sent no audio (the HomePods render it); the session is kept only for
+  RTSP control, the shared anchor, metadata and volume, which avoids the
+  reconnect churn from a backlog that had nowhere to go. If every HomePod
+  follower later drops, the Apple TV is restarted directly so audio is not
+  lost. A new `tv_proxy_leader_audio_suppress` setting (default on,
+  runtime-settable) controls this
+
 ## Version 1.4.0 - 2026-09-20
 
 - change: the player logs a fixed-size histogram of playback-tick jitter at

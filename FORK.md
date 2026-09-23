@@ -66,7 +66,8 @@ sqlext/sqlext.c / sqlext/Makefile.am
 |------|---------|
 | `src/queue.c` / `src/queue.h` | In-memory single-item queue (replaces SQLite-backed `db_queue_*`) |
 | `src/owntone_config.c` / `src/owntone_config.h` | JSON config reader (replaces libconfuse `conffile.c`) |
-| `src/outputs/airplay_buffered.c` / `.h` | AirPlay 2 buffered-audio (stream type 103) transport and ChaCha20-Poly1305 framing |
+| `src/outputs/airplay_buffered.c` / `.h` | AirPlay 2 buffered-audio (stream type 103) transport and ChaCha20-Poly1305 framing; caps the per-session send backlog and fails the session if a receiver stops draining it |
+| `src/memstats.c` / `.h` | Periodic memory-usage logging (resident/peak/locked size, heap in-use and held, malloc arenas, sessions, encoder budget, system memory and swap); also runs a heap trim on its tick |
 | `src/outputs/airplay_encoder.c` / `.h` | Threaded per-transform audio encoder feeding the buffered transport; absorbs a stall by draining its backlog instead of dropping audio, warning once it falls about a second behind, and failing the session only past a five-second hard limit |
 | `src/outputs/airplay_common.h` | Shared definitions for the buffered/encoder units |
 
@@ -74,18 +75,19 @@ sqlext/sqlext.c / sqlext/Makefile.am
 
 | File | Change |
 |------|--------|
-| `src/player.c` / `src/player.h` | Removed seek, shuffle, repeat, multi-queue, verification kickoff |
+| `src/player.c` / `src/player.h` | Removed seek, shuffle, repeat, multi-queue, verification kickoff; restarts a TV proxy leader (Apple TV) directly, replacing its audio-suppressed session, if every HomePod follower in its group drops |
 | `src/transcode.c` / `src/transcode.h` | Reduced to encode-only path (PCM → ALAC/PCM16); removed file decode, seeking, metadata extraction. Extended with AirPlay 2 encode profiles (48 kHz AAC stereo, AAC 5.1, 24-bit ALAC), ffmpeg surround-upmix filters, and CPU-class AAC coder selection |
-| `src/outputs.c` | Removed XCODE_PCM24/32/UNKNOWN dead references |
+| `src/outputs.c` | Removed XCODE_PCM24/32/UNKNOWN dead references; defers the end-of-session heap trim until after the session is freed; tracks whether a TV proxy leader's session should be sent no audio |
 | `src/misc.c` / `src/misc.h` | Removed: `unicode_fixup_string`, `two_str_hash`, `keyval_sort`, `linear_regression`, `m_readfile`, `atrim`; removed libunistring includes |
 | `src/listener.h` | Reduced to 3 event types: PLAYER, VOLUME, SPEAKER |
 | `src/logger.c` / `src/logger.h` | Removed unused log domains; removed `logger_alsa`; log lines are handed to a dedicated writer thread through a bounded queue, so the audio threads never wait on the log file (synchronous until the thread starts; lines are dropped and counted if the queue fills), and repetitive lines are throttled at the call site |
 | `src/input.c` | Pipe input buffer capacity is a duration (3 s) computed from the stream's sample rate and bit depth, instead of a fixed byte count sized for one format |
 | `src/main.c` | Locks process memory once daemonized and privileges are dropped, so the audio threads aren't delayed by page faults under memory pressure; starts the log writer thread at the same point |
 | `src/outputs/raop.c` | Fixed `raop_metadata_prepare` to build DMAP text buffer and load file artwork |
-| `src/outputs/airplay.c` | Substantially extended: AirPlay 2 buffered-audio output (RTP type 0x67 / stream type 103) with ChaCha20-Poly1305 framing; PTP-timed playback to HomePod stereo pairs (SETPEERS peer setup, timing-anchor handling); stream-type and audio-format selection/capability negotiation; 5.1 surround to a standalone Apple TV; connection retry/backoff; plus the `airplay_metadata_prepare` DMAP/artwork fix |
+| `src/outputs/airplay.c` | Substantially extended: AirPlay 2 buffered-audio output (RTP type 0x67 / stream type 103) with ChaCha20-Poly1305 framing; PTP-timed playback to HomePod stereo pairs (SETPEERS peer setup, timing-anchor handling); stream-type and audio-format selection/capability negotiation; 5.1 surround to a standalone Apple TV; connection retry/backoff; skips sending audio to a TV proxy leader whose HomePod followers are already rendering it; plus the `airplay_metadata_prepare` DMAP/artwork fix |
 | `src/libairptp/` / `src/ptpd.*` | Inherited from OwnTone and tuned: PTP grandmaster/announce settings for prompt receiver lock (not owntone-mini-authored) |
 | `src/httpd_jsonapi.c` | Added `PUT /api/metadata` endpoint |
+| `owntone.service.in` | Freezes glibc's malloc thresholds (`MALLOC_MMAP_THRESHOLD_`, `MALLOC_TRIM_THRESHOLD_`) low, alongside the existing `MALLOC_ARENA_MAX=2`, so heap freed after a large transient allocation is handed back to the OS instead of being retained by the allocator |
 | `configure.ac` | Removed: LIBCURL, LIBXML2, INOTIFY, libunistring, AM_ICONV, sqlext |
 | `Makefile.am` | Removed `sqlext` from SUBDIRS |
 

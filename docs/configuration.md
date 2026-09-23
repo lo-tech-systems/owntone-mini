@@ -48,7 +48,7 @@ Make sure that this user has read access to your configuration of `directories` 
 
 Path to the directory or directories containing the media to index (your library).
 
-### general: buffered_audio_enabled
+### player: buffered_audio_enabled
 
 Boolean, default `true`. Also settable at runtime via
 `PUT /api/settings/player/buffered_audio_enabled` (takes effect on the next
