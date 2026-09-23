@@ -1,9 +1,13 @@
 # Changelog
 
-## Unreleased
+## Version 1.4.1 - 2026-09-23
 
-[TODO: fold into the next version bump]
-
+- fix: a pipe metadata watch could be torn down on a worker thread while its
+  read callback was still running on the pipe thread, and the teardown
+  blocked on that callback while holding a lock the callback needed. The two
+  deadlocked, which stalled the audio pipe read and then wedged shutdown; the
+  metadata watch is now owned entirely by the pipe thread so its teardown
+  never blocks cross-thread
 - fix: the process footprint could still ratchet up over repeated grouped
   playback sessions on top of the 1.4.0 fix. glibc's dynamic malloc
   thresholds crept up after a large transient allocation was freed, so freed
