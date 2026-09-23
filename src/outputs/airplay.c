@@ -522,6 +522,11 @@ struct airplay_session
   uint32_t buffered_format_id;
   bool device_supports_buffered;
   bool buffered_mode;
+  // TV proxy leader whose HomePod followers render the audio: keep RTSP
+  // control, anchor, SETPEERS, MRP and volume, but never write a frame to the
+  // buffered data connection (see buffered_frame_send). Copied from
+  // device->tv_proxy_audio_suppress in airplay_device_start().
+  bool audio_suppressed;
   // Set whenever a fresh SETRATEANCHORTIME is needed (buffered_mode just
   // decided, or after a FLUSHBUFFERED, which invalidates the receiver's
   // previous anchor)
@@ -2881,6 +2886,11 @@ buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
 	continue;
 
       if (session->state != AIRPLAY_STATE_CONNECTED && session->state != AIRPLAY_STATE_STREAMING)
+	continue;
+
+      // TV proxy leader kept for control only: never deliver, never freeze the
+      // shared counters for it, never consume the marker on its behalf
+      if (session->audio_suppressed)
 	continue;
 
       // The receiver's decode chain doesn't start until it accepts a rate=1
@@ -6808,6 +6818,10 @@ airplay_device_start(struct output_device *device, int callback_id)
   session = session_make(device, callback_id);
   if (!session)
     return -1;
+
+  session->audio_suppressed = device->tv_proxy_audio_suppress;
+  if (session->audio_suppressed)
+    DPRINTF(E_INFO, L_AIRPLAY, "Starting '%s' as TV proxy leader with audio suppressed (followers render; control, anchor, metadata and volume only)\n", device->name);
 
   sequence_start(AIRPLAY_SEQ_START, session, NULL, "device_start");
 

@@ -1596,6 +1596,8 @@ static struct output_device *
 tv_proxy_leader_of(struct output_device *follower);
 static void
 tv_proxy_leader_start(struct output_device *follower);
+static void
+tv_proxy_leader_restart_cb(struct output_device *device, enum output_device_state status);
 
 static void
 device_streaming_cb(struct output_device *device, enum output_device_state status)
@@ -1626,8 +1628,12 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
       // A follower that fails while none of its siblings ever came up either
       // leaves the leader with no follower to wait for (see
       // outputs_device_start()); fall back to starting the Apple TV directly
-      // rather than stalling the group indefinitely.
-      if (leader && leader->selected && !leader->session)
+      // rather than stalling the group indefinitely. The same sibling scan
+      // also covers the case where the leader's own session is already up
+      // but audio-suppressed (its followers render the audio): if every
+      // follower is now gone, that session must be replaced with a real,
+      // direct one instead of silently doing nothing.
+      if (leader && leader->selected)
 	{
 	  struct output_device *cur;
 	  const char *group_id = outputs_device_group_id(device);
@@ -1648,13 +1654,20 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
 		}
 	    }
 
-	  if (!sibling_up)
+	  if (!leader->session && !sibling_up)
 	    {
 	      DPRINTF(E_LOG, L_PLAYER, "TV proxy: followers of '%s' are unavailable, starting the Apple TV directly\n",
 	              outputs_device_display_name(leader));
 
 	      leader->tv_proxy_start_direct = 1;
 	      outputs_device_start(leader, device_streaming_cb, false);
+	    }
+	  else if (leader->session && !sibling_up && leader->tv_proxy_audio_suppress)
+	    {
+	      DPRINTF(E_LOG, L_PLAYER, "TV proxy: followers of '%s' are gone, restarting the Apple TV directly\n",
+	              outputs_device_display_name(leader));
+
+	      outputs_device_stop(leader, tv_proxy_leader_restart_cb);
 	    }
 	}
 
@@ -1782,6 +1795,37 @@ device_shutdown_cb(struct output_device *device, enum output_device_state status
 
  out:
   commands_exec_end(cmdbase, retval);
+}
+
+// Completes the stop of an audio-suppressed TV proxy leader whose followers
+// have all dropped (see device_streaming_cb()'s FAILED handling). The stop
+// tears down the control-only session; once it is gone we start a fresh one,
+// direct if no follower is around to wait for, otherwise the normal proxied
+// path re-derives whatever is appropriate (it will come back suppressed only
+// if a follower is actually streaming again).
+static void
+tv_proxy_leader_restart_cb(struct output_device *device, enum output_device_state status)
+{
+  if (!device)
+    return;
+
+  if (device->session)
+    {
+      // Stop did not complete (yet); leave the device on its normal callback
+      // rather than trying to start it on top of a live session.
+      outputs_device_cb_set(device, device_streaming_cb);
+      return;
+    }
+
+  if (!device->selected || player_state != PLAY_PLAYING)
+    return;
+
+  if (!outputs_device_tv_proxy_followers_streaming(device))
+    device->tv_proxy_start_direct = 1;
+
+  outputs_device_start(device, device_streaming_cb, false);
+
+  status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
 }
 
 // Starts the hidden followers of a TV proxy group once the leader (the Apple

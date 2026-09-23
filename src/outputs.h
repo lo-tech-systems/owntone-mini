@@ -130,6 +130,11 @@ struct output_device
   // session even though no follower is streaming yet; consumed by
   // outputs_device_start().
   unsigned tv_proxy_start_direct:1;
+  // Outcome of the last real (non-probe) start of a TV proxy leader: set when
+  // its session was started because followers are streaming, so the session is
+  // kept for control/metadata/volume only and is sent no audio. Cleared on
+  // every other start path (direct fallback, probe).
+  unsigned tv_proxy_audio_suppress:1;
 
   // Type of the device, will be used to determine which output backend to call
   enum output_types type;

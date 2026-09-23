@@ -1917,6 +1917,8 @@ outputs_device_start(struct output_device *device, output_status_cb cb, bool onl
   if (device->session)
     return 0; // Device is already running, nothing to do
 
+  device->tv_proxy_audio_suppress = 0;
+
   // Device was fully removed from mDNS (non-multi-protocol path) or all
   // candidates were expired by GC. Refuse to start.
   if (!device->advertised)
@@ -1938,6 +1940,10 @@ outputs_device_start(struct output_device *device, output_status_cb cb, bool onl
                   outputs_device_display_name(device));
           only_probe = true;
         }
+      else
+        // Real start with followers already streaming: this session exists
+        // only for control/metadata/volume, the followers render the audio.
+        device->tv_proxy_audio_suppress = config_get_bool("tv_proxy_leader_audio_suppress", true);
     }
 
   if (only_probe)

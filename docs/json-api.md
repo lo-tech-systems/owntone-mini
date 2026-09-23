@@ -407,6 +407,7 @@ There are no category-listing or option-listing endpoints in this build.
 | `/api/settings/player/device_removal_grace_period` | integer | Seconds a disappeared AirPlay device is kept selectable, valid range `0` to `3600`; applied to the running player immediately on PUT, no restart required |
 | `/api/settings/player/buffered_audio_enabled` | boolean | Prefer buffered AAC-LC over realtime for AirPlay 2 outputs left on `auto` (default `true`, gated per device on an advertised buffered format); takes effect on the next output start |
 | `/api/settings/player/buffered_encoder_budget` | integer | Buffered-encode capacity budget override, valid range `0` to `64` (`0` = auto, CPU-based); takes effect on the next output activation |
+| `/api/settings/player/tv_proxy_leader_audio_suppress` | boolean | Suppress audio to a TV proxy leader (e.g. Apple TV) whose HomePod followers are already streaming - keeps control/anchor/metadata/volume only (default `true`); takes effect on the next TV proxy leader start |
 | `/api/settings/player/pipe_sample_rate` | integer | Pipe input sample rate, one of `44100`, `48000`, `88200`, `96000`; restart required |
 | `/api/settings/player/pipe_bits_per_sample` | integer | Pipe input bit depth, `16` or `32`; restart required |
 | `/api/settings/player/resample_quality` | string | Output resampler quality for format-mismatched paths, `high` or `standard` (default `standard`); unknown values fall back to `standard`; takes effect on the next playback session, no restart required |

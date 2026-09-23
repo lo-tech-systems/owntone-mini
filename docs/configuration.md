@@ -92,6 +92,23 @@ generous for your hardware, or to deliberately cap concurrent buffered
 outputs. A rejected activation returns HTTP 503 with
 `{"error": "encoder_capacity"}` (see [json-api.md](json-api.md)).
 
+### player: tv_proxy_leader_audio_suppress
+
+Boolean, default `true`. Also settable at runtime via
+`PUT /api/settings/player/tv_proxy_leader_audio_suppress` (takes effect on the
+next TV proxy leader start, no restart required).
+
+When an Apple TV is leading a HomePod group, its own session exists only for
+RTSP control, the shared anchor, metadata and volume - the HomePods render
+the audio. When `true` (default), that session is never sent an audio frame,
+which avoids needless encode/write work and the reconnect churn that comes
+from data the Apple TV doesn't need. When `false`, the Apple TV also receives
+audio, matching pre-existing behaviour.
+
+This only affects a TV proxy leader started because its followers are
+already streaming. A direct start (no follower available) always sends audio
+to the Apple TV regardless of this setting.
+
 ### player: resample_quality
 
 String, `high` or `standard`, default `standard`. Also settable at runtime via

@@ -136,6 +136,7 @@ config_defaults_build(void)
   json_object_object_add(defaults, "uncompressed_alac", json_object_new_boolean(true));
   json_object_object_add(defaults, "buffered_audio_enabled", json_object_new_boolean(true));
   json_object_object_add(defaults, "buffered_encoder_budget", json_object_new_int(0));
+  json_object_object_add(defaults, "tv_proxy_leader_audio_suppress", json_object_new_boolean(true));
   json_object_object_add(defaults, "device_removal_grace_period", json_object_new_int(180));
   json_object_object_add(defaults, "airplay_timing_port", json_object_new_int(0));
   json_object_object_add(defaults, "airplay_control_port", json_object_new_int(0));
@@ -158,6 +159,7 @@ static const char *api_settable_keys[] = {
   "device_removal_grace_period",
   "buffered_audio_enabled",
   "buffered_encoder_budget",
+  "tv_proxy_leader_audio_suppress",
   "pipe_sample_rate",
   "pipe_bits_per_sample",
   "resample_quality",
