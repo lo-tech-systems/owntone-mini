@@ -1613,6 +1613,20 @@ outputs_device_session_add(uint64_t device_id, void *session)
   return 0;
 }
 
+// Worker-thread callback: hand free heap pages back to the OS a moment after
+// the last output session has been torn down. Scheduled (not called inline)
+// from outputs_device_session_remove() because session_cleanup() invokes that
+// BEFORE session_free() -- so at that point the session's encoder, RTP ring
+// and buffers are still live and an immediate trim would reclaim almost
+// nothing. Deferring lets session_free() complete first, and keeps
+// malloc_trim()'s arena-wide page walk off the player thread.
+static void
+heap_trim_deferred_cb(void *arg)
+{
+  malloc_trim(0);
+  DPRINTF(E_DBG, L_PLAYER, "Trimmed heap after last session ended\n");
+}
+
 void
 outputs_device_session_remove(uint64_t device_id)
 {
@@ -1622,13 +1636,14 @@ outputs_device_session_remove(uint64_t device_id)
   if (device)
     device->session = NULL;
 
-  // With no sessions left, give the allocator a chance to hand pages back
-  // to the system instead of holding onto this session's high-water mark.
+  // With no sessions left, give the allocator a chance to hand pages back to
+  // the system instead of holding onto this session's high-water mark. The
+  // trim is deferred (see heap_trim_deferred_cb): our caller runs before
+  // session_free(), so the session's memory is still live at this point.
   if (outputs_sessions_count() == 0)
     {
-      malloc_trim(0);
-      DPRINTF(E_DBG, L_PLAYER, "Last session ended, trimmed the heap\n");
       memstats_log("last session ended");
+      worker_execute(heap_trim_deferred_cb, NULL, 0, 1);
     }
 
   return;

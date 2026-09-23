@@ -59,6 +59,17 @@
 // this many bytes
 #define AIRPLAY_BUFFERED_MAX_PAYLOAD (UINT16_MAX - 2 - AIRPLAY_BUFFERED_HEADER_LEN - AIRPLAY_BUFFERED_TAG_LEN - AIRPLAY_BUFFERED_NONCE_CLEAR_LEN)
 
+// Safety cap on the per-session send backlog (bs->outbuf). In healthy
+// operation outbuf drains to the receiver as fast as it is filled and stays
+// near-empty; a receiver that keeps its TCP connection open but stops reading
+// (e.g. a grouped HomePod once its Apple TV leader takes over the group) would
+// otherwise make outbuf grow at the full stream rate without bound and exhaust
+// memory on a low-RAM host. When the backlog exceeds this cap the session is
+// failed so the caller tears it down. Sized well above any legitimate
+// start-of-stream buffer-fill burst (a few seconds even at the highest
+// buffered bitrate, ALAC24 ~290 KB/s, is well under 1 MiB).
+#define AIRPLAY_BUFFERED_MAX_QUEUE_BYTES (8 * 1024 * 1024)
+
 struct airplay_buffered_stream
 {
   int fd;
@@ -312,6 +323,17 @@ airplay_buffered_write(struct airplay_buffered_stream *bs, const uint8_t *frame,
 
   if (!bs || bs->failed)
     return -1;
+
+  // Receiver has stopped draining the socket and the backlog has run away:
+  // fail the session rather than let it consume unbounded memory. The caller
+  // sees the -1 and tears the session down (deferred_session_failure).
+  if (evbuffer_get_length(bs->outbuf) > AIRPLAY_BUFFERED_MAX_QUEUE_BYTES)
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "AirPlay buffered send backlog %zu bytes exceeds cap %d; receiver not draining, failing session\n",
+	      evbuffer_get_length(bs->outbuf), AIRPLAY_BUFFERED_MAX_QUEUE_BYTES);
+      bs->failed = true;
+      return -1;
+    }
 
   ret = frame_encrypt_and_queue(bs, frame, len, seqnum, rtptime, marker);
   if (ret < 0)

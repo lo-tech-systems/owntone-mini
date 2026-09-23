@@ -177,6 +177,11 @@ memstats_tick_cb(void *arg)
   now = time(NULL);
   if (now - memstats_last_logged >= interval)
     {
+      // Hand free heap pages held across per-track / per-session churn back to
+      // the OS. On the worker thread so malloc_trim()'s arena walk never stalls
+      // the player/encoder threads, and only at the (>=300s) log cadence so it
+      // stays rare. Run before the log so the line reflects the post-trim state.
+      malloc_trim(0);
       player_memstats_log();
       memstats_last_logged = now;
     }
