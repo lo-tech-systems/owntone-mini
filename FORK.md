@@ -75,9 +75,9 @@ sqlext/sqlext.c / sqlext/Makefile.am
 
 | File | Change |
 |------|--------|
-| `src/player.c` / `src/player.h` | Removed seek, shuffle, repeat, multi-queue, verification kickoff; restarts a TV proxy leader (Apple TV) directly, replacing its audio-suppressed session, if every HomePod follower in its group drops |
+| `src/player.c` / `src/player.h` | Removed seek, shuffle, repeat, multi-queue, verification kickoff; restarts a TV proxy leader (Apple TV) directly, replacing its audio-suppressed session, if every HomePod follower in its group drops; starts a TV proxy leader's deferred HomePod followers once playback begins; fans per-speaker volume out to every member of an AirPlay 2 stereo group (with or without an Apple TV leader) at one absolute level |
 | `src/transcode.c` / `src/transcode.h` | Reduced to encode-only path (PCM → ALAC/PCM16); removed file decode, seeking, metadata extraction. Extended with AirPlay 2 encode profiles (48 kHz AAC stereo, AAC 5.1, 24-bit ALAC), ffmpeg surround-upmix filters, and CPU-class AAC coder selection |
-| `src/outputs.c` | Removed XCODE_PCM24/32/UNKNOWN dead references; defers the end-of-session heap trim until after the session is freed; tracks whether a TV proxy leader's session should be sent no audio |
+| `src/outputs.c` | Removed XCODE_PCM24/32/UNKNOWN dead references; defers the end-of-session heap trim until after the session is freed; tracks whether a TV proxy leader's session should be sent no audio, and whether its follower start was deferred until playback begins |
 | `src/misc.c` / `src/misc.h` | Removed: `unicode_fixup_string`, `two_str_hash`, `keyval_sort`, `linear_regression`, `m_readfile`, `atrim`; removed libunistring includes |
 | `src/listener.h` | Reduced to 3 event types: PLAYER, VOLUME, SPEAKER |
 | `src/logger.c` / `src/logger.h` | Removed unused log domains; removed `logger_alsa`; log lines are handed to a dedicated writer thread through a bounded queue, so the audio threads never wait on the log file (synchronous until the thread starts; lines are dropped and counted if the queue fills), and repetitive lines are throttled at the call site |
