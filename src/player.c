@@ -2876,30 +2876,42 @@ speaker_group_stop(struct output_device *device, output_status_cb cb)
 }
 
 static int
-speaker_group_volume_set(struct output_device *device, int absvol, int relvol, output_status_cb cb)
+speaker_group_volume_apply(struct output_device *device, int absvol, int relvol, output_status_cb cb)
 {
   struct output_device *cur;
   const char *group_id;
+  int target;
   int ret;
   int pending = 0;
   int successes = 0;
 
-  // Volume commands go to the group leader, then fan out to the followers so
-  // their cached volume (and hardware volume, where they support it) stays in
-  // sync with the leader's.
+  // Volume commands go to the addressed device, then fan out to every other
+  // member of its group (a HomePod stereo pair or a HomePod-behind-AppleTV
+  // proxy group) so their cached volume (and hardware volume, where they
+  // support it) stays in sync. When cb is NULL the value is only registered,
+  // not sent - used for a level the devices report themselves (see the DACP
+  // endpoint), where they already play at it and sending it back would only
+  // cause churn.
   outputs_device_volume_register(device, absvol, relvol);
-  ret = outputs_device_volume_set(device, cb);
-  if (ret > 0)
-    pending += ret;
-  else if (ret == 0)
+  if (cb)
+    {
+      ret = outputs_device_volume_set(device, cb);
+      if (ret > 0)
+        pending += ret;
+      else if (ret == 0)
+        successes++;
+    }
+  else
     successes++;
-
-  if (!outputs_device_is_tv_proxy_group(device))
-    return (pending > 0) ? pending : (successes > 0 ? 0 : -1);
 
   group_id = outputs_device_group_id(device);
   if (!group_id)
     return (pending > 0) ? pending : (successes > 0 ? 0 : -1);
+
+  // Bring every other member to the addressed device's resulting absolute
+  // level (its relvol has already been folded in), so a relative command does
+  // not resolve to a different absolute on each member.
+  target = device->volume;
 
   for (cur = outputs_list(); cur; cur = cur->next)
     {
@@ -2909,10 +2921,14 @@ speaker_group_volume_set(struct output_device *device, int absvol, int relvol, o
         continue;
       if (!cur_gid || strcmp(cur_gid, group_id) != 0)
         continue;
-      if (!outputs_device_is_tv_proxy_group(cur))
-        continue;
 
-      outputs_device_volume_register(cur, absvol, relvol);
+      outputs_device_volume_register(cur, target, -1);
+      if (!cb)
+        {
+          successes++;
+          continue;
+        }
+
       ret = outputs_device_volume_set(cur, cb);
       if (ret > 0)
         {
@@ -3468,7 +3484,7 @@ volume_setrel_speaker(void *arg, int *retval)
       return COMMAND_END;
     }
 
-  *retval = speaker_group_volume_set(device, -1, vol_param->volume, device_volume_cb);
+  *retval = speaker_group_volume_apply(device, -1, vol_param->volume, device_volume_cb);
 
   if (*retval > 0)
     return COMMAND_PENDING; // async
@@ -3490,39 +3506,12 @@ volume_setabs_speaker(void *arg, int *retval)
       return COMMAND_END;
     }
 
-  *retval = speaker_group_volume_set(device, vol_param->volume, -1, device_volume_cb);
+  *retval = speaker_group_volume_apply(device, vol_param->volume, -1, device_volume_cb);
 
   if (*retval > 0)
     return COMMAND_PENDING; // async
 
   return COMMAND_END;
-}
-
-// Records a volume on every member of device's group without sending it to
-// any of them. Used for a level the devices report themselves: they already
-// play at it, and the Apple TV leading a group has already applied it to the
-// other members, so sending it back would only cause churn.
-static void
-speaker_group_volume_register(struct output_device *device, int absvol)
-{
-  struct output_device *cur;
-  const char *group_id;
-
-  outputs_device_volume_register(device, absvol, -1);
-
-  group_id = outputs_device_group_id(device);
-  if (!group_id)
-    return;
-
-  for (cur = outputs_list(); cur; cur = cur->next)
-    {
-      const char *cur_gid = outputs_device_group_id(cur);
-
-      if (cur == device || !cur_gid || strcmp(cur_gid, group_id) != 0)
-        continue;
-
-      outputs_device_volume_register(cur, absvol, -1);
-    }
 }
 
 static enum command_state
@@ -3550,7 +3539,7 @@ volume_setraw_speaker(void *arg, int *retval)
 
   // A raw volume is the device reporting its own level (see the DACP
   // endpoint), so record it on the whole group rather than sending it back.
-  speaker_group_volume_register(device, volume);
+  speaker_group_volume_apply(device, volume, -1, NULL);
 
   *retval = 0;
 
