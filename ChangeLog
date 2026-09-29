@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## Version 1.4.2 - 2026-09-29
 
 - fix: an Apple TV led HomePod group (TV proxy topology) could stay silent
   when playback started from a stopped player. The leader's hidden followers
