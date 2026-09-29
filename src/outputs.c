@@ -1918,6 +1918,7 @@ outputs_device_start(struct output_device *device, output_status_cb cb, bool onl
     return 0; // Device is already running, nothing to do
 
   device->tv_proxy_audio_suppress = 0;
+  device->tv_proxy_followers_deferred = 0;
 
   // Device was fully removed from mDNS (non-multi-protocol path) or all
   // candidates were expired by GC. Refuse to start.

@@ -135,6 +135,10 @@ struct output_device
   // kept for control/metadata/volume only and is sent no audio. Cleared on
   // every other start path (direct fallback, probe).
   unsigned tv_proxy_audio_suppress:1;
+  // Set when a TV proxy leader's probe cleared pairing while the player was
+  // not yet playing, so its HomePod followers could not be started from the
+  // probe callback; the followers are started once playback begins.
+  unsigned tv_proxy_followers_deferred:1;
 
   // Type of the device, will be used to determine which output backend to call
   enum output_types type;
