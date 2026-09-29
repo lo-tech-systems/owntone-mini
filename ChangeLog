@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- fix: an Apple TV led HomePod group (TV proxy topology) could stay silent
+  when playback started from a stopped player. The leader's hidden followers
+  were only started once the player reached the playing state, but the
+  leader's probe callback that triggers them ran just before that state was
+  set and nothing re-ran it, so the group waited silently until an unrelated
+  speaker enable happened to arrive. The deferred followers are now started
+  as soon as playback begins
+- fix: a plain HomePod stereo pair (one with no Apple TV leader) only had its
+  volume applied to the addressed member, so its sibling could keep a stale
+  level and come up too loud or too quiet; per-speaker volume now fans out to
+  every member of any AirPlay 2 stereo group, and a relative change resolves
+  to the same absolute level on each member
+
 ## Version 1.4.1 - 2026-09-23
 
 - fix: a pipe metadata watch could be torn down on a worker thread while its
