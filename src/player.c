@@ -147,7 +147,9 @@
 // HomePods are streaming joins cleanly, so the two are started in a specific
 // order: the Apple TV is only probed first (outputs_device_start()), which
 // still runs the pairing exchange so a missing PIN gates the whole group;
-// once the probe succeeds, tv_proxy_followers_start() brings the HomePods up;
+// once the probe succeeds, tv_proxy_followers_start() brings the HomePods up
+// (or, if the probe completed before playback began, the followers are
+// started from playback_start_bh once the player is playing);
 // once any of them reports streaming, tv_proxy_leader_start() starts the
 // Apple TV's real session. If no follower can be started at all, the Apple TV
 // is started directly instead, as a fallback. A leader that then drops its
@@ -1836,7 +1838,9 @@ tv_proxy_leader_restart_cb(struct output_device *device, enum output_device_stat
 // between. A follower that fails to start is logged and skipped - it must not
 // affect the leader's session or the pending command. If no follower could be
 // started at all, the leader's real session is started directly instead of
-// leaving it waiting for one to stream (see outputs_device_start()).
+// leaving it waiting for one to stream (see outputs_device_start()). If the
+// leader is probed before the player is playing, the group is marked
+// deferred and started later from playback_start_bh() instead.
 static void
 tv_proxy_followers_start(struct output_device *leader)
 {
@@ -1848,7 +1852,18 @@ tv_proxy_followers_start(struct output_device *leader)
   if (!outputs_device_is_tv_proxy_leader(leader))
     return;
   if (player_state != PLAY_PLAYING)
-    return;
+    {
+      // The leader was probed before playback reached PLAY_PLAYING (the
+      // probe callback runs before playback_start_bh). Record it so the
+      // followers are started from the bottom half once the player is
+      // playing, instead of being lost until a later enable.
+      leader->tv_proxy_followers_deferred = 1;
+      DPRINTF(E_DBG, L_PLAYER, "TV proxy: '%s' probed while not playing, followers deferred\n",
+              outputs_device_display_name(leader));
+      return;
+    }
+
+  leader->tv_proxy_followers_deferred = 0;
 
   group_id = outputs_device_group_id(leader);
   if (!group_id)
@@ -1900,6 +1915,30 @@ tv_proxy_followers_start(struct output_device *leader)
       ret = outputs_device_start(leader, device_streaming_cb, false);
       if (ret < 0)
 	DPRINTF(E_WARN, L_PLAYER, "TV proxy: could not start Apple TV '%s' directly\n", outputs_device_display_name(leader));
+    }
+}
+
+// Starts the deferred followers of every selected TV proxy leader whose probe
+// completed while the player was not yet playing (see tv_proxy_followers_start).
+// Called from playback_start_bh() once PLAY_PLAYING has been set, so a cold
+// start completes on its own without waiting for a later enable. Starting a
+// follower that already has a session is a no-op, and tv_proxy_followers_start()
+// clears the deferred flag when it runs, so this cannot double-start.
+static void
+tv_proxy_groups_resume(void)
+{
+  struct output_device *device;
+
+  for (device = outputs_list(); device; device = device->next)
+    {
+      if (!outputs_device_is_tv_proxy_leader(device))
+	continue;
+      if (!device->selected || !device->tv_proxy_followers_deferred)
+	continue;
+
+      DPRINTF(E_INFO, L_PLAYER, "TV proxy: playback started, starting the followers of '%s'\n",
+              outputs_device_display_name(device));
+      tv_proxy_followers_start(device);
     }
 }
 
@@ -1989,6 +2028,7 @@ device_activate_cb(struct output_device *device, enum output_device_state status
 
       device->pin_pending = 1;
       outputs_device_deselect(device);
+      device->tv_proxy_followers_deferred = 0;
 
       retval = -2;
       goto out;
@@ -1999,6 +2039,7 @@ device_activate_cb(struct output_device *device, enum output_device_state status
       DPRINTF(E_LOG, L_PLAYER, "The %s device '%s' failed to activate\n", device->type_name, device->name);
 
       outputs_device_deselect(device);
+      device->tv_proxy_followers_deferred = 0;
 
       if (device->last_failure == OUTPUT_FAILURE_CAPACITY)
 	retval = -3;
@@ -2013,11 +2054,12 @@ device_activate_cb(struct output_device *device, enum output_device_state status
 
   // Any status reaching here other than PASSWORD/FAILED means the leader
   // cleared pairing - a probe completes with a startup-range status, a real
-  // start with connected (or streaming) - so it is safe to bring its hidden
-  // HomePod followers online too. This is a no-op unless device is a TV
-  // proxy group leader, and tv_proxy_followers_start() itself checks
-  // player_state, so a probe (which never reaches PLAY_PLAYING) will not
-  // start any followers here.
+  // start with connected (or streaming) - so its hidden HomePod followers can
+  // be brought online. This is a no-op unless device is a TV proxy group
+  // leader. On a cold start the probe callback runs before the player reaches
+  // PLAY_PLAYING, so tv_proxy_followers_start() records the group as deferred
+  // and it is completed from playback_start_bh(); when the player is already
+  // playing the followers start here directly.
   tv_proxy_followers_start(device);
 
   // If we were just probing or doing device verification this is a no-op, since
@@ -2353,6 +2395,10 @@ playback_start_bh(void *arg, int *retval)
   // We also ask listeners to update speaker/volume state, since it is possible
   // some of the speakers we tried to start responded with failure
   status_update(PLAY_PLAYING, LISTENER_PLAYER | LISTENER_SPEAKER | LISTENER_VOLUME);
+
+  // Complete any TV proxy group whose leader was probed before the player
+  // reached PLAY_PLAYING; its followers were deferred until this point.
+  tv_proxy_groups_resume();
 
   *retval = 0;
   return COMMAND_END;
