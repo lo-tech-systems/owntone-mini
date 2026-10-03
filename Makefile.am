@@ -1,6 +1,5 @@
 ACLOCAL_AMFLAGS = -I m4
 
-RPM_SPEC_FILE = owntone.spec
 CONF_FILE = owntone-settings.json
 SYSTEMD_SERVICE_FILE = owntone.service
 LOGROTATE_CONFIG_FILE = owntone
@@ -20,7 +19,6 @@ SUBDIRS = src
 dist_man_MANS = owntone.8
 
 nobase_dist_doc_DATA = \
-	UPGRADING \
 	README.md \
 	docs/configuration.md \
 	docs/changelog.md \
@@ -33,23 +31,19 @@ nobase_dist_doc_DATA = \
 EXTRA_DIST = \
 	$(CONF_FILE) \
 	$(LOGROTATE_CONFIG_FILE).in \
-	$(SYSTEMD_SERVICE_FILE).in \
-	$(RPM_SPEC_FILE)
+	$(SYSTEMD_SERVICE_FILE).in
 
 install-data-hook:
 	$(MKDIR_P) "$(DESTDIR)$(localstatedir)/log"
 	$(MKDIR_P) "$(DESTDIR)$(localstatedir)/run"
-	$(MKDIR_P) "$(DESTDIR)$(localstatedir)/cache/$(PACKAGE)"
 	( $(GETENT) group $(OWNTONE_GROUP) &> /dev/null || $(GROUPADD) --system $(OWNTONE_GROUP) )
 	( $(GETENT) passwd $(OWNTONE_USER) &> /dev/null || $(USERADD) --system --no-create-home --gid $(OWNTONE_GROUP) --groups audio --shell /usr/sbin/nologin $(OWNTONE_USER) )
 	( ! $(GETENT) group pulse-access &> /dev/null || $(USERMOD) --append --groups pulse-access $(OWNTONE_USER) )
-	$(CHOWN) $(OWNTONE_USER):$(OWNTONE_GROUP) "$(DESTDIR)$(localstatedir)/cache/$(PACKAGE)"
 # The settings file is now created and self-healed by the daemon at runtime.
 # Keep the repository template for reference/documentation, but do not seed
 # $(sysconfdir) during install.
 
 uninstall-hook:
-	( cd "$(DESTDIR)$(localstatedir)/cache" && rm -rf $(PACKAGE) )
 	( cd "$(DESTDIR)$(localstatedir)/log" && rm -f "$(PACKAGE).log*" )
 	( cd "$(DESTDIR)$(localstatedir)/run" && rm -f "$(PACKAGE).pid" )
 	( ! $(GETENT) passwd $(OWNTONE_USER) &> /dev/null || $(USERDEL) $(OWNTONE_USER) )

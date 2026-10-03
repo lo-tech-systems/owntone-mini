@@ -11,34 +11,22 @@ RUN apt-get -y update \
         autoconf \
         automake \
         autotools-dev \
-        bison \
         build-essential \
-        flex \
-        gawk \
         gettext \
         git \
-        gperf \
-        libasound2-dev \
         libavahi-client-dev \
         libavcodec-dev \
         libavfilter-dev \
         libavformat-dev \
         libavutil-dev \
-        libconfuse-dev \
-        libcurl4-openssl-dev \
         libevent-dev \
         libgcrypt20-dev \
+        libgpg-error-dev \
         libjson-c-dev \
-        libmxml-dev \
         libplist-dev \
-        libprotobuf-c-dev \
         libsodium-dev \
-        libsqlite3-dev \
-        libswscale-dev \
         libtool \
-        libunistring-dev \
-        libwebsockets-dev \
-        libxml2-dev \
+        pkg-config \
         zlib1g-dev \
         # Python package manager (used by pipx dev-container tooling)
         python3-pip \

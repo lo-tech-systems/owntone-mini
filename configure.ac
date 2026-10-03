@@ -28,12 +28,12 @@ AC_SUBST([AM_CPPFLAGS])
 dnl Checks for header files.
 AC_CHECK_HEADERS_ONCE([regex.h pthread_np.h])
 AC_CHECK_HEADERS([sys/wait.h sys/param.h dirent.h getopt.h stdint.h], [],
-	[AC_MSG_ERROR([[Missing header required to build OwnTone]])])
+	[AC_MSG_ERROR([[Missing header required to build owntone-mini]])])
 AC_CHECK_HEADERS([time.h], [],
-	[AC_MSG_ERROR([[Missing header required to build OwnTone]])])
+	[AC_MSG_ERROR([[Missing header required to build owntone-mini]])])
 AC_CHECK_FUNCS_ONCE([posix_fadvise pipe2 gettid])
 AC_CHECK_FUNCS([strptime strtok_r], [],
-	[AC_MSG_ERROR([[Missing function required to build OwnTone]])])
+	[AC_MSG_ERROR([[Missing function required to build owntone-mini]])])
 
 dnl check for clock_gettime or replace it
 AC_SEARCH_LIBS([clock_gettime], [rt],
@@ -115,7 +115,7 @@ dnl SQLite3 removed: all queue/speaker state is now in-memory (see src/queue.c)
 
 OWNTONE_MODULES_CHECK([OWNTONE], [LIBEVENT], [libevent >= 2.1.4],
 	[event_base_new], [event2/event.h],
-	[dnl check for version 2.2 (with websocket server support)
+	[dnl check for version 2.2
 	 PKG_CHECK_EXISTS([libevent >= 2.2.1],
 	 	[AC_DEFINE([HAVE_LIBEVENT22], 1,
 			[Define to 1 if you have libevent > 2.2])],
@@ -285,6 +285,5 @@ AC_CONFIG_SUBDIRS([
 AC_CONFIG_FILES([
 	src/Makefile
 	Makefile
-	owntone.spec
 ])
 AC_OUTPUT
