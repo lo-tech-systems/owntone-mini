@@ -12,7 +12,42 @@ This pared-back build exposes a small HTTP API for:
 - reading and updating a small set of runtime settings
 - retrieving basic server status
 
-All endpoints are rooted at `/api`.
+All endpoints are rooted at `/api`. Requests and responses use JSON.
+
+## Access control
+
+Access to the API is decided by the address the request comes from.
+
+- The `trusted_networks` setting in the configuration file lists the networks
+  that are trusted. It is a list whose entries can be `lan` (the default, any
+  local network address), `localhost`, `any`, `none`, or an address prefix
+  such as `192.168.1`. Requests from a trusted address need no credentials.
+- Requests from any other address get `403 Forbidden`, unless
+  `admin_password` is set in the configuration file. In that case the server
+  asks for HTTP basic authentication with the user name `admin` and that
+  password, and answers `401 Unauthorized` until valid credentials are sent.
+- Responses carry an `Access-Control-Allow-Origin` header set from the
+  `allow_origin` configuration value, which defaults to `*`. An empty value
+  turns the header off. CORS preflight (`OPTIONS`) requests are answered when
+  it is set.
+- The server listens on the port given by `port` in the configuration file,
+  `3689` by default.
+
+## Errors
+
+A request to a path or method that is not listed here gets `400 Bad Request`.
+Errors are returned as an HTML page, except where an endpoint below says its
+error body is JSON, in the form `{"error": "message"}`. The status codes each
+endpoint can return are listed in its section.
+
+| Code | Meaning |
+| ---- | ------- |
+| 400 | Invalid or missing request body, bad value, unknown output id, or unknown path |
+| 401 | Credentials needed (see above) |
+| 403 | Address not trusted and no `admin_password` set |
+| 404 | Unknown setting |
+| 500 | The server could not carry out the request |
+| 503 | A buffered output was refused because the encoder budget is used up |
 
 ## Player
 
@@ -42,6 +77,10 @@ If no query parameter is provided, playback starts or resumes the current source
 
 Returns HTTP `204 No Content` on success.
 
+Returns HTTP `400 Bad Request` if `item_id` or `position` is not a number or
+does not match a queue item, and HTTP `500 Internal Server Error` if playback
+could not be started.
+
 **Example**
 
 ```shell
@@ -58,7 +97,8 @@ PUT /api/player/stop
 
 **Response**
 
-Returns HTTP `204 No Content` on success.
+Returns HTTP `204 No Content` on success, or HTTP `500 Internal Server Error`
+if playback could not be stopped.
 
 **Example**
 
@@ -95,9 +135,14 @@ All fields are optional; omitted fields are not changed.
 This endpoint reads the file straight from disk, unlike the pipe metadata
 path (which carries artwork as bytes and keeps them in memory for the
 session). If used, the file should already respect the same size contract as
-the pipe path — at most ~48 KB — since that is the size an AirPlay/MRP
-receiver is known to render reliably; this endpoint does not resize or
+the pipe path, at most about 48 KB, since that is the size an AirPlay
+receiver is known to render reliably. This endpoint does not resize or
 re-encode what it is given.
+
+**Response**
+
+Returns HTTP `204 No Content` on success, or HTTP `400 Bad Request` if the body
+is missing or is not valid JSON.
 
 **Example**
 
@@ -128,12 +173,13 @@ curl -X PUT "http://localhost:3689/api/metadata" \
 | `has_password` | boolean | `true` if the output advertises password protection |
 | `requires_auth` | boolean | `true` if the output currently requires authorization |
 | `needs_auth_key` | boolean | `true` if the server does not have a valid stored auth key |
+| `pin_pending` | boolean | `true` if the last attempt to enable the output stopped because the device wants a PIN or password. Submit it with `pin` in [Update an output](#update-an-output). Cleared when a later activation attempt gets past that step |
 | `volume` | integer | Output volume in percent |
 | `offset_ms` | integer | Timing offset in milliseconds |
 | `format` | string | Active audio format |
 | `supported_formats` | array | Supported audio format strings |
-| `mode` | string | Active protocol mode preference. One of `"auto"`, `"raop"`, `"airplay2"`, `"airplay2_buffered"`, `"airplay2_buffered_24"`, `"airplay2_surround_stereo"`, or `"airplay2_surround_upmix"` |
-| `supported_modes` | array | Concrete protocol modes available for this output; a subset of `["raop", "airplay2", "airplay2_buffered", "airplay2_buffered_24", "airplay2_surround_stereo", "airplay2_surround_upmix"]`. Reflects capability learned from the device itself, so it can grow after the output is first discovered. Absent or empty means only one protocol is available |
+| `mode` | string | Active protocol mode preference. One of `"auto"` (the default), `"raop"`, `"airplay2"`, `"airplay2_buffered"`, `"airplay2_buffered_24"`, `"airplay2_surround_stereo"`, or `"airplay2_surround_upmix"` |
+| `supported_modes` | array | Concrete protocol modes available for this output; a subset of `["raop", "airplay2", "airplay2_buffered", "airplay2_buffered_24", "airplay2_surround_stereo", "airplay2_surround_upmix"]`. Reflects capability learned from the device itself, so it can grow after the output is first discovered. Never includes `"auto"`, which is always accepted. Empty if no protocol is known yet |
 
 The AirPlay 2 modes beyond plain `"airplay2"` (realtime) select a buffered
 transport, where the receiver queues audio ahead of playout instead of
@@ -148,8 +194,13 @@ receiving it as it plays:
 
 `airplay2_surround_stereo` and `airplay2_surround_upmix` never appear in
 `supported_modes` for a HomePod, a HomePod stereo pair, or a HomePod group
-routed through an Apple TV — surround is offered only for a standalone Apple
-TV.
+routed through an Apple TV; surround is offered only for a standalone Apple
+TV. If either mode is set on an output that is not eligible, the output plays
+over the realtime path instead and no error is returned.
+
+Setting a mode that is valid but not in the output's `supported_modes` is
+accepted with `204` but ignored, and `mode` stays as it was. A name that is not
+in the list above gives `400`.
 
 ### List outputs
 
@@ -204,7 +255,8 @@ GET /api/outputs/{id}
 
 **Response**
 
-Returns a single [output](#output-object) object.
+Returns a single [output](#output-object) object, or HTTP `400 Bad Request` if
+the id is not a number or no output has that id.
 
 ### Update an output
 
@@ -222,15 +274,23 @@ All fields are optional. Any combination may be supplied in one request.
 | Key | Type | Value |
 | --- | ---- | ----- |
 | `selected` | boolean | Enable or disable the output |
-| `volume` | integer | Set output volume |
+| `volume` | integer | Set output volume, from `0` to `100` |
 | `pin` | string | Submit a PIN for authorization |
 | `format` | string | Set the output audio format |
-| `offset_ms` | integer | Set timing offset in milliseconds |
+| `offset_ms` | integer | Set timing offset in milliseconds, from `-2000` to `2000` |
 | `mode` | string | Set the protocol mode preference: `"auto"`, `"raop"`, `"airplay2"`, `"airplay2_buffered"`, `"airplay2_buffered_24"`, `"airplay2_surround_stereo"`, or `"airplay2_surround_upmix"` |
+
+Fields are applied in this order: `offset_ms`, `selected`, `volume`, `pin`,
+`format`, `mode`. If one fails, the ones before it have already taken effect.
 
 **Response**
 
 Returns HTTP `204 No Content` on success.
+
+Returns HTTP `400 Bad Request` if the id is not a number, the body is missing
+or not valid JSON, no output has that id, `volume` or `offset_ms` is out of
+range, the output could not be enabled, disabled or given the format, the PIN
+was not accepted, or `mode` is not one of the names listed above.
 
 Enabling (`"selected":true`) a buffered AirPlay 2 output (`airplay2_buffered`,
 `airplay2_buffered_24`, or one of the surround modes) can fail with HTTP `503
@@ -265,7 +325,8 @@ Content-Type: application/json
 
 **Response**
 
-Returns HTTP `204 No Content` on success.
+Returns HTTP `204 No Content` on success, or HTTP `400 Bad Request` if the body
+is missing, has no `outputs` array, or contains an id that is not a number.
 
 **Example**
 
@@ -300,6 +361,7 @@ GET /api/config
 | `websocket_port` | integer | Always `0` in this build |
 | `buildoptions` | array | Array of server feature strings |
 | `restart_required` | boolean | `true` if a restart-required config change is pending |
+| `live_offset` | boolean | Always `true` in this build. It means an output's `offset_ms` can be changed during playback |
 
 **Example**
 
@@ -311,7 +373,7 @@ curl -X GET "http://localhost:3689/api/config"
 {
   "product_name": "owntone-mini",
   "websocket_port": 0,
-  "version": "29.0-mini.6",
+  "version": "x.y.z",
   "buildoptions": [
     "ffmpeg",
     "Without Spotify",
@@ -323,7 +385,8 @@ curl -X GET "http://localhost:3689/api/config"
     "Without webinterface",
     "Regex"
   ],
-  "restart_required": false
+  "restart_required": false,
+  "live_offset": true
 }
 ```
 
@@ -374,7 +437,9 @@ PUT /api/update
 
 Returns HTTP `204 No Content` on success.
 
-Returns HTTP `500 Internal Server Error` with a JSON error object if the updated pipe configuration cannot be applied.
+Returns HTTP `500 Internal Server Error` with a JSON error object if the
+configuration cannot be reloaded or the updated pipe configuration cannot be
+applied. In the second case the previous pipe path stays in use.
 
 ## Settings
 
@@ -384,6 +449,11 @@ Returns HTTP `500 Internal Server Error` with a JSON error object if the updated
 | PUT | `/api/settings/{category}/{option}` | Change a setting |
 
 There are no category-listing or option-listing endpoints in this build.
+
+Category and option names are matched without regard to case, so
+`/api/settings/Misc/LogLevel` reaches `misc/loglevel`. GET returns the name in
+its canonical lower case form. Only letters, digits and underscores are allowed
+in the path. An unknown setting gives HTTP `404 Not Found`.
 
 ### Option object
 
@@ -397,7 +467,7 @@ There are no category-listing or option-listing endpoints in this build.
 
 | Endpoint | Type | Notes |
 | -------- | ---- | ----- |
-| `/api/settings/misc/loglevel` | integer | Log level |
+| `/api/settings/misc/loglevel` | integer | Log level, applied to the running server at once. The running level is clamped to `0` to `5`; the number stored in the settings is the one sent |
 | `/api/settings/misc/pipe_path` | string | Pipe/FIFO path. The provided path must already exist, be a FIFO, and be readable by the server. A successful PUT persists the value immediately; `PUT /api/update` makes it live. GET returns the live path currently in use. |
 | `/api/settings/misc/pipe_autostart` | boolean | Whether the pipe input autostarts. Changes become live on `PUT /api/update`. |
 | `/api/settings/misc/ipv6` | boolean | IPv6 enable/disable, restart required |
@@ -471,7 +541,15 @@ For `misc/pipe_path`, the server validates the provided path before persisting i
 
 `PUT /api/settings/misc/pipe_path` does not switch the running pipe immediately. The new value is persisted, and `PUT /api/update` applies it to the live runtime.
 
-If validation fails, the endpoint returns HTTP `400 Bad Request` with a JSON body like:
+Status codes other than `200`:
+
+| Code | When |
+| ---- | ---- |
+| 400 | The body is missing or not valid JSON, `value` is missing or not of the setting's type, or the value is rejected |
+| 404 | No such setting |
+| 500 | The setting could not be saved |
+
+If `pipe_path` or `user_agent` validation fails, the 400 response has a JSON body like:
 
 ```json
 {
@@ -496,5 +574,5 @@ curl -X PUT "http://localhost:3689/api/settings/player/start_buffer_ms" \
 ```shell
 curl -X PUT "http://localhost:3689/api/settings/misc/pipe_path" \
   -H "Content-Type: application/json" \
-  -d "{\"value\":\"/tmp/autostream-pipes/autostream.fifo\"}"
+  -d "{\"value\":\"/tmp/owntone.fifo\"}"
 ```
