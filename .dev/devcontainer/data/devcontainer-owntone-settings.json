@@ -13,6 +13,7 @@
   "uncompressed_alac": false,
   "buffered_audio_enabled": true,
   "buffered_encoder_budget": 0,
+  "tv_proxy_leader_audio_suppress": true,
   "device_removal_grace_period": 180,
   "airplay_timing_port": 0,
   "airplay_control_port": 0,
