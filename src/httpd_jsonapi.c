@@ -693,10 +693,10 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
 
       // Unknown mode strings are a bad request; unsupported-but-valid modes
       // are handled inside player_speaker_mode_set (warn + no-op).
-      // airplay2_surround_stereo/_upmix are accepted here even though they
-      // are not yet functional: selecting them falls through to realtime
-      // rather than erroring, so there is no reason to reject them at the API
-      // boundary.
+      // airplay2_surround_stereo/_upmix are accepted here for any device.
+      // They select a 5.1 AAC buffered stream, but only for a standalone
+      // Apple TV; on any other device the output falls through to the
+      // realtime path rather than erroring, so the API does not reject them.
       if (!mode_str ||
           (strcmp(mode_str, "auto") != 0 &&
            strcmp(mode_str, "raop") != 0 &&

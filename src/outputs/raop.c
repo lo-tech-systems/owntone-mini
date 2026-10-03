@@ -1680,21 +1680,11 @@ Airport Express fw 7.8) require this step anyway, otherwise we get a 403 to
 our ANNOUNCE. So we do it with a flag for no encryption, and without actually
 authenticating the device.
 
-Good to know (source Apple's MFi Accessory Interface Specification):
-- Curve25519 Elliptic-Curve Diffie-Hellman technology for key exchange
-- RSA for signing and verifying and AES-128 in counter mode for encryption
-- We start by sending a Curve25519 public key + no encryption flag
-- The device responds with public key, MFi certificate and a signature, which
-  is created by the device signing the two public keys with its RSA private
-  key and then encrypting the result with the AES master key derived from the
-  Curve25519 shared secret (generated from device private key and our public
-  key)
-- The AES key derived from the Curve25519 shared secret can then be used to
-  encrypt future content
-- New keys should be generated for each authentication attempt, but we don't
-  do that because we don't really use this + it adds a libsodium dependency
-
-Since we don't do auth or encryption, we currently just ignore the reponse.
+What we send is a single byte with the no-encryption flag (0x01) followed by a
+fixed Curve25519 public key. We don't use a private key, so no keys are
+exchanged. We don't read the body of the device's reply, and only log a
+warning if its status isn't OK before carrying on. No authentication or
+encryption takes place.
 */
 static int
 raop_send_req_auth_setup(struct raop_session *rs, evrtsp_req_cb cb, const char *log_caller)

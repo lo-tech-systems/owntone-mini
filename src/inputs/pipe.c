@@ -22,8 +22,8 @@
  * --------------
  * This module will read a PCM16 stream from a named pipe and write it to the
  * input buffer. The user may start/stop playback from a pipe by selecting it
- * through a client. If the user has configured pipe_autostart, then pipes in
- * the library will also be watched for data, and playback will start/stop
+ * through a client. If pipe_autostart is enabled, the FIFO at the configured
+ * pipe_path is also watched for data, and playback will start/stop
  * automatically.
  *
  * The module will also look for pipes with a .metadata suffix, and if found,

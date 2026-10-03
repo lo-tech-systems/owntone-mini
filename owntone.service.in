@@ -8,7 +8,7 @@ After=network-online.target remote-fs.target
 ExecStart=@sbindir@/owntone -f
 
 # Media path must outrank default-priority housekeeping; see
-# autostream_monitor.service for the rest of the ladder.
+# the companion audio service for the rest of the ladder.
 Nice=-12
 
 # Allow the process to lock its pages in RAM (mlockall(), done once it has
@@ -39,8 +39,8 @@ Environment=MALLOC_MMAP_THRESHOLD_=131072
 Environment=MALLOC_TRIM_THRESHOLD_=131072
 
 # Constrain the upper limit of memory/swap that can be used; this prevents 
-# the server from consuming all system memory (in event of bug/malformed user
-# curl/SMARTPL query etc) that would hang/freeze low resource and headless (ie 
+# the server from consuming all system memory (in event of a bug or a runaway
+# request) that would hang/freeze low resource and headless (ie 
 # RPi) machines
 #
 # systemd will kill the process in such an event but would be auto-restarted as

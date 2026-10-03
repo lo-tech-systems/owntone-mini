@@ -508,7 +508,7 @@ airplay_mrp_playback_state_make(struct evbuffer *evbuf, struct airplay_mrp *mrp,
 // Builds the bare (unprefixed, no ProtocolMessage envelope) NowPlayingClient
 // protobuf - f1 pid, f2 bundle id, f7 display name - and wraps it as
 // { type: "updateMRNowPlayingClient", params: { mrNowPlayingClient: <data> } },
-// matching what a real Apple sender emits.
+// matching the message receivers expect from a sender.
 int
 airplay_mrp_nowplaying_client_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, const char *devname)
 {
