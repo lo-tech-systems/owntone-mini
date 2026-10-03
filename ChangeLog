@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## Version 1.4.3 - 2026-10-03
 
 - docs: the configuration, JSON API, man page, command-line and artwork
   pages now describe owntone-mini as it is, a new page documents the pipe
