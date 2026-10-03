@@ -1,60 +1,68 @@
 .\"  -*- nroff -*-
-.TH OWNTONE "8" "2018-01-14" "owntone" "DAAP, MPD, Chromecast & RSP media server"
+.TH OWNTONE "8" "2026-10" "owntone-mini" "AirPlay audio sender"
 .SH NAME
-OwnTone \- iTunes\-compatible DAAP server with MPD, Chromecast and RSP support
+owntone \- AirPlay audio sender fed from a pipe (owntone-mini)
 .SH SYNOPSIS
-.B OwnTone
+.B owntone
 [\fIoptions\fR]
 .SH DESCRIPTION
-\fBOwnTone\fP is a Linux/FreeBSD DAAP (iTunes) media server with support
-for AirPlay devices, Apple Remote (and compatibles), MPD, Spotify, Chromecast,
-mp3 streaming and internet radio. It allows you to share your music collection
-over the local network.
+\fBowntone\fP is the daemon of owntone-mini, a minimal fork of OwnTone.
+It reads audio from a named pipe (FIFO) and streams it to AirPlay 1 and
+AirPlay 2 speakers on the local network. The binary is called
+\fBowntone\fP; the package is called owntone-mini.
+.PP
+The daemon is controlled through an HTTP JSON API. Its settings are kept in a
+JSON file, which is created with defaults on first start if it does not
+exist. See the project documentation for the settings and the API.
 .SH OPTIONS
 .TP
 \fB\-d, \-\-debug=\fR\fIlevel\fP
-Log level (0\-5).
+Log level, a number from 0 to 5: 0 fatal, 1 log, 2 warning, 3 info, 4 debug,
+5 spam. Each level includes the lower ones. If not given, the \fIloglevel\fP
+setting is used (default 3).
 .TP
 \fB\-D, \-\-logdomains=\fR\fIdom,..,dom\fP
-Debug domains; available domains are: \fIconfig\fP, \fIdaap\fP,
-\fIdb\fP, \fIhttpd\fP, \fImain\fP, \fImdns\fP, \fImisc\fP,
-\fIrsp\fP, \fIscan\fP, \fIxcode\fP, \fIevent\fP, \fIhttp\fP, \fIremote\fP,
-\fIdacp\fP, \fIffmpeg\fP, \fIartwork\fP, \fIplayer\fP, \fIraop\fP,
-\fIlaudio\fP, \fIdmap\fP, \fIfdbperf\fP, \fIspotify\fP, \fIscrobble\fP,
-\fIcache\fP, \fImpd\fP, \fIstream\fP, \fIcast\fP, \fIfifo\fP, \fIlib\fP,
-\fIweb\fP, \fIairplay\fP.
-.TP
-\fB\-c, \-\-config=\fR\fIfile\fP
-Use \fIfile\fP as the configuration file.
-.TP
-\fB\-P, \-\-pidfile=\fR\fIfile\fP
-Write PID to \fIfile\fP.
+Restrict logging to the listed domains, separated by commas or spaces.
+Available domains are: \fIconfig\fP, \fIhttpd\fP, \fImain\fP, \fImdns\fP,
+\fImisc\fP, \fIxcode\fP, \fIevent\fP, \fIffmpeg\fP, \fIplayer\fP,
+\fIraop\fP, \fIdacp\fP, \fIweb\fP, \fIairplay\fP. An unknown domain is an
+error. If not given, all domains are logged.
 .TP
 \fB\-f, \-\-foreground\fR
-Run in the foreground.
+Run in the foreground instead of as a background daemon.
 .TP
-\fB\-b, \-\-ffid=\fR\fIffid\fP
-\fIffid\fP to be broadcast in mDNS records.
+\fB\-c, \-\-config=\fR\fIfile\fP
+Use \fIfile\fP as the settings file.
+.TP
+\fB\-P, \-\-pidfile=\fR\fIfile\fP
+Write the process ID to \fIfile\fP.
 .TP
 \fB\-v, \-\-version\fR
-Display version information.
+Display version information and exit.
 .TP
-\fB\-\-mdns-no-rsp\fR
-Don't announce RSP service via mDNS.
-.TP
-\fB\-\-mdns-no-daap\fR
-Don't announce DAAP service via mDNS.
-.TP
-\fB\-\-mdns-no-cname\fR
-Don't register owntone.local as CNAME via mDNS.
-.TP
-\fB\-\-mdns-no-web\fR
-Don't announce web interface via mDNS.
+\fB\-\-logformat=\fR\fIformat\fP
+Log line format: \fIdefault\fP or \fIlogfmt\fP. Any other value selects
+\fIdefault\fP. If not given, the \fIlogformat\fP setting is used.
 .SH FILES
 .nf
- \fI/etc/owntone.conf\fR
- \fI/var/cache/owntone\fR
+ \fI/etc/owntone-settings.json\fR  settings file (default; set with \fB\-c\fR)
+ \fI/var/log/owntone.log\fR  log file (default; set by the \fIlogfile\fP setting)
+ \fI/var/run/owntone.pid\fR  PID file (default; set with \fB\-P\fR)
 .fi
+.PP
+The default settings and PID file locations follow the directories chosen when
+owntone-mini was built.
+.SH NOTES
+owntone-mini is an independent open-source project. It is not affiliated with,
+authorised, sponsored or endorsed by Apple Inc. AirPlay, Apple TV, HomePod and
+iTunes are trademarks of Apple Inc., registered in the U.S. and other
+countries.
 .SH SEE ALSO
-See \fIhttp://owntone.github.io/owntone-server/\fR for more in-depth information
-about using \fBOwnTone\fP.
+The project documentation: \fIdocs/configuration.md\fR and
+\fIdocs/json-api.md\fR, and \fIhttps://github.com/lo-tech-systems/owntone-mini\fR.
+.PP
+owntone-mini is derived from OwnTone,
+\fIhttps://github.com/owntone/owntone-server\fR.
+.SH AUTHOR
+OwnTone was written by its upstream authors; see the project history at
+the OwnTone repository. owntone-mini is maintained by James Pearce.
