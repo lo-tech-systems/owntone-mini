@@ -14,3 +14,9 @@ many significant contributions.
 
 For a complete list of contributers, please see:
 https://github.com/owntone/owntone-server/graphs/contributors
+
+owntone-mini
+------------
+
+owntone-mini is a fork of OwnTone, maintained by James Pearce. See FORK.md for
+what it changes and how it relates to upstream.
