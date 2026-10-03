@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- docs: the configuration, JSON API, man page, command-line and artwork
+  pages now describe owntone-mini as it is, a new page documents the pipe
+  input and its metadata, and the README gains build instructions and a
+  documentation index
+- docs: licence headers keep every original copyright notice and say
+  where a file has been modified for owntone-mini; FORK.md and AUTHORS
+  describe the fork and its licensing
+- change: /api/config no longer lists removed features in buildoptions
+- change: the RPM spec file and UPGRADING notes are removed, and install
+  no longer creates an unused cache directory
+
 ## Version 1.4.2 - 2026-09-29
 
 - fix: an Apple TV led HomePod group (TV proxy topology) could stay silent
