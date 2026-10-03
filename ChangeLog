@@ -302,6 +302,8 @@ resets versioning from the 29.0-mini.x series. Changes since 29.0-mini.8:
 
 - new: initial release of paired-back OwnTone for autostream
 
+The entries below this line are from upstream OwnTone, before the owntone-mini fork.
+
 ## Version 29.0 - 2025-09-12
 
 - fix: client name showing as blank when pairing with MacOS
