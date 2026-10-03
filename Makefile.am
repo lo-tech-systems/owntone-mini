@@ -26,6 +26,7 @@ nobase_dist_doc_DATA = \
 	docs/changelog.md \
 	docs/control-clients/cli-api.md \
 	docs/audio-outputs/airplay.md \
+	docs/inputs/pipe.md \
 	docs/artwork.md \
 	docs/json-api.md
 
