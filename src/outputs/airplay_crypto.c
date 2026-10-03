@@ -1,5 +1,7 @@
 /*
- * Copyright (C) OwnTone contributors
+ * Copyright (C) 2020-2021 Espen Jürgensen <espenjurgensen@gmail.com>
+ *
+ * Modified for owntone-mini. Modifications Copyright (C) 2026 James Pearce
  *
  * ChaCha20-Poly1305 helpers for AirPlay 2 audio-payload encryption, factored
  * out of airplay.c so the realtime and buffered senders share one

@@ -1,3 +1,6 @@
+/* Minimal replacement for the OwnTone module of the same name, written for
+ * owntone-mini. Copyright (C) 2026 James Pearce. GPL v2 or later, see COPYING. */
+
 /*
  * db.h — compatibility shim for owntone-minimal
  *

@@ -4,7 +4,10 @@
  * Defines the 'cfg' sentinel global and the static pools used by
  * cfg_gettsec / cfg_getsec (declared as extern in conffile.h).
  *
- * Copyright (C) 2025 OwnTone-Minimal contributors
+ * Minimal replacement for the OwnTone module of the same name, written for
+ * owntone-mini.
+ *
+ * Copyright (C) 2026 James Pearce
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by

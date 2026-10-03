@@ -2,7 +2,6 @@
  * In-memory queue implementation for the pipe-only OwnTone build.
  *
  * Copyright (C) 2026 James Pearce
- * Copyright (C) 2025 OwnTone-Minimal contributors
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -182,6 +181,7 @@ db_queue_clear(int id)
   return 0; /* no-op */
 }
 
+/* Adapted from OwnTone's db.c */
 void
 free_queue_item(struct db_queue_item *qi, int content_only)
 {

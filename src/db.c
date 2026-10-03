@@ -5,7 +5,10 @@
  * airplay.c and raop.c after the SQLite database was removed. Also used by
  * airplay.c to persist a device's buffered-transport capability.
  *
- * Copyright (C) 2025 OwnTone-Minimal contributors
+ * Minimal replacement for the OwnTone module of the same name, written for
+ * owntone-mini.
+ *
+ * Copyright (C) 2026 James Pearce
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by

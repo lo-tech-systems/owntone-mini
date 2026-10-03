@@ -7,7 +7,10 @@
  * those types and functions on top of owntone_config.h so that the upstream
  * source files can be compiled without any modification.
  *
- * Copyright (C) 2025 OwnTone-Minimal contributors
+ * Minimal replacement for the OwnTone module of the same name, written for
+ * owntone-mini.
+ *
+ * Copyright (C) 2026 James Pearce
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by

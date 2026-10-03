@@ -5,6 +5,8 @@
  * Copyright (C) 2009-2011 Julien BLACHE <jb@jblache.org>
  * Copyright (C) 2005 Sebastian Dr�ge <slomo@ubuntu.com>
  *
+ * Modified for owntone-mini. Modifications Copyright (C) 2026 James Pearce
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or

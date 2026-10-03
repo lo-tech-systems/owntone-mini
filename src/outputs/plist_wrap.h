@@ -1,3 +1,6 @@
+/* Part of owntone-mini, derived from OwnTone (GPL v2 or later, see COPYING).
+ * Modified for owntone-mini. Modifications Copyright (C) 2026 James Pearce */
+
 /*
  * Convenience wrappers for libplist
  *
