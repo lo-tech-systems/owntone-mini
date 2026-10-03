@@ -569,7 +569,7 @@ httpd_request_is_authorized(struct httpd_request *hreq)
       return false;
     }
 
-  ret = httpd_basic_auth(hreq, "admin", passwd, PACKAGE " web interface");
+  ret = httpd_basic_auth(hreq, "admin", passwd, PACKAGE " API");
   if (ret != 0)
     {
       // httpd_basic_auth has sent a reply (and logged an error, if relevant)

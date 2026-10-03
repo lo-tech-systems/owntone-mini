@@ -80,13 +80,6 @@ static char *buildopts[] =
 #else
     "libav",
 #endif
-    "Without Spotify",
-    "Without LastFM",
-    "Without Chromecast",
-    "Without MPD",
-    "Without websockets",
-    "Without ALSA",
-    "Without webinterface",
 #ifdef HAVE_REGEX_H
     "Regex",
 #else
