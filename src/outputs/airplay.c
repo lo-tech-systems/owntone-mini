@@ -205,6 +205,10 @@
 // https://github.com/owntone/owntone-server/issues/734#issuecomment-622959334
 #define AIRPLAY_KEEP_ALIVE_INTERVAL   25
 
+// Building and queueing one request on the player thread takes this long (in
+// milliseconds) or more before it is logged at info rather than debug level
+#define AIRPLAY_REQUEST_BUILD_SLOW_MS 5
+
 // Some devices (notably HomePod stereo pairs) briefly refuse new RTSP
 // connections for a few seconds after a TEARDOWN. On a soft start failure
 // (connection refused, GET /info negative, timeout) we retry up to
@@ -2758,6 +2762,9 @@ static void
 airplay_keep_alive_timer_cb(int fd, short what, void *arg)
 {
   struct airplay_session *session;
+  uint64_t start_ms;
+  char name[24];
+  int count = 0;
 
   if (!airplay_sessions)
     {
@@ -2765,13 +2772,19 @@ airplay_keep_alive_timer_cb(int fd, short what, void *arg)
       return;
     }
 
+  start_ms = monotonic_ms();
+
   for (session = airplay_sessions; session; session = session->next)
     {
       if (!(session->state & AIRPLAY_STATE_F_CONNECTED))
 	continue;
 
       airplay_metadata_keep_alive_send(session);
+      count++;
     }
+
+  snprintf(name, sizeof(name), "%d sessions", count);
+  outputs_step_time_log(L_AIRPLAY, "Keep-alive", name, start_ms);
 
   evtimer_add(keep_alive_timer, &keep_alive_tv);
 }
@@ -6649,7 +6662,12 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
   struct airplay_seq_request *cur_request = seq_ctx->cur_request;
   struct evrtsp_request *req = NULL;
   const char *uri;
+  uint64_t start_ms;
+  uint64_t took_ms;
+  size_t bytes;
   int ret;
+
+  start_ms = monotonic_ms();
 
   req = evrtsp_request_new(sequence_continue_cb, seq_ctx);
   if (!req)
@@ -6694,9 +6712,18 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
 
   DPRINTF(E_DBG, L_AIRPLAY, "%s: Sending %s to '%s'\n", seq_ctx->log_caller, cur_request->name, session->devname);
 
+  // The request is not ours once it has been made, so take its size first
+  bytes = evbuffer_get_length(req->output_buffer);
+
   ret = evrtsp_make_request(session->ctrl, req, cur_request->rtsp_type, uri);
   if (ret < 0)
     goto error;
+
+  took_ms = monotonic_ms() - start_ms;
+  if (took_ms >= AIRPLAY_REQUEST_BUILD_SLOW_MS)
+    DPRINTF(E_INFO, L_AIRPLAY, "%s: %s to '%s' built and queued in %u ms (%zu bytes)\n", seq_ctx->log_caller, cur_request->name, session->devname, (unsigned int)took_ms, bytes);
+  else
+    DPRINTF(E_DBG, L_AIRPLAY, "%s: %s to '%s' built and queued in %u ms (%zu bytes)\n", seq_ctx->log_caller, cur_request->name, session->devname, (unsigned int)took_ms, bytes);
 
   evrtsp_connection_set_closecb(session->ctrl, NULL, NULL);
 

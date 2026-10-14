@@ -1501,6 +1501,8 @@ metadata_cb_send(int fd, short what, void *arg)
   if (ret < 0)
     return;
 
+  DPRINTF(E_INFO, L_PLAYER, "Metadata update for item %u sent to outputs\n", metadata->item_id);
+
   outputs[metadata->type]->metadata_send(metadata);
 }
 
