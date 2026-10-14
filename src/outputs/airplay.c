@@ -540,6 +540,10 @@ struct airplay_session
   // alive (a failed data write kills the session), and it makes anchor and
   // data failures distinguishable in the logs.
   bool anchor_confirmed;
+  // Set while a SETRATEANCHORTIME has been sent and not yet answered. The
+  // anchor's point on the shared line is then held by this session even though
+  // it is not confirmed yet (see master_session_anchor_holders).
+  bool anchor_in_flight;
   // Set once session_streaming_report() has told the player
   // OUTPUT_STATE_STREAMING for this session, so it is only reported once.
   bool streaming_reported;
@@ -3577,6 +3581,9 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
 
   evbuffer_add(req->output_buffer, data, len);
 
+  // The request is written as soon as this returns
+  session->anchor_in_flight = true;
+
   return 0;
 }
 
@@ -5039,6 +5046,8 @@ response_handler_flush_buffered(struct evrtsp_request *req, struct airplay_sessi
   session->state = AIRPLAY_STATE_CONNECTED;
   session->anchor_pending = true;
   session->anchor_confirmed = false; // Resumed audio must wait for the fresh anchor
+  session->anchor_in_flight = false;
+  evtimer_del(session->anchorev);
   session->master_session->buffered_marker_pending = true;
   // Playback resumes at a new wall time, so the old rtptime->networkTime
   // mapping no longer holds; the next anchor establishes a fresh one
@@ -5066,6 +5075,31 @@ master_session_has_confirmed_anchor(struct airplay_master_session *ams)
   return false;
 }
 
+// Number of sessions other than the given one that hold the master session's
+// shared rtptime-to-network-time line: connected or streaming buffered
+// sessions whose anchor on it is confirmed or still awaiting the receiver's
+// answer. A session that is gone, failed or torn down holds nothing.
+static int
+master_session_anchor_holders(struct airplay_master_session *ams, struct airplay_session *except)
+{
+  struct airplay_session *session;
+  int holders = 0;
+
+  for (session = airplay_sessions; session; session = session->next)
+    {
+      if (session == except || session->master_session != ams || !session->buffered_mode)
+	continue;
+
+      if (session->state != AIRPLAY_STATE_CONNECTED && session->state != AIRPLAY_STATE_STREAMING)
+	continue;
+
+      if (session->anchor_confirmed || session->anchor_in_flight)
+	holders++;
+    }
+
+  return holders;
+}
+
 // Re-times ONE session after a live offset change. Receivers accept a
 // mid-stream SETRATEANCHORTIME but keep playing to their old schedule while
 // the frame flow is continuous, so the buffer must be invalidated first -
@@ -5086,6 +5120,8 @@ response_handler_flush_offset(struct evrtsp_request *req, struct airplay_session
   session->state = AIRPLAY_STATE_CONNECTED;
   session->anchor_pending = true;
   session->anchor_confirmed = false;
+  session->anchor_in_flight = false;
+  evtimer_del(session->anchorev);
 
   if (!master_session_has_confirmed_anchor(session->master_session))
     {
@@ -5111,6 +5147,10 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
   char *xml;
   size_t len;
   int64_t inband_status = 0;
+  int holders;
+
+  // The request is answered, whatever the answer
+  session->anchor_in_flight = false;
 
   // Some receivers can return 200 OK while rejecting the anchor IN-BAND with
   // a plist body carrying a nonzero status. Parse the body once up front;
@@ -5130,6 +5170,7 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
       DPRINTF(E_INFO, L_AIRPLAY, "SETRATEANCHORTIME accepted by '%s', starting buffered audio\n", session->devname);
       session->anchor_confirmed = true;
       session->anchor_retries_left = AIRPLAY_BUFFERED_ANCHOR_RETRIES_MAX;
+      evtimer_del(session->anchorev);
       return AIRPLAY_SEQ_CONTINUE;
     }
 
@@ -5158,12 +5199,17 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
   DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME rejected by '%s' (%d %s), retrying in %d ms (%d retries left)\n",
           session->devname, req->response_code, req->response_code_line, AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS, session->anchor_retries_left);
 
-  // If no receiver is playing off the stored mapping yet, drop it so the
-  // retry computes a fresh now+lead anchor (a stale point drifts into the
-  // past across retries). Once any session has a confirmed anchor the mapping
-  // is live and the retry must re-send the same point.
-  if (!master_session_has_confirmed_anchor(session->master_session))
+  // If no receiver holds the stored mapping, drop it so the retry computes a
+  // fresh now+lead anchor (a stale point drifts into the past across retries).
+  // A receiver holds it once it has confirmed an anchor on it or has one sent
+  // and not yet answered; the mapping is then live and the retry must re-send
+  // the same point, or that receiver would play on a line we have forgotten.
+  holders = master_session_anchor_holders(session->master_session, session);
+  if (holders == 0)
     session->master_session->buffered_anchor_mapped = false;
+
+  DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME for '%s': shared timing %s (%d other session(s) hold it)\n",
+          session->devname, holders == 0 ? "dropped" : "kept", holders);
 
   evtimer_add(session->anchorev, &tv);
 
