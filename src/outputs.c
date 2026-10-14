@@ -1986,7 +1986,8 @@ outputs_quality_subscribe(struct media_quality *quality)
   DPRINTF(E_DBG, L_PLAYER, "Subscription request for quality %d/%d/%d (now %d subscribers)\n",
     quality->sample_rate, quality->bits_per_sample, quality->channels, output_quality_subscriptions[i].count);
 
-  // Better way of signaling this?
+  // Tells buffer_fill, on the next write, to build the resampling context for
+  // this quality
   outputs_got_new_subscription = true;
 
   return 0;

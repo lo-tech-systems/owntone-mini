@@ -154,6 +154,46 @@
 // RTP "type" value for SETUP(stream) when using the buffered transport (see
 // the AIRPLAY_RTP_PAYLOADTYPE comment above: 0x60 real time, 0x67 buffered)
 #define AIRPLAY_BUFFERED_RTP_TYPE             0x67
+// Timing constants of the anchor and start paths, and what each must stay
+// above or below. Change one only with the others in view.
+//
+//   constant                         value    relation
+//   ANCHOR_MIN_PEER_AGE_MS           1200     an anchor rejected at a peer age
+//                                             at or above this means the
+//                                             premise of the age gate is wrong
+//   ANCHOR_SIBLING_WAIT_MS           500      above the stagger between group
+//                                             members' pairing (one job at a
+//                                             time, so about one pairing
+//                                             computation plus a worker delay);
+//                                             if too short the second member
+//                                             is anchored about one join slack
+//                                             after the first
+//   ANCHOR_HOLD_MAX_MS               200      below ANCHOR_MIN_AHEAD_MS and
+//                                             below the join slack; costs that
+//                                             much cushion on every group start
+//   ANCHOR_MIN_AHEAD_MS              500      floor for a derived point; above
+//                                             ANCHOR_HOLD_MAX_MS, and not above
+//                                             ANCHOR_RETRY_WAIT_MS
+//   ANCHOR_RETRY_WAIT_MS x RETRIES   500 x 12 about six seconds in all; each
+//                                             retry re-derives its point, so
+//                                             the wait stays well below the
+//                                             anchor lead (the output buffer
+//                                             duration)
+//   JOIN_SLACK_FRAMES                48       above the anchor round trip plus
+//                                             ANCHOR_HOLD_MAX_MS
+//   PAIR_COMPUTE_TIMEOUT_SEC         10       below the RTSP read timeout
+//   START_RETRY_MAX x WAIT_SEC       3 x 3 s  covers the refusal window after a
+//                                             TEARDOWN; with the pairing
+//                                             timeout the worst case is
+//                                             3 x (10 + 3) seconds
+//
+// In order: ANCHOR_HOLD_MAX_MS < ANCHOR_MIN_AHEAD_MS, ANCHOR_MIN_AHEAD_MS <=
+// ANCHOR_RETRY_WAIT_MS, ANCHOR_RETRY_WAIT_MS < the anchor lead, and
+// ANCHOR_HOLD_MAX_MS < the time JOIN_SLACK_FRAMES represents.
+//
+// The *_SLOW_MS and *_WARN_MS thresholds (here, in outputs.c and below) only
+// decide at which level a duration is logged.
+//
 // Some receivers reject a SETRATEANCHORTIME in-band (RTSP 200 with a nonzero
 // plist status) when it is placed before their clock has locked onto our PTP
 // timeline; the anchor is retried a bounded number of times before the
@@ -173,7 +213,9 @@
 // many frames past the current write head, and delivery to it is held until
 // the write head reaches that point - so its first delivered frame matches
 // its anchor exactly. Must comfortably exceed the anchor request/response
-// round trip; 48 frames is about 1s at 1024 spf / 48kHz.
+// round trip; 48 frames is about 1s at 1024 spf / 48kHz, but only about 352 ms
+// for the kinds with 352 samples per frame, where it only just exceeds the
+// bound on how long an unanswered anchor holds the write head.
 #define AIRPLAY_BUFFERED_JOIN_SLACK_FRAMES    48
 // How long an unanswered anchor may hold the shared write head back. After
 // this the head moves on, so a receiver that is slow to answer cannot stall
@@ -379,8 +421,10 @@ struct airplay_master_session
   // Non-NULL iff buffered_kind != AIRPLAY_BUFFERED_KIND_NONE. Owns the encode
   // context and PCM/frame queues for this ams; runs on its own thread.
   struct airplay_encoder *encoder;
-  // An encoder failure is acted on once; the ams lives for a few more ticks
-  // until the deferred session teardown frees it.
+  // An encoder failure is logged once; the ams lives for a few more ticks
+  // until the deferred session teardown frees it. Its sessions are ended on
+  // every tick while the encoder is failed, so a session that connects later
+  // is ended too.
   bool encoder_failure_handled;
 
   struct rtp_session *rtp_session;
@@ -419,17 +463,15 @@ struct airplay_master_session
   uint32_t buffered_seqnum;
   uint32_t buffered_rtptime;
   bool buffered_marker_pending;
-  // rtptime of the first frame actually written since session start or the
-  // last FLUSHBUFFERED - i.e. the start of the audio sitting in the
-  // receiver's buffer. SETRATEANCHORTIME's rtpTime must point here (the
-  // anchor names the start of the buffered audio, not the write head).
-  uint32_t buffered_anchor_rtptime;
   // Shared rtptime->networkTime mapping. The first anchor computed for any
   // session on this ams stores its (rtpTime, networkTime) point; anchors for
   // sessions joining later are DERIVED from it (same line, rate=1), so every
   // receiver places a given rtptime at the same wall-clock instant. Invalidated
-  // by FLUSHBUFFERED (playback resumes at a new wall time) and by a rejected
-  // first anchor (the retry must pick a fresh future time).
+  // by FLUSHBUFFERED when no other session holds the line (playback resumes at
+  // a new wall time), by a rejected anchor when no other session holds the
+  // line (the retry must pick a fresh future time), and when a derived point
+  // is less than AIRPLAY_BUFFERED_ANCHOR_MIN_AHEAD_MS ahead and no other
+  // session holds the line.
   bool buffered_anchor_mapped;
   uint32_t buffered_anchor_map_rtptime;
   uint64_t buffered_anchor_map_secs;
@@ -596,8 +638,9 @@ struct airplay_session
   // the longest allowed time, so that is only logged once per anchor
   bool anchor_hold_given_up;
   // Set while a rejected anchor waits for its retry timer. The session has no
-  // request outstanding then, so it does not hold the shared write head back
-  // (see buffered_frame_send).
+  // request outstanding then, so it does not hold the shared write head back;
+  // buffered_frame_send decides that from anchor_in_flight, and nothing reads
+  // this flag.
   bool anchor_retry_waiting;
   // The receiver's PTP statistics as they were when the latest anchor request
   // was built, and the time of it, for the log line when the answer arrives
@@ -3072,12 +3115,6 @@ buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
 	}
     }
 
-
-  // Start of a (re)primed buffer: remember where it begins so the anchor can
-  // point at it (see buffered_anchor_rtptime).
-  if (ams->buffered_marker_pending)
-    ams->buffered_anchor_rtptime = ams->buffered_rtptime;
-
   for (session = airplay_sessions; session; session = session->next)
     {
       if (session->master_session != ams || !session->buffered_mode)
@@ -3096,7 +3133,9 @@ buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
       // discarded rather than queued - the sender's job is to hold off
       // delivering anything until the anchor is confirmed accepted, so the
       // first delivered frame's rtptime lands exactly on the anchor's
-      // rtpTime. The counters are frozen below while holding.
+      // rtpTime. The counters are frozen below while holding. Delivery to a
+      // confirmed session may also wait at the origin for siblings within
+      // their hold (see origin_hold below).
       if (!session->anchor_confirmed)
 	{
 	  // Only a fresh anchor, which names the head as its first frame, needs
@@ -3174,18 +3213,20 @@ buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
 
   // Only a frame actually delivered consumes the marker: the counters advance
   // even while no session is ready to receive (e.g. during negotiation), and
-  // the marker bit plus buffered_anchor_rtptime must land on the first frame
-  // the receiver really gets
+  // the marker bit must land on the first frame the receiver really gets
   if (wrote)
     ams->buffered_marker_pending = false;
 
-  // While a session is waiting for its anchor to be accepted the counters
-  // freeze at the anchor's rtpTime (payload_make_send_anchor anchors at the
-  // write head), so the first frame delivered after acceptance carries
-  // exactly the rtptime the receiver was told to wait for. The frame content
-  // produced while frozen is dropped (a few tens of ms at stream start).
-  // If another session on the same ams is already streaming, delivery to it
-  // takes priority and the waiting session loses the frames instead.
+  // While an in-flight anchor names the line origin, or no sibling is
+  // confirmed, the counters freeze at the anchor's rtpTime
+  // (payload_make_send_anchor anchors at the write head), so the first frame
+  // delivered after acceptance carries exactly the rtptime the receiver was
+  // told to wait for. The frame content produced while frozen is dropped (a
+  // few tens of ms at stream start). The freeze lasts at most
+  // AIRPLAY_BUFFERED_ANCHOR_HOLD_MAX_MS; after that the head moves on and a
+  // late receiver is delivered from wherever the head is. If another session
+  // on the same ams is already streaming, delivery to it takes priority and
+  // the waiting session loses the frames instead.
   if (gated && !wrote)
     return 0;
 
@@ -5376,7 +5417,8 @@ response_handler_flush_buffered(struct evrtsp_request *req, struct airplay_sessi
   // and the receiver keeps those instead of discarding them. A live session
   // that reaches this point is streaming, so it has a master session (see
   // session_master_attach()), hence no NULL test here, matching the
-  // unconditional accesses above.
+  // unconditional accesses above. Its encoder has not been stopped either,
+  // because an encoder is only stopped when the master session is freed.
   if (session->master_session->encoder)
     airplay_encoder_flush(session->master_session->encoder);
   return AIRPLAY_SEQ_CONTINUE;
@@ -5991,8 +6033,10 @@ struct airplay_pair_job
 // Queue wait above which the result is logged at the normal level
 #define AIRPLAY_PAIR_WAIT_WARN_MS 1000
 
-// Player thread only. At most one job is with the worker pool at a time, so
-// pairing never takes more than one core from the audio threads.
+// Player thread only. Normally one job is with the worker pool at a time, so
+// pairing never takes more than one core from the audio threads. After a
+// watchdog timeout the abandoned job may still be running when the next one is
+// dispatched.
 static struct airplay_pair_job *pair_job_queue_head;
 static struct airplay_pair_job *pair_job_queue_tail;
 static struct airplay_pair_job *pair_job_current;
@@ -7807,7 +7851,8 @@ airplay_write(struct output_buffer *obuf)
   for (session = airplay_sessions; session; session = session->next)
     {
       // A session whose master session had no data in this write (its resampling
-      // context is not ready) has not been sent its start sync packet and first
+      // context is not ready, or the resampler emitted nothing for its quality
+      // on this write) has not been sent its start sync packet and first
       // packet yet, so it waits for a write that has
       if (session->state == AIRPLAY_STATE_CONNECTED && (!session->master_session || outputs_buffer_has_quality(obuf, &session->master_session->rtp_session->quality)))
 	{
