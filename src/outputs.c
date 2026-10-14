@@ -1264,8 +1264,13 @@ quality_to_xcode(struct media_quality *quality)
   return XCODE_PCM16;
 }
 
+// Creates the encoding (resampling) contexts for the subscriptions. With all
+// set, which is for a change of input quality, the existing contexts are first
+// destroyed and every subscription gets a new one. Otherwise only the
+// subscriptions that have no context yet get one, so the context of a
+// subscription that is already in use, and the state it holds, is left alone.
 static int
-encoding_reset(struct media_quality *quality)
+encoding_reset(struct media_quality *quality, bool all)
 {
   struct transcode_encode_setup_args encode_args = { 0 };
   struct output_quality_subscription *subscription;
@@ -1277,31 +1282,54 @@ encoding_reset(struct media_quality *quality)
   start_ms = outputs_monotonic_ms();
 
   profile = quality_to_xcode(quality);
-  encode_args.src_ctx = transcode_decode_setup_raw(profile, quality);
-  if (!encode_args.src_ctx)
+
+  // The decoding context is only needed if some subscription gets a context
+  // now, so when not resetting all of them it is made when first needed
+  if (all)
     {
-      DPRINTF(E_LOG, L_PLAYER, "Could not create subscription decoding context (profile %d)\n", profile);
-      return -1;
+      encode_args.src_ctx = transcode_decode_setup_raw(profile, quality);
+      if (!encode_args.src_ctx)
+	{
+	  DPRINTF(E_LOG, L_PLAYER, "Could not create subscription decoding context (profile %d)\n", profile);
+	  return -1;
+	}
     }
 
   for (i = 0; output_quality_subscriptions[i].count > 0; i++)
     {
       subscription = &output_quality_subscriptions[i]; // Just for short-hand
 
-      transcode_encode_cleanup(&subscription->encode_ctx); // Will also point the ctx to NULL
+      if (all)
+	transcode_encode_cleanup(&subscription->encode_ctx); // Will also point the ctx to NULL
 
       if (quality_is_equal(quality, &subscription->quality))
 	continue; // No resampling required
+
+      if (subscription->encode_ctx)
+	continue; // Already set up for this input quality
+
+      if (!encode_args.src_ctx)
+	{
+	  encode_args.src_ctx = transcode_decode_setup_raw(profile, quality);
+	  if (!encode_args.src_ctx)
+	    {
+	      DPRINTF(E_LOG, L_PLAYER, "Could not create subscription decoding context (profile %d)\n", profile);
+	      return -1;
+	    }
+	}
 
       encode_args.profile = quality_to_xcode(&subscription->quality);
       encode_args.quality = &subscription->quality;
       subscription->encode_ctx = transcode_encode_setup(encode_args);
     }
 
+  if (!encode_args.src_ctx)
+    return 0; // Nothing needed a context
+
   transcode_decode_cleanup(&encode_args.src_ctx);
 
   snprintf(name, sizeof(name), "%d/%d/%d", quality->sample_rate, quality->bits_per_sample, quality->channels);
-  outputs_step_time_log(L_PLAYER, "Subscription encoder rebuild", name, start_ms);
+  outputs_step_time_log(L_PLAYER, "Subscription encoder setup", name, start_ms);
 
   return 0;
 }
@@ -1317,11 +1345,17 @@ buffer_fill(struct output_buffer *obuf, void *buf, size_t bufsize, struct media_
   obuf->pts = *pts;
 
   // The resampling/encoding (transcode) contexts work for a given input quality,
-  // so if the quality changes we need to reset the contexts. We also do that if
-  // we have received a subscription for a new quality.
-  if (!quality_is_equal(quality, &obuf->data[0].quality) || outputs_got_new_subscription)
+  // so if the quality changes we need to reset all the contexts. If we have
+  // received a subscription for a new quality we only make a context for that,
+  // the contexts of outputs that are already playing are left as they are.
+  if (!quality_is_equal(quality, &obuf->data[0].quality))
     {
-      encoding_reset(quality);
+      encoding_reset(quality, true);
+      outputs_got_new_subscription = false;
+    }
+  else if (outputs_got_new_subscription)
+    {
+      encoding_reset(quality, false);
       outputs_got_new_subscription = false;
     }
 
