@@ -4582,6 +4582,9 @@ payload_make_pair_generic(int step, struct evrtsp_request *req, struct airplay_s
   uint8_t *body;
   size_t len;
   const char *errmsg;
+  uint64_t start_ms;
+
+  start_ms = monotonic_ms();
 
   switch (step)
     {
@@ -4609,6 +4612,8 @@ payload_make_pair_generic(int step, struct evrtsp_request *req, struct airplay_s
 	body    = NULL;
 	errmsg  = "Bug! Bad step number";
     }
+
+  DPRINTF(E_INFO, L_AIRPLAY, "Verification step %d request for '%s' built in %u ms\n", step, session->devname, (unsigned int)(monotonic_ms() - start_ms));
 
   if (!body)
     {
