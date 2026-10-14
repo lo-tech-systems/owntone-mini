@@ -5902,15 +5902,13 @@ struct airplay_pair_job
 static struct airplay_pair_job *pair_job_queue_head;
 static struct airplay_pair_job *pair_job_queue_tail;
 static struct airplay_pair_job *pair_job_current;
-static bool pair_jobs_deinit;
-static uint64_t pair_jobs_dispatched;
 
-// The one thing shared with the worker, only ever touched under the lock: the
-// number of jobs whose completion has been posted to the player thread. The
-// player thread takes the lock in airplay_deinit() only.
+// Set in airplay_deinit(). The worker checks it and posts its result under the
+// lock, so no result is posted to the player event base once it is set. The
+// player thread takes the lock for that one assignment only and never waits
+// for a worker.
 static pthread_mutex_t pair_job_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t pair_job_cond = PTHREAD_COND_INITIALIZER;
-static uint64_t pair_jobs_posted;
+static bool pair_jobs_deinit;
 
 static void
 pair_job_free(struct airplay_pair_job *job)
@@ -5938,7 +5936,7 @@ static void
 pair_job_done_cb(int fd, short what, void *arg);
 
 // *** Thread: worker ***
-// Touches nothing but the job it is given and the posted counter
+// Touches nothing but the job it is given and the shutdown flag
 static void
 pair_job_run(void *arg)
 {
@@ -5951,16 +5949,27 @@ pair_job_run(void *arg)
   job->errmsg = job->body ? NULL : pair_setup_errmsg(job->sctx);
   job->finished_ms = monotonic_ms();
 
+  pthread_mutex_lock(&pair_job_lock);
+
+  // Shutting down, the player event base may be about to go and nobody is
+  // waiting for the result
+  if (pair_jobs_deinit)
+    {
+      pthread_mutex_unlock(&pair_job_lock);
+      pair_job_free(job);
+      return;
+    }
+
   // The job belongs to the player thread from here, it must not be used after
-  // the completion has been posted
+  // the completion has been posted. If the post fails the job is left as it is,
+  // since the player thread still refers to it, and the watchdog ends the
+  // start.
   ret = event_base_once(evbase_player, -1, EV_TIMEOUT, pair_job_done_cb, job, &tv);
+
+  pthread_mutex_unlock(&pair_job_lock);
+
   if (ret < 0)
     DPRINTF(E_LOG, L_AIRPLAY, "Could not post the result of a pair setup computation\n");
-
-  pthread_mutex_lock(&pair_job_lock);
-  pair_jobs_posted++;
-  pthread_cond_broadcast(&pair_job_cond);
-  pthread_mutex_unlock(&pair_job_lock);
 }
 
 // Hands the head of the queue to a worker if none is out. A job whose session
@@ -6001,7 +6010,6 @@ pair_jobs_dispatch(void)
 	  continue;
 	}
 
-      pair_jobs_dispatched++;
       return;
     }
 }
@@ -7953,16 +7961,13 @@ airplay_deinit(void)
     }
 
   pair_job_queue_tail = NULL;
+  pair_job_current = NULL;
 
-  // A computation already with a worker will post its completion to the player
-  // event base, so wait for that post, which cannot then land after the base
-  // is gone. All sessions are freed and no audio is written any more, so this
-  // is the one place the player thread waits for a worker.
-  pair_jobs_deinit = true;
-
+  // A computation already with a worker frees itself when it finishes, from
+  // now on, instead of posting its result to the player event base. A result
+  // posted before this is either run and discarded or dropped with the base.
   pthread_mutex_lock(&pair_job_lock);
-  while (pair_jobs_posted != pair_jobs_dispatched)
-    pthread_cond_wait(&pair_job_cond, &pair_job_lock);
+  pair_jobs_deinit = true;
   pthread_mutex_unlock(&pair_job_lock);
 
   // After freeing sessions, since that's where the active ptp peers get removed
