@@ -59,6 +59,7 @@ owntone_SOURCES = main.c \
 	outputs/airplay_events.c outputs/airplay_events.h \
 	outputs/airplay_mrp.c outputs/airplay_mrp.h \
 	outputs/airplay_buffered.c outputs/airplay_buffered.h \
+	outputs/airplay_anchor.c outputs/airplay_anchor.h \
 	outputs/airplay_encoder.c outputs/airplay_encoder.h \
 	outputs/airplay_crypto.c outputs/airplay_crypto.h \
 	outputs/airplay_common.h \
@@ -68,5 +69,8 @@ owntone_SOURCES = main.c \
 	commands.c commands.h \
 	ptpd.c ptpd.h \
 	outputs/plist_wrap.h
+
+check_PROGRAMS = airplay_anchor_test
+airplay_anchor_test_SOURCES = outputs/tests/airplay_anchor_test.c outputs/airplay_anchor.c outputs/airplay_anchor.h
 
 SUBDIRS = libairptp
