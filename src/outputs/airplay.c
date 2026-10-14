@@ -173,6 +173,11 @@
 // its anchor exactly. Must comfortably exceed the anchor request/response
 // round trip; 48 frames is about 1s at 1024 spf / 48kHz.
 #define AIRPLAY_BUFFERED_JOIN_SLACK_FRAMES    48
+// How long an unanswered anchor may hold the shared write head back. After
+// this the head moves on, so a receiver that is slow to answer cannot stall
+// delivery to the others; it is delivered from wherever the head is when it
+// does answer.
+#define AIRPLAY_BUFFERED_ANCHOR_HOLD_MAX_MS   200
 // An anchor derived from an unheld stored mapping must name a time at least
 // this far ahead, or the receiver would be asked to play in the past
 #define AIRPLAY_BUFFERED_ANCHOR_MIN_AHEAD_MS  500
@@ -559,6 +564,9 @@ struct airplay_session
   // anchor's point on the shared line is then held by this session even though
   // it is not confirmed yet (see master_session_anchor_holders).
   bool anchor_in_flight;
+  // Set once the unanswered anchor has been held against the write head for
+  // the longest allowed time, so that is only logged once per anchor
+  bool anchor_hold_given_up;
   // Set while a rejected anchor waits for its retry timer. The session has no
   // request outstanding then, so it does not hold the shared write head back
   // (see buffered_frame_send).
@@ -2922,6 +2930,7 @@ static int
 buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
 {
   struct airplay_session *session;
+  uint64_t now_ms = 0;
   bool wrote = false;
   bool gated = false;
   int ret;
@@ -2959,10 +2968,25 @@ buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
 	  // frame. Any other unanswered anchor is a join point ahead of the head
 	  // once a sibling is confirmed, and holds nothing. A session waiting out
 	  // an anchor retry has nothing outstanding and holds nothing either.
+	  // The hold is bounded: once the anchor has been unanswered for the
+	  // longest allowed time the head moves on, and the session is
+	  // delivered from wherever the head is if it is accepted afterwards.
 	  if (session->anchor_in_flight &&
 	      ((ams->buffered_anchor_mapped && session->buffered_start_rtptime == ams->buffered_anchor_map_rtptime) ||
 	       !master_session_has_confirmed_anchor(ams)))
-	    gated = true;
+	    {
+	      if (!now_ms)
+		now_ms = monotonic_ms();
+
+	      if (now_ms - session->anchor_sent_ms < AIRPLAY_BUFFERED_ANCHOR_HOLD_MAX_MS)
+		gated = true;
+	      else if (!session->anchor_hold_given_up)
+		{
+		  session->anchor_hold_given_up = true;
+		  DPRINTF(E_LOG, L_AIRPLAY, "Anchor for '%s' unanswered after %" PRIu64 " ms, no longer holding the write head\n",
+		          session->devname, now_ms - session->anchor_sent_ms);
+		}
+	    }
 	  continue;
 	}
 
@@ -3544,6 +3568,7 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
   uint32_t anchor_rtptime;
   uint64_t lead_ms;
   uint32_t delta;
+  bool shared_head = false;
   int ret;
 
   if (ams->buffered_anchor_mapped)
@@ -3555,7 +3580,19 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
       // slightly-future frame instead and hold delivery until the write head
       // reaches it (see the buffered_start_rtptime gate in
       // buffered_frame_send), so the first delivered frame matches exactly.
-      anchor_rtptime = ams->buffered_rtptime + AIRPLAY_BUFFERED_JOIN_SLACK_FRAMES * ams->buffered_spf;
+      //
+      // The exception is a group's first start: the line exists, no session
+      // has confirmed an anchor and the head has not moved from the line's
+      // origin, so the counters are still frozen at the origin. Every session
+      // is then given the origin frame itself, with no slack, so they all
+      // start on the same frame.
+      if (!master_session_has_confirmed_anchor(ams) && ams->buffered_rtptime == ams->buffered_anchor_map_rtptime)
+	{
+	  anchor_rtptime = ams->buffered_rtptime;
+	  shared_head = true;
+	}
+      else
+	anchor_rtptime = ams->buffered_rtptime + AIRPLAY_BUFFERED_JOIN_SLACK_FRAMES * ams->buffered_spf;
 
       // Extend the stored mapping to the anchor frame: rtptime advances at
       // ams->buffered_sample_rate per networkTime second (rate=1).
@@ -3580,6 +3617,7 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
 	    {
 	      DPRINTF(E_LOG, L_AIRPLAY, "Shared timing for '%s' is stale (%" PRIi64 " ms ahead), computing a fresh anchor\n", session->devname, ahead_ms);
 	      ams->buffered_anchor_mapped = false;
+	      shared_head = false;
 	    }
 	}
     }
@@ -3642,7 +3680,7 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
 
   DPRINTF(E_DBG, L_AIRPLAY, "SETRATEANCHORTIME payload for '%s': networkTimeSecs=%" PRIu64 ", networkTimeFrac=%" PRIu64 ", networkTimeTimelineID=%" PRIu64 ", rtpTime=%u (%s), rate=1\n",
           session->devname, secs, frac, ptpd_clock_id_get(), anchor_rtptime,
-          anchor_rtptime == session->master_session->buffered_rtptime ? "write head" : "join point");
+          shared_head ? "shared write head" : anchor_rtptime == session->master_session->buffered_rtptime ? "write head" : "join point");
 
   ret = wplist_to_bin(&data, &len, root);
   plist_free(root);
@@ -3655,6 +3693,7 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
   // What the receiver's PTP peer had sent us when this anchor left
   session->anchor_sent_stats_valid = (ptpd_peer_stats_get(session->ptpd_slave_id, &session->anchor_sent_stats) == 0);
   session->anchor_sent_ms = monotonic_ms();
+  session->anchor_hold_given_up = false;
 
   // The request is written as soon as this returns
   session->anchor_in_flight = true;
