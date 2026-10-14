@@ -165,6 +165,9 @@
 // its anchor exactly. Must comfortably exceed the anchor request/response
 // round trip; 48 frames is about 1s at 1024 spf / 48kHz.
 #define AIRPLAY_BUFFERED_JOIN_SLACK_FRAMES    48
+// An anchor derived from an unheld stored mapping must name a time at least
+// this far ahead, or the receiver would be asked to play in the past
+#define AIRPLAY_BUFFERED_ANCHOR_MIN_AHEAD_MS  500
 
 // Admission weights per buffered kind, in abstract cost units. The decode
 // upmix (6ch surround filter + 6ch AAC) dominates measured CPU on Cortex-A53;
@@ -806,6 +809,8 @@ static void
 sequence_start(enum airplay_seq_type seq_type, struct airplay_session *session, void *arg, const char *log_caller);
 static void
 sequence_continue(struct airplay_seq_ctx *seq_ctx);
+static int
+master_session_anchor_holders(struct airplay_master_session *ams, struct airplay_session *except);
 
 
 /* ------------------------------- MISC HELPERS ----------------------------- */
@@ -3495,6 +3500,9 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
   uint64_t secs;
   uint64_t frac;
   uint64_t frac_before;
+  uint64_t now_secs;
+  uint64_t now_frac;
+  int64_t ahead_ms;
   uint32_t anchor_rtptime;
   uint64_t lead_ms;
   uint32_t delta;
@@ -3522,8 +3530,23 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
       frac = frac_before + (uint64_t)(delta % ams->buffered_sample_rate) * (UINT64_MAX / ams->buffered_sample_rate);
       if (frac < frac_before)
 	secs++;
+
+      // If no other session holds the mapping and the point it gives has all
+      // but passed (the retries outlasted the lead), it is of no use: drop it
+      // and compute a fresh one below. A mapping some other session holds is
+      // never dropped here, or that session would play on a forgotten line.
+      if (!master_session_anchor_holders(ams, session) && ptpd_network_time_get(&now_secs, &now_frac) == 0)
+	{
+	  ahead_ms = ((int64_t)secs - (int64_t)now_secs) * 1000 + (int64_t)((frac >> 32) * 1000 >> 32) - (int64_t)((now_frac >> 32) * 1000 >> 32);
+	  if (ahead_ms < AIRPLAY_BUFFERED_ANCHOR_MIN_AHEAD_MS)
+	    {
+	      DPRINTF(E_LOG, L_AIRPLAY, "Shared timing for '%s' is stale (%" PRIi64 " ms ahead), computing a fresh anchor\n", session->devname, ahead_ms);
+	      ams->buffered_anchor_mapped = false;
+	    }
+	}
     }
-  else
+
+  if (!ams->buffered_anchor_mapped)
     {
       ret = ptpd_network_time_get(&secs, &frac);
       if (ret < 0)
