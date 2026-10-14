@@ -1854,6 +1854,20 @@ outputs_buffer_free(struct output_buffer *buffer)
   buffer_free(buffer);
 }
 
+bool
+outputs_buffer_has_quality(struct output_buffer *buffer, struct media_quality *quality)
+{
+  int i;
+
+  for (i = 0; buffer->data[i].buffer; i++)
+    {
+      if (quality_is_equal(&buffer->data[i].quality, quality))
+	return true;
+    }
+
+  return false;
+}
+
 /* ---------------------------- Called by player ---------------------------- */
 
 struct output_device *

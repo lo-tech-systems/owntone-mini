@@ -7806,7 +7806,10 @@ airplay_write(struct output_buffer *obuf)
   // initialization sync and rtp packets via packets_sync_send and packets_send)
   for (session = airplay_sessions; session; session = session->next)
     {
-      if (session->state == AIRPLAY_STATE_CONNECTED)
+      // A session whose master session had no data in this write (its resampling
+      // context is not ready) has not been sent its start sync packet and first
+      // packet yet, so it waits for a write that has
+      if (session->state == AIRPLAY_STATE_CONNECTED && (!session->master_session || outputs_buffer_has_quality(obuf, &session->master_session->rtp_session->quality)))
 	{
 	  // Start sending progress to keep ATV's alive
 	  if (!event_pending(keep_alive_timer, EV_TIMEOUT, NULL))

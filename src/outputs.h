@@ -448,6 +448,12 @@ outputs_buffer_copy(struct output_buffer *buffer);
 void
 outputs_buffer_free(struct output_buffer *buffer);
 
+// True if the buffer holds data of the given quality. A quality that has a
+// subscription but no conversion context yet has none, so a backend uses this to
+// leave a session as it is for a write that has nothing for it.
+bool
+outputs_buffer_has_quality(struct output_buffer *buffer, struct media_quality *quality);
+
 /* ---------------------------- Called by player ---------------------------- */
 
 // Ownership of *add is transferred, so don't address after calling. Instead you
