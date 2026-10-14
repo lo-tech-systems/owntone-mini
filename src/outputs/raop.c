@@ -253,6 +253,10 @@ struct raop_session
 
   int server_fd;
 
+  // Packets the data socket would not take because its send queue was full
+  unsigned int send_dropped;
+  uint64_t send_drop_log_ms;
+
   struct raop_service *timing_svc;
   struct raop_service *control_svc;
 
@@ -2917,6 +2921,24 @@ packet_encrypt(struct rtp_packet *pkt)
   return 0;
 }
 
+// The data socket is non-blocking, so a full send queue (a stalled network link)
+// costs the packet to this receiver, as if it had been lost on the wire, instead
+// of holding up the player thread. Reports at most once a second.
+static void
+packet_drop_note(struct raop_session *rs)
+{
+  uint64_t now_ms = outputs_monotonic_ms();
+
+  rs->send_dropped++;
+  if (now_ms - rs->send_drop_log_ms < 1000)
+    return;
+
+  DPRINTF(E_WARN, L_RAOP, "Send queue full for '%s', dropped %u packets\n", rs->devname, rs->send_dropped);
+
+  rs->send_dropped = 0;
+  rs->send_drop_log_ms = now_ms;
+}
+
 static int
 packet_send(struct raop_session *rs, struct rtp_packet *pkt)
 {
@@ -2928,6 +2950,12 @@ packet_send(struct raop_session *rs, struct rtp_packet *pkt)
   ret = send(rs->server_fd, pkt->data, pkt->data_len, 0);
   if (ret < 0)
     {
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+	{
+	  packet_drop_note(rs);
+	  return -1;
+	}
+
       DPRINTF(E_LOG, L_RAOP, "Send error for '%s': %s\n", rs->devname, strerror(errno));
 
       // Can't free it right away, it would make the ->next in the calling
@@ -3554,6 +3582,7 @@ static void
 raop_cb_startup_volume(struct evrtsp_request *req, void *arg)
 {
   struct raop_session *rs = arg;
+  int flags;
   int ret;
 
   rs->reqs_in_flight--;
@@ -3582,6 +3611,15 @@ raop_cb_startup_volume(struct evrtsp_request *req, void *arg)
   rs->server_fd = net_connect(rs->address, rs->server_port, SOCK_DGRAM, "RAOP data");
   if (rs->server_fd < 0)
     goto cleanup;
+
+  // net_connect() leaves the socket blocking, but a blocking send would hold up
+  // the player thread whenever the network link is stalled
+  flags = fcntl(rs->server_fd, F_GETFL, 0);
+  if (flags < 0 || fcntl(rs->server_fd, F_SETFL, flags | O_NONBLOCK) < 0)
+    {
+      DPRINTF(E_LOG, L_RAOP, "Could not set data socket of '%s' non-blocking: %s\n", rs->devname, strerror(errno));
+      goto cleanup;
+    }
 
   rs->state = RAOP_STATE_CONNECTED;
 

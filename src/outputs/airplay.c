@@ -636,6 +636,10 @@ struct airplay_session
 
   int server_fd;
 
+  // Packets the data socket would not take because its send queue was full
+  unsigned int send_dropped;
+  uint64_t send_drop_log_ms;
+
   struct airplay_service *timing_svc;
   struct airplay_service *control_svc;
 
@@ -2811,6 +2815,24 @@ packet_encrypt(uint8_t **out, size_t *out_len, struct rtp_packet *pkt, struct ai
   return 0;
 }
 
+// The data socket is non-blocking, so a full send queue (a stalled network link)
+// costs the packet to this receiver, as if it had been lost on the wire, instead
+// of holding up the player thread. Reports at most once a second.
+static void
+packet_drop_note(struct airplay_session *session)
+{
+  uint64_t now_ms = outputs_monotonic_ms();
+
+  session->send_dropped++;
+  if (now_ms - session->send_drop_log_ms < 1000)
+    return;
+
+  DPRINTF(E_WARN, L_AIRPLAY, "Send queue full for '%s', dropped %u packets\n", session->devname, session->send_dropped);
+
+  session->send_dropped = 0;
+  session->send_drop_log_ms = now_ms;
+}
+
 static int
 packet_send(struct airplay_session *session, struct rtp_packet *pkt)
 {
@@ -2818,6 +2840,7 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
   size_t buf_len;
   ssize_t sent;
   int ret;
+  int err;
 
   if (!session)
     return -1;
@@ -2829,6 +2852,7 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
 	return -1;
 
       sent = send(session->server_fd, buf, buf_len, 0);
+      err = errno;
       free(buf);
     }
   else
@@ -2836,11 +2860,18 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
       buf = pkt->data;
       buf_len = pkt->data_len;
       sent = send(session->server_fd, buf, buf_len, 0);
+      err = errno;
     }
 
   if (sent < 0)
     {
-      DPRINTF(E_LOG, L_AIRPLAY, "Send error for '%s': %s\n", session->devname, strerror(errno));
+      if (err == EAGAIN || err == EWOULDBLOCK)
+	{
+	  packet_drop_note(session);
+	  return -1;
+	}
+
+      DPRINTF(E_LOG, L_AIRPLAY, "Send error for '%s': %s\n", session->devname, strerror(err));
 
       // Can't free it right away, it would make the ->next in the calling
       // master_session and session loops invalid
@@ -5000,6 +5031,7 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
   plist_t item;
   uint64_t uintval;
   uint64_t start_ms;
+  int flags;
   int ret;
 
   DPRINTF(E_INFO, L_AIRPLAY, "Setting up AirPlay session %u to %s [transport: AirPlay 2, intended: %s]\n",
@@ -5112,6 +5144,15 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
       if (session->server_fd < 0)
 	{
 	  DPRINTF(E_LOG, L_AIRPLAY, "Could not connect to data port of '%s'\n", session->devname);
+	  goto error;
+	}
+
+      // net_connect() leaves the socket blocking, but a blocking send would
+      // hold up the player thread whenever the network link is stalled
+      flags = fcntl(session->server_fd, F_GETFL, 0);
+      if (flags < 0 || fcntl(session->server_fd, F_SETFL, flags | O_NONBLOCK) < 0)
+	{
+	  DPRINTF(E_LOG, L_AIRPLAY, "Could not set data socket of '%s' non-blocking: %s\n", session->devname, strerror(errno));
 	  goto error;
 	}
     }
