@@ -88,6 +88,19 @@ struct rtsp_message
 };
 
 
+// What the events thread needs to make a connection to a receiver's event
+// port. All of it is owned by the command that carries it, and freed by it.
+struct listen_args
+{
+  char *name;
+  uint64_t device_id;
+  char *address;
+  unsigned short port;
+  uint8_t *key;
+  size_t key_len;
+};
+
+
 static pthread_t thread_id;
 static struct event_base *evbase;
 static struct commands_base *cmdbase;
@@ -524,27 +537,74 @@ airplay_events(void *arg)
 
 /* ------------------------------- Interface -------------------------------- */
 
-int
-airplay_events_listen(const char *name, uint64_t device_id, const char *address, unsigned short port, const uint8_t *key, size_t key_len)
+/* Thread: airplay events */
+static enum command_state
+listen_exec(void *arg, int *retval)
 {
+  struct listen_args *args = arg;
   int fd;
   int ret;
 
-  fd = net_connect(address, port, SOCK_STREAM, "AirPlay events");
+  *retval = -1;
+
+  fd = net_connect(args->address, args->port, SOCK_STREAM, "AirPlay events");
   if (fd < 0)
     {
-      return -1;
+      DPRINTF(E_WARN, L_AIRPLAY, "Could not connect to '%s' events port %u, proceeding anyway\n", args->name, args->port);
+      goto out;
     }
 
   // client_add() takes ownership of fd on both success and failure, closing
   // it itself if it fails, so it must not also be closed here.
-  ret = client_add(name, device_id, fd, key, key_len);
+  ret = client_add(args->name, args->device_id, fd, args->key, args->key_len);
+  if (ret < 0)
+    goto out;
+
+  *retval = 0;
+
+ out:
+  free(args->name);
+  free(args->address);
+  free(args->key);
+
+  // The command facility frees args itself
+  return COMMAND_END;
+}
+
+// The connection is made, and the client added, on the events thread, so the
+// caller (the player thread) never waits for the receiver. Everything the
+// events thread needs is copied here, nothing points back at the caller's
+// session. Returns 0 if the connection was handed over, the outcome of the
+// connection itself is logged by the events thread.
+int
+airplay_events_listen(const char *name, uint64_t device_id, const char *address, unsigned short port, const uint8_t *key, size_t key_len)
+{
+  struct listen_args *args;
+  int ret;
+
+  if (!cmdbase)
+    return -1;
+
+  CHECK_NULL(L_AIRPLAY, args = calloc(1, sizeof(struct listen_args)));
+  CHECK_NULL(L_AIRPLAY, args->name = strdup(name));
+  CHECK_NULL(L_AIRPLAY, args->address = strdup(address));
+  CHECK_NULL(L_AIRPLAY, args->key = malloc(key_len));
+  memcpy(args->key, key, key_len);
+  args->key_len = key_len;
+  args->device_id = device_id;
+  args->port = port;
+
+  ret = commands_exec_async(cmdbase, listen_exec, args);
   if (ret < 0)
     {
+      free(args->name);
+      free(args->address);
+      free(args->key);
+      free(args);
       return -1;
     }
 
-  return fd;
+  return 0;
 }
 
 /* Thread: main */
@@ -578,6 +638,7 @@ airplay_events_deinit(void)
   int ret;
 
   commands_base_destroy(cmdbase);
+  cmdbase = NULL;
 
   ret = pthread_join(thread_id, NULL);
   if (ret != 0)

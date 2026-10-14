@@ -5245,7 +5245,6 @@ response_handler_setup_session(struct evrtsp_request *req, struct airplay_sessio
   plist_t response;
   plist_t item;
   uint64_t uintval;
-  uint64_t start_ms;
   int ret;
   if (req->response_code == RTSP_UNAUTHORIZED)
     {
@@ -5289,14 +5288,12 @@ response_handler_setup_session(struct evrtsp_request *req, struct airplay_sessio
       goto error;
     }
 
-  // Reverse connection, used to receive playback events from device
-  start_ms = monotonic_ms();
-
+  // Reverse connection, used to receive playback events from device. It is made
+  // by the events thread, nothing here waits for it
   ret = airplay_events_listen(session->devname, session->device_id, session->address, session->events_port, session->shared_secret, session->shared_secret_len);
-  outputs_step_time_log(L_AIRPLAY, "Events connect", session->devname, start_ms);
   if (ret < 0)
     {
-      DPRINTF(E_WARN, L_AIRPLAY, "Could not connect to '%s' events port %u, proceeding anyway\n", session->devname, session->events_port);
+      DPRINTF(E_WARN, L_AIRPLAY, "Could not hand over the events connection to '%s' (port %u), proceeding anyway\n", session->devname, session->events_port);
     }
 
   if (session->master_session->use_ptp)
