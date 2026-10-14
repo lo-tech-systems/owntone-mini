@@ -5409,9 +5409,10 @@ response_handler_flush_buffered(struct evrtsp_request *req, struct airplay_sessi
   session->anchor_sibling_waited = false;
   evtimer_del(session->anchorev);
 
-  // While a sibling still has a confirmed anchor its line, its delivery and
-  // the shared encoder are left alone, as in response_handler_flush_offset
-  if (master_session_has_confirmed_anchor(session->master_session))
+  // While a sibling holds the shared line (its anchor is confirmed or still
+  // unanswered) the line, its delivery and the shared encoder are left alone,
+  // as in response_handler_flush_offset
+  if (master_session_anchor_holders(session->master_session, session) != 0)
     return AIRPLAY_SEQ_CONTINUE;
 
   session->master_session->buffered_marker_pending = true;
