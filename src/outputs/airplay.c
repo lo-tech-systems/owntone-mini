@@ -5530,7 +5530,7 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
   // The response body may say why the anchor was rejected
   if (response)
     {
-      xml = wplist_to_xml(response);
+      xml = logger_wants(E_DBG, L_AIRPLAY) ? wplist_to_xml(response) : NULL;
       if (xml)
 	{
 	  DPRINTF(E_DBG, L_AIRPLAY, "SETRATEANCHORTIME error response from '%s' (rtsp %d, in-band status %" PRIi64 "):\n%s\n",
@@ -5748,9 +5748,12 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
   // The full /info plist is the only place a receiver declares its audio
   // capabilities (audioFormats, output device attributes), which we will need
   // for multichannel output detection. Dump it so a debug log captures it.
-  response_str = wplist_to_xml(response);
-  DPRINTF(E_DBG, L_AIRPLAY, "GET /info response from '%s':\n%s\n", session->devname, response_str);
-  free(response_str);
+  if (logger_wants(E_DBG, L_AIRPLAY))
+    {
+      response_str = wplist_to_xml(response);
+      DPRINTF(E_DBG, L_AIRPLAY, "GET /info response from '%s':\n%s\n", session->devname, response_str);
+      free(response_str);
+    }
 
   plist_free(response);
 

@@ -153,15 +153,35 @@ memstats_log_with(const char *reason, int sessions, int enc_in_use, int enc_budg
   memstats_last_logged = time(NULL);
 }
 
-void
-memstats_log(const char *reason)
+struct memstats_request
 {
+  const char *reason;
+  int sessions;
   int enc_in_use;
   int enc_budget;
+};
 
-  airplay_encoder_budget_get(&enc_in_use, &enc_budget);
+// Thread: worker
+static void
+memstats_log_cb(void *arg)
+{
+  struct memstats_request *req = arg;
 
-  memstats_log_with(reason, outputs_sessions_count(), enc_in_use, enc_budget);
+  memstats_log_with(req->reason, req->sessions, req->enc_in_use, req->enc_budget);
+}
+
+void
+memstats_log_async(const char *reason)
+{
+  struct memstats_request req;
+
+  // The session count and the encoder budget belong to the player thread, so
+  // they are read here and the rest is gathered on the worker thread
+  req.reason = reason;
+  req.sessions = outputs_sessions_count();
+  airplay_encoder_budget_get(&req.enc_in_use, &req.enc_budget);
+
+  worker_execute(memstats_log_cb, &req, sizeof(req), 0);
 }
 
 static void

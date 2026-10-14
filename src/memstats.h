@@ -19,14 +19,15 @@
 #ifndef __MEMSTATS_H__
 #define __MEMSTATS_H__
 
-// Gathers process and system memory figures and logs them as a single line
-// at E_INFO, domain L_MAIN. Must be called on the player thread, since it
-// calls outputs_sessions_count(). "reason", if non-NULL, is appended to the
-// line (e.g. "last session ended"); pass NULL for the periodic tick.
+// Logs the process and system memory figures as a single line at E_INFO,
+// domain L_MAIN, from the worker thread. Must be called on the player thread,
+// which is where the session count and the encoder budget are read. "reason"
+// is appended to the line (e.g. "last session ended") and must stay valid, so
+// pass a string literal.
 void
-memstats_log(const char *reason);
+memstats_log_async(const char *reason);
 
-// Starts the periodic tick that logs memstats_log() every 5 minutes while
+// Starts the periodic tick that logs the figures every 5 minutes while
 // playing and every hour while idle. Runs on the worker thread, which only asks
 // the player thread for the session count and the encoder budget.
 int

@@ -1709,7 +1709,7 @@ outputs_device_session_remove(uint64_t device_id)
   // session_free(), so the session's memory is still live at this point.
   if (outputs_sessions_count() == 0)
     {
-      memstats_log("last session ended");
+      memstats_log_async("last session ended");
       worker_execute(heap_trim_deferred_cb, NULL, 0, 1);
     }
 
