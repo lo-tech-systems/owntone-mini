@@ -168,7 +168,7 @@
 // The members of a group are released together once the youngest is old
 // enough, but none waits longer than the sibling wait for another.
 #define AIRPLAY_BUFFERED_ANCHOR_MIN_PEER_AGE_MS 1200
-#define AIRPLAY_BUFFERED_ANCHOR_SIBLING_WAIT_MS 300
+#define AIRPLAY_BUFFERED_ANCHOR_SIBLING_WAIT_MS 500
 // A session joining an already-anchored master session gets an anchor this
 // many frames past the current write head, and delivery to it is held until
 // the write head reaches that point - so its first delivered frame matches
