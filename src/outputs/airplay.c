@@ -36,6 +36,7 @@
 #include <time.h>
 #include <strings.h>
 #include <sys/utsname.h>
+#include <pthread.h>
 
 #include <arpa/inet.h>
 #include <net/if.h>
@@ -59,6 +60,7 @@
 #include "rtp_common.h"
 #include "transcode.h"
 #include "ptpd.h"
+#include "worker.h"
 #include "outputs.h"
 
 #include "airplay_events.h"
@@ -865,6 +867,8 @@ static void
 sequence_resume(struct airplay_session *session, bool ok);
 static void
 pair_job_timeout_cb(int fd, short what, void *arg);
+static void
+pair_jobs_dispatch(void);
 static int
 master_session_anchor_holders(struct airplay_master_session *ams, struct airplay_session *except);
 static bool
@@ -4711,10 +4715,12 @@ payload_make_pair_setup1(struct evrtsp_request *req, struct airplay_session *ses
 static int
 payload_make_pair_setup2(struct evrtsp_request *req, struct airplay_session *session, void *arg)
 {
-  // The body may have been built elsewhere while the sequence was suspended,
-  // otherwise build it here
+  // Built while the sequence was suspended, see pair_job_run()
   if (!session->pair_setup_body)
-    return payload_make_pair_generic(2, req, session);
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "Bug! No prepared pair setup 2 body for '%s'\n", session->devname);
+      return -1;
+    }
 
   evbuffer_add(req->output_buffer, session->pair_setup_body, session->pair_setup_body_len);
   free(session->pair_setup_body);
@@ -5868,10 +5874,218 @@ response_handler_pair_generic(int step, struct evrtsp_request *req, struct airpl
   return AIRPLAY_SEQ_CONTINUE;
 }
 
+/* ------------------- Pair setup computation off the player ---------------- */
+
+// The second pair-setup request is a heavy computation, so it is done by a
+// worker thread instead of the player thread. The job owns the pairing context
+// while it is away from the player thread, and carries the serial of the
+// session it belongs to, never the session itself, so a result for a session
+// that has since gone is simply discarded.
+struct airplay_pair_job
+{
+  uint64_t session_serial;
+  struct pair_setup_context *sctx; // Owned by the job until the completion runs
+  uint8_t *body; // Result, owned by the job until handed to the session
+  size_t body_len;
+  const char *errmsg; // Points into sctx (static strings), valid while sctx lives
+  uint64_t queued_ms; // Player thread, at enqueue
+  uint64_t started_ms; // Worker thread
+  uint64_t finished_ms; // Worker thread
+  struct airplay_pair_job *next;
+};
+
+// Queue wait above which the result is logged at the normal level
+#define AIRPLAY_PAIR_WAIT_WARN_MS 1000
+
+// Player thread only. At most one job is with the worker pool at a time, so
+// pairing never takes more than one core from the audio threads.
+static struct airplay_pair_job *pair_job_queue_head;
+static struct airplay_pair_job *pair_job_queue_tail;
+static struct airplay_pair_job *pair_job_current;
+static bool pair_jobs_deinit;
+static uint64_t pair_jobs_dispatched;
+
+// The one thing shared with the worker, only ever touched under the lock: the
+// number of jobs whose completion has been posted to the player thread. The
+// player thread takes the lock in airplay_deinit() only.
+static pthread_mutex_t pair_job_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t pair_job_cond = PTHREAD_COND_INITIALIZER;
+static uint64_t pair_jobs_posted;
+
+static void
+pair_job_free(struct airplay_pair_job *job)
+{
+  pair_setup_free(job->sctx);
+  free(job->body);
+  free(job);
+}
+
+static struct airplay_session *
+session_find_by_serial(uint64_t serial)
+{
+  struct airplay_session *session;
+
+  for (session = airplay_sessions; session; session = session->next)
+    {
+      if (session->serial == serial)
+	return session;
+    }
+
+  return NULL;
+}
+
+static void
+pair_job_done_cb(int fd, short what, void *arg);
+
+// *** Thread: worker ***
+// Touches nothing but the job it is given and the posted counter
+static void
+pair_job_run(void *arg)
+{
+  struct airplay_pair_job *job = *(struct airplay_pair_job **)arg;
+  struct timeval tv = { 0, 0 };
+  int ret;
+
+  job->started_ms = monotonic_ms();
+  job->body = pair_setup_request2(&job->body_len, job->sctx);
+  job->errmsg = job->body ? NULL : pair_setup_errmsg(job->sctx);
+  job->finished_ms = monotonic_ms();
+
+  // The job belongs to the player thread from here, it must not be used after
+  // the completion has been posted
+  ret = event_base_once(evbase_player, -1, EV_TIMEOUT, pair_job_done_cb, job, &tv);
+  if (ret < 0)
+    DPRINTF(E_LOG, L_AIRPLAY, "Could not post the result of a pair setup computation\n");
+
+  pthread_mutex_lock(&pair_job_lock);
+  pair_jobs_posted++;
+  pthread_cond_broadcast(&pair_job_cond);
+  pthread_mutex_unlock(&pair_job_lock);
+}
+
+// Hands the head of the queue to a worker if none is out. A job whose session
+// has gone, or no longer waits for it, is dropped here without costing a worker
+// anything.
+static void
+pair_jobs_dispatch(void)
+{
+  struct airplay_pair_job *job;
+  struct airplay_session *session;
+
+  while (!pair_job_current && (job = pair_job_queue_head))
+    {
+      pair_job_queue_head = job->next;
+      if (!pair_job_queue_head)
+	pair_job_queue_tail = NULL;
+
+      job->next = NULL;
+
+      session = session_find_by_serial(job->session_serial);
+      if (!session || !session->suspended_seq_ctx)
+	{
+	  pair_job_free(job);
+	  continue;
+	}
+
+      pair_job_current = job;
+      pair_jobs_dispatched++;
+      worker_execute(pair_job_run, &job, sizeof(job), 0); // Copies the pointer
+      return;
+    }
+}
+
+// Takes the session's pairing context and queues the second pair-setup request
+// for computation. The session keeps nothing of the context until the
+// completion returns it. The job is handed out by pair_jobs_dispatch() once the
+// sequence is parked.
+static int
+pair_job_enqueue(struct airplay_session *session)
+{
+  struct airplay_pair_job *job;
+  struct timeval tv = { AIRPLAY_PAIR_COMPUTE_TIMEOUT_SEC, 0 };
+
+  if (!session->pair_setup_ctx)
+    return -1;
+
+  CHECK_NULL(L_AIRPLAY, job = calloc(1, sizeof(*job)));
+
+  job->session_serial = session->serial;
+  job->sctx = session->pair_setup_ctx;
+  session->pair_setup_ctx = NULL;
+  job->queued_ms = monotonic_ms();
+
+  if (pair_job_queue_tail)
+    pair_job_queue_tail->next = job;
+  else
+    pair_job_queue_head = job;
+
+  pair_job_queue_tail = job;
+
+  evtimer_add(session->pairev, &tv);
+
+  return 0;
+}
+
+// *** Thread: player ***
+static void
+pair_job_done_cb(int fd, short what, void *arg)
+{
+  struct airplay_pair_job *job = arg;
+  struct airplay_session *session;
+  unsigned int waited_ms;
+
+  if (pair_job_current == job)
+    pair_job_current = NULL;
+
+  if (pair_jobs_deinit)
+    {
+      pair_job_free(job);
+      return;
+    }
+
+  session = session_find_by_serial(job->session_serial);
+  if (!session || !session->suspended_seq_ctx)
+    {
+      DPRINTF(E_DBG, L_AIRPLAY, "Discarding pair setup result, its session is gone\n");
+      pair_job_free(job);
+      pair_jobs_dispatch();
+      return;
+    }
+
+  evtimer_del(session->pairev);
+
+  // Ownership of the context returns to the session, whatever the outcome, so
+  // the error message and the later steps have it
+  session->pair_setup_ctx = job->sctx;
+  job->sctx = NULL;
+
+  if (!job->body)
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "Verification step 2 request error for '%s': %s\n", session->devname, job->errmsg);
+      pair_job_free(job);
+      sequence_resume(session, false); // May free the session
+      pair_jobs_dispatch();
+      return;
+    }
+
+  waited_ms = (unsigned int)(job->started_ms - job->queued_ms);
+  DPRINTF((waited_ms > AIRPLAY_PAIR_WAIT_WARN_MS) ? E_LOG : E_INFO, L_AIRPLAY, "Pair setup for '%s' computed in %u ms off the player thread (waited %u ms for a worker)\n",
+    session->devname, (unsigned int)(job->finished_ms - job->started_ms), waited_ms);
+
+  session->pair_setup_body = job->body;
+  session->pair_setup_body_len = job->body_len;
+  job->body = NULL;
+  pair_job_free(job);
+
+  sequence_resume(session, true); // May free the session
+  pair_jobs_dispatch();
+}
+
 static enum airplay_seq_type
 response_handler_pair_setup1(struct evrtsp_request *req, struct airplay_session *session)
 {
   struct output_device *device;
+  enum airplay_seq_type seq_type;
 
   if (session->pair_type == PAIR_CLIENT_HOMEKIT_TRANSIENT && req->response_code == RTSP_CONNECTION_AUTH_REQUIRED)
     {
@@ -5885,7 +6099,14 @@ response_handler_pair_setup1(struct evrtsp_request *req, struct airplay_session 
       return AIRPLAY_SEQ_PIN_START;
     }
 
-  return response_handler_pair_generic(1, req, session);
+  seq_type = response_handler_pair_generic(1, req, session);
+  if (seq_type != AIRPLAY_SEQ_CONTINUE)
+    return seq_type;
+
+  if (pair_job_enqueue(session) < 0)
+    return AIRPLAY_SEQ_ABORT;
+
+  return AIRPLAY_SEQ_SUSPEND;
 }
 
 static enum airplay_seq_type
@@ -6246,6 +6467,11 @@ sequence_continue_cb(struct evrtsp_request *req, void *arg)
 
 	      session->suspended_seq_ctx = seq_ctx;
 	      evrtsp_connection_set_closecb(session->ctrl, NULL, NULL);
+
+	      // Work queued by the handler is only handed out once the sequence
+	      // is parked, since a job whose session has no parked sequence is
+	      // dropped
+	      pair_jobs_dispatch();
 	      return;
 	    }
 
@@ -7664,6 +7890,7 @@ static void
 airplay_deinit(void)
 {
   struct airplay_session *session;
+  struct airplay_pair_job *job;
 
   airplay_events_deinit();
   service_stop(&airplay_control_svc);
@@ -7677,6 +7904,27 @@ airplay_deinit(void)
 
       session_free(session);
     }
+
+  // Queued computations have no session left to serve
+  while (pair_job_queue_head)
+    {
+      job = pair_job_queue_head;
+      pair_job_queue_head = job->next;
+      pair_job_free(job);
+    }
+
+  pair_job_queue_tail = NULL;
+
+  // A computation already with a worker will post its completion to the player
+  // event base, so wait for that post, which cannot then land after the base
+  // is gone. All sessions are freed and no audio is written any more, so this
+  // is the one place the player thread waits for a worker.
+  pair_jobs_deinit = true;
+
+  pthread_mutex_lock(&pair_job_lock);
+  while (pair_jobs_posted != pair_jobs_dispatched)
+    pthread_cond_wait(&pair_job_cond, &pair_job_lock);
+  pthread_mutex_unlock(&pair_job_lock);
 
   // After freeing sessions, since that's where the active ptp peers get removed
   ptpd_deinit();
