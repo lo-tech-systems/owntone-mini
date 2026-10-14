@@ -209,6 +209,11 @@
 #define AIRPLAY_START_RETRY_MAX       3
 #define AIRPLAY_START_RETRY_WAIT_SEC  3
 
+// How long a sequence may stay suspended while its pairing request is being
+// computed elsewhere. Shorter than the RTSP read timeout, so we give up first
+// and with a message that names the cause.
+#define AIRPLAY_PAIR_COMPUTE_TIMEOUT_SEC 10
+
 // This is an arbitrary value which just needs to be kept in sync with the config
 #define AIRPLAY_CONFIG_MAX_VOLUME     11
 
@@ -253,6 +258,9 @@ enum airplay_state {
 
 enum airplay_seq_type
 {
+  // Returned by a response handler that has handed work to another thread. The
+  // sequence is parked on the session until sequence_resume() is called.
+  AIRPLAY_SEQ_SUSPEND = -2,
   AIRPLAY_SEQ_ABORT = -1,
   AIRPLAY_SEQ_START,
   AIRPLAY_SEQ_START_PLAYBACK,
@@ -426,6 +434,11 @@ struct airplay_session
 {
   uint64_t device_id;
   int callback_id;
+
+  // Unique for the life of the process, assigned in session_make(). Work that
+  // leaves the player thread refers to the session by this and looks it up
+  // again on return.
+  uint64_t serial;
 
   // Number of soft start retries already performed for this start attempt.
   // Carried across session recreation so the backoff stays bounded (see
@@ -604,6 +617,15 @@ struct airplay_session
   struct pair_cipher_context *control_cipher_ctx;
   struct pair_verify_context *pair_verify_ctx;
   struct pair_setup_context *pair_setup_ctx;
+
+  // A sequence parked by a response handler that returned AIRPLAY_SEQ_SUSPEND,
+  // continued by sequence_resume(). Freed with the session.
+  struct airplay_seq_ctx *suspended_seq_ctx;
+  // Request body prepared elsewhere for the next payload_make
+  uint8_t *pair_setup_body;
+  size_t pair_setup_body_len;
+  // Bounds how long a suspended sequence may wait for its result
+  struct event *pairev;
 
   uint8_t shared_secret[64];
   size_t shared_secret_len; // 32 or 64, see AIRPLAY_AUDIO_KEY_LEN for comment
@@ -785,6 +807,8 @@ static struct timeval keep_alive_tv = { AIRPLAY_KEEP_ALIVE_INTERVAL, 0 };
 /* Sessions */
 static struct airplay_master_session *airplay_master_sessions;
 static struct airplay_session *airplay_sessions;
+// Player thread only
+static uint64_t airplay_session_serial_next = 1;
 
 // Encoder admission control (buffered ams only). in_use is charged/released
 // on the player thread only, one unit of work at a time, so no lock is
@@ -837,6 +861,10 @@ static void
 sequence_start(enum airplay_seq_type seq_type, struct airplay_session *session, void *arg, const char *log_caller);
 static void
 sequence_continue(struct airplay_seq_ctx *seq_ctx);
+static void
+sequence_resume(struct airplay_session *session, bool ok);
+static void
+pair_job_timeout_cb(int fd, short what, void *arg);
 static int
 master_session_anchor_holders(struct airplay_master_session *ams, struct airplay_session *except);
 static bool
@@ -1740,6 +1768,9 @@ session_free(struct airplay_session *session)
   if (session->np_artwork_ev)
     event_free(session->np_artwork_ev);
 
+  if (session->pairev)
+    event_free(session->pairev);
+
   airplay_buffered_stop(session->buffered);
 
   if (session->server_fd >= 0)
@@ -1753,6 +1784,9 @@ session_free(struct airplay_session *session)
   pair_setup_free(session->pair_setup_ctx);
   pair_verify_free(session->pair_verify_ctx);
   pair_cipher_free(session->control_cipher_ctx);
+
+  free(session->suspended_seq_ctx);
+  free(session->pair_setup_body);
 
   free(session->local_v4_address);
   free(session->local_v6_address);
@@ -2218,6 +2252,9 @@ session_make(struct output_device *device, int callback_id)
   CHECK_NULL(L_AIRPLAY, session->anchorev = evtimer_new(evbase_player, anchor_retry_cb, session));
   CHECK_NULL(L_AIRPLAY, session->np_reassert_ev = evtimer_new(evbase_player, np_reassert_cb, session));
   CHECK_NULL(L_AIRPLAY, session->np_artwork_ev = evtimer_new(evbase_player, np_artwork_cb, session));
+  CHECK_NULL(L_AIRPLAY, session->pairev = evtimer_new(evbase_player, pair_job_timeout_cb, session));
+
+  session->serial = airplay_session_serial_next++;
 
   session->anchor_retries_left = AIRPLAY_BUFFERED_ANCHOR_RETRIES_MAX;
 
@@ -4576,6 +4613,16 @@ payload_make_pin_start(struct evrtsp_request *req, struct airplay_session *sessi
   return 0;
 }
 
+static void
+pair_headers_add(struct evrtsp_request *req, struct airplay_session *session)
+{
+  // Required!!
+  if (session->pair_type == PAIR_CLIENT_HOMEKIT_NORMAL)
+    evrtsp_add_header(req->output_headers, "X-Apple-HKP", "3");
+  else if (session->pair_type == PAIR_CLIENT_HOMEKIT_TRANSIENT)
+    evrtsp_add_header(req->output_headers, "X-Apple-HKP", "4");
+}
+
 static int
 payload_make_pair_generic(int step, struct evrtsp_request *req, struct airplay_session *session)
 {
@@ -4624,11 +4671,7 @@ payload_make_pair_generic(int step, struct evrtsp_request *req, struct airplay_s
   evbuffer_add(req->output_buffer, body, len);
   free(body);
 
-  // Required!!
-  if (session->pair_type == PAIR_CLIENT_HOMEKIT_NORMAL)
-    evrtsp_add_header(req->output_headers, "X-Apple-HKP", "3");
-  else if (session->pair_type == PAIR_CLIENT_HOMEKIT_TRANSIENT)
-    evrtsp_add_header(req->output_headers, "X-Apple-HKP", "4");
+  pair_headers_add(req, session);
 
   return 0;
 }
@@ -4668,7 +4711,18 @@ payload_make_pair_setup1(struct evrtsp_request *req, struct airplay_session *ses
 static int
 payload_make_pair_setup2(struct evrtsp_request *req, struct airplay_session *session, void *arg)
 {
-  return payload_make_pair_generic(2, req, session);
+  // The body may have been built elsewhere while the sequence was suspended,
+  // otherwise build it here
+  if (!session->pair_setup_body)
+    return payload_make_pair_generic(2, req, session);
+
+  evbuffer_add(req->output_buffer, session->pair_setup_body, session->pair_setup_body_len);
+  free(session->pair_setup_body);
+  session->pair_setup_body = NULL;
+
+  pair_headers_add(req, session);
+
+  return 0;
 }
 
 static int
@@ -6181,6 +6235,20 @@ sequence_continue_cb(struct evrtsp_request *req, void *arg)
       seq_type = cur_request->response_handler(req, session);
       if (seq_type != AIRPLAY_SEQ_CONTINUE)
 	{
+	  if (seq_type == AIRPLAY_SEQ_SUSPEND)
+	    {
+	      // The handler has handed work to another thread and will have the
+	      // sequence resumed with sequence_resume(). Treat the pause like a
+	      // request in flight: errors on the connection surface when the
+	      // next request is sent, as they do today for a queued request.
+	      if (session->suspended_seq_ctx)
+		DPRINTF(E_LOG, L_AIRPLAY, "Bug! Sequence suspended twice on '%s'\n", session->devname);
+
+	      session->suspended_seq_ctx = seq_ctx;
+	      evrtsp_connection_set_closecb(session->ctrl, NULL, NULL);
+	      return;
+	    }
+
 	  if (seq_type == AIRPLAY_SEQ_ABORT)
 	    goto error;
 
@@ -6287,6 +6355,56 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
   deferred_session_failure(session);
 
   free(seq_ctx);
+}
+
+// Continues a sequence parked by AIRPLAY_SEQ_SUSPEND: advances past the row
+// whose handler suspended and sends the next one. With ok false the sequence
+// ends through its error callback instead, as a negative response would have
+// ended it.
+static void
+sequence_resume(struct airplay_session *session, bool ok)
+{
+  struct airplay_seq_ctx *seq_ctx = session->suspended_seq_ctx;
+
+  session->suspended_seq_ctx = NULL;
+  if (!seq_ctx)
+    return; // Nothing parked, a teardown or the watchdog got there first
+
+  if (!ok)
+    {
+      if (seq_ctx->on_error)
+	seq_ctx->on_error(session); // May free the session, no use of it after this
+
+      free(seq_ctx);
+      return;
+    }
+
+  seq_ctx->cur_request++;
+
+  if (!seq_ctx->cur_request->name)
+    {
+      if (seq_ctx->on_success)
+	seq_ctx->on_success(session);
+
+      free(seq_ctx);
+      return;
+    }
+
+  sequence_continue(seq_ctx);
+}
+
+// Fires when a suspended sequence has waited too long for its result
+static void
+pair_job_timeout_cb(int fd, short what, void *arg)
+{
+  struct airplay_session *session = arg;
+
+  if (!session->suspended_seq_ctx)
+    return;
+
+  DPRINTF(E_LOG, L_AIRPLAY, "Pair setup for '%s' did not complete in %d s, giving up this attempt\n", session->devname, AIRPLAY_PAIR_COMPUTE_TIMEOUT_SEC);
+
+  sequence_resume(session, false); // on_error may free the session
 }
 
 // All errors that may occur during a sequence are called back async
