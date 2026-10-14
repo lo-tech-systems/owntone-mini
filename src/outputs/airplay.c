@@ -5295,7 +5295,9 @@ response_handler_flush_offset(struct evrtsp_request *req, struct airplay_session
   session->anchor_sibling_waited = false;
   evtimer_del(session->anchorev);
 
-  if (!master_session_has_confirmed_anchor(session->master_session))
+  // A sibling whose anchor is confirmed or still unanswered holds the shared
+  // line; dropping it would leave that sibling on a line we have forgotten
+  if (master_session_anchor_holders(session->master_session, session) == 0)
     {
       session->master_session->buffered_marker_pending = true;
       session->master_session->buffered_anchor_mapped = false;
@@ -5341,10 +5343,12 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
   size_t len;
   int64_t inband_status = 0;
   char stats_desc[192];
+  uint64_t answer_ms;
   int holders;
 
   // The request is answered, whatever the answer
   session->anchor_in_flight = false;
+  answer_ms = monotonic_ms() - session->anchor_sent_ms;
 
   // Some receivers can return 200 OK while rejecting the anchor IN-BAND with
   // a plist body carrying a nonzero status. Parse the body once up front;
@@ -5363,7 +5367,15 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
     {
       if (response)
 	plist_free(response);
-      DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME accepted by '%s': %s\n", session->devname, stats_desc);
+      // A flush answered while this anchor was outstanding has put the session
+      // back to waiting for a new anchor; the old one must not confirm it
+      if (session->anchor_pending)
+	{
+	  DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME answer from '%s' ignored, a new anchor is pending\n", session->devname);
+	  return AIRPLAY_SEQ_CONTINUE;
+	}
+
+      DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME accepted by '%s' after %" PRIu64 " ms: %s\n", session->devname, answer_ms, stats_desc);
       session->anchor_confirmed = true;
       session->anchor_retries_left = AIRPLAY_BUFFERED_ANCHOR_RETRIES_MAX;
       evtimer_del(session->anchorev);
@@ -5371,12 +5383,12 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
     }
 
   if (session->anchor_retries_left > 0)
-    DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME rejected by '%s' (%d %s, in-band %" PRIi64 "), retrying in %d ms (%d retries left): %s\n",
-            session->devname, req->response_code, req->response_code_line, inband_status,
+    DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME rejected by '%s' (%d %s, in-band %" PRIi64 ") after %" PRIu64 " ms, retrying in %d ms (%d retries left): %s\n",
+            session->devname, req->response_code, req->response_code_line, inband_status, answer_ms,
             AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS, session->anchor_retries_left - 1, stats_desc);
   else
-    DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME rejected by '%s' (%d %s, in-band %" PRIi64 "), no retries left: %s\n",
-            session->devname, req->response_code, req->response_code_line, inband_status, stats_desc);
+    DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME rejected by '%s' (%d %s, in-band %" PRIi64 ") after %" PRIu64 " ms, no retries left: %s\n",
+            session->devname, req->response_code, req->response_code_line, inband_status, answer_ms, stats_desc);
 
   // The response body may say why the anchor was rejected
   if (response)
@@ -7325,7 +7337,7 @@ airplay_write(struct output_buffer *obuf)
 	  else
 	    {
 	      if (session->anchor_held)
-		DPRINTF(E_DBG, L_AIRPLAY, "Releasing anchor for '%s': clock peer %" PRIu64 " ms old%s\n", session->devname,
+		DPRINTF(E_LOG, L_AIRPLAY, "Releasing anchor for '%s': clock peer %" PRIu64 " ms old%s\n", session->devname,
 		        now_ms - session->ptpd_peer_added_ms, session->anchor_sibling_waited ? ", waited for a sibling" : "");
 
 	      session->anchor_held = false;
