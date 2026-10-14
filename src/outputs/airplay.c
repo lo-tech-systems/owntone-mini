@@ -453,7 +453,14 @@ struct airplay_session
   // start_retry()).
   int start_retries;
 
+  // NULL until the receiver's /info answer has decided which kind it gets,
+  // see session_master_attach(). A session that only probes or prompts for a
+  // PIN never gets one.
   struct airplay_master_session *master_session;
+
+  // Timing protocol of the receiver, from its advertisement. Copied here at
+  // session creation so it is known before the master session exists.
+  bool use_ptp;
 
   struct evrtsp_connection *ctrl;
 
@@ -553,8 +560,8 @@ struct airplay_session
   // selected output mode (and the global buffered_audio_enabled switch under
   // "auto", and the standalone-ATV gate for the two surround modes);
   // device_supports_buffered reflects the /info capability gate
-  // (response_handler_info_generic); buffered_mode is the final decision, also
-  // made there, which is what everything downstream (SETUP payload, write
+  // (response_handler_info_generic); buffered_mode is the final decision, made
+  // in session_master_attach(), which is what everything downstream (SETUP payload, write
   // path, flush) acts on.
   enum airplay_buffered_kind wants_buffered_kind;
   // bufferStream format id this session will stream when buffered: 23 (AAC-LC
@@ -2365,20 +2372,10 @@ session_make(struct output_device *device, int callback_id)
 	goto error;
     }
 
-  // Always starts out on the realtime ALAC master session; if the device is
-  // configured for buffered mode and the device's /info response confirms
-  // support, response_handler_info_generic() swaps this for a buffered one.
-  session->master_session = master_session_make(&device->quality, extra->use_ptp, AIRPLAY_BUFFERED_KIND_NONE);
-  if (!session->master_session)
-    {
-      DPRINTF(E_LOG, L_AIRPLAY, "Could not attach a master session for device '%s'\n", device->name);
-      goto error;
-    }
+  // The master session is attached once the receiver's /info answer has
+  // decided which kind it gets, see session_master_attach()
+  session->use_ptp = extra->use_ptp;
 
-  DPRINTF(E_DBG, L_AIRPLAY,
-          "Stream mode for '%s': payload_type=%u (realtime), timing=%s, reason=%s\n",
-          session->devname, AIRPLAY_RTP_PAYLOADTYPE, session->master_session->use_ptp ? "PTP" : "NTP",
-          session->wants_buffered_kind != AIRPLAY_BUFFERED_KIND_NONE ? "buffered_configured_pending_capability_check" : "default_sender_path");
   DPRINTF(E_DBG, L_AIRPLAY, "Session group UUID for '%s': %s (source=generated)\n",
           session->devname, session->group_uuid);
 
@@ -4492,7 +4489,7 @@ payload_make_setpeers(struct evrtsp_request *req, struct airplay_session *sessio
   int ret;
   int peers;
 
-  if (!session->master_session->use_ptp)
+  if (!session->use_ptp)
     return 1; // Skip to next request
 
   plist_t root;
@@ -4622,7 +4619,7 @@ payload_make_setup_session_ptp(struct evrtsp_request *req, struct airplay_sessio
 static int
 payload_make_setup_session(struct evrtsp_request *req, struct airplay_session *session, void *arg)
 {
-  if (!session->master_session->use_ptp)
+  if (!session->use_ptp)
     return payload_make_setup_session_ntp(req, session, arg);
 
   return payload_make_setup_session_ptp(req, session, arg);
@@ -5318,7 +5315,7 @@ response_handler_setup_session(struct evrtsp_request *req, struct airplay_sessio
       DPRINTF(E_WARN, L_AIRPLAY, "Could not hand over the events connection to '%s' (port %u), proceeding anyway\n", session->devname, session->events_port);
     }
 
-  if (session->master_session->use_ptp)
+  if (session->use_ptp)
     {
       ret = handle_timingpeerinfo(&session->ptpd_slave_id, response, session->local_v4_address, session->local_v6_address);
       if (ret < 0)
@@ -5368,8 +5365,9 @@ response_handler_flush_buffered(struct evrtsp_request *req, struct airplay_sessi
   session->master_session->buffered_anchor_mapped = false;
   // Queued-but-unsent frames would otherwise carry seqnums past flushUntilSeq,
   // and the receiver keeps those instead of discarding them. A live session
-  // always has a master session (session_make() fails without one), hence no
-  // NULL test here, matching the unconditional accesses above.
+  // that reaches this point is streaming, so it has a master session (see
+  // session_master_attach()), hence no NULL test here, matching the
+  // unconditional accesses above.
   if (session->master_session->encoder)
     airplay_encoder_flush(session->master_session->encoder);
   return AIRPLAY_SEQ_CONTINUE;
@@ -5774,61 +5772,6 @@ response_handler_info_generic(struct evrtsp_request *req, struct airplay_session
     session->devname, session->statusflags, (bool)(session->statusflags & AIRPLAY_FLAG_AUDIO_CABLE_ATTACHED), (bool)(session->statusflags & AIRPLAY_FLAG_ONE_TIME_PAIRING_REQUIRED),
     (bool)(session->statusflags & AIRPLAY_FLAG_PASSWORD_REQUIRED), (bool)(session->statusflags & AIRPLAY_FLAG_PIN_REQUIRED));
 
-  // Buffered mode decision: only relevant if the device is configured for it
-  // (session->wants_buffered_kind != NONE). If the device also advertises the
-  // capability (checked against whichever format id session->buffered_format_id
-  // resolved to - the capability check above is generic across all buffered
-  // kinds), swap in a buffered master session; a failure to do so aborts the
-  // session outright (no silent downgrade mid negotiation). If the device
-  // doesn't advertise it, we simply proceed with the realtime ALAC master
-  // session created in session_make().
-  // A capability probe must never touch admission, encoders, or ams state:
-  // it funnels into this same handler but the session tears down right
-  // after, and running the swap here would spawn a throwaway encoder thread
-  // and could fail the probe merely because other outputs hold the budget.
-  if (!session->probing && session->wants_buffered_kind != AIRPLAY_BUFFERED_KIND_NONE)
-    {
-      if (session->device_supports_buffered)
-	{
-	  struct airplay_master_session *new_ams;
-	  struct airplay_master_session *old_ams;
-
-	  new_ams = master_session_make(&device->quality, session->master_session->use_ptp, session->wants_buffered_kind);
-	  if (!new_ams)
-	    {
-	      DPRINTF(E_LOG, L_AIRPLAY, "Could not create buffered master session for '%s'\n", session->devname);
-
-	      // A budget rejection is distinguishable from any other setup
-	      // failure so it can surface as a capacity-specific API error;
-	      // either way this is a hard failure, not a soft retry candidate.
-	      if (encoder_budget_rejected)
-	        device->last_failure = OUTPUT_FAILURE_CAPACITY;
-	      session->state = AIRPLAY_STATE_FAILED;
-	      return AIRPLAY_SEQ_ABORT;
-	    }
-
-	  // Swap the pointer before cleaning up the old master session: cleanup
-	  // only frees a master session that no session references any more, so
-	  // it must run after this session has been repointed at new_ams, or it
-	  // will see this session still attached to old_ams and refuse to free
-	  // it (leaking it, since nothing else may ever reference it again).
-	  old_ams = session->master_session;
-	  session->master_session = new_ams;
-	  master_session_cleanup(old_ams);
-
-	  session->buffered_mode = true;
-	  session->anchor_pending = true;
-
-	  DPRINTF(E_INFO, L_AIRPLAY, "Device '%s' advertises buffered format id %u; streaming via buffered protocol (kind=%d)\n",
-	          session->devname, session->buffered_format_id, session->wants_buffered_kind);
-	}
-      else
-	{
-	  DPRINTF(E_INFO, L_AIRPLAY, "Device '%s' is configured for buffered mode, but does not advertise buffered format id %u; falling back to realtime ALAC\n",
-	          session->devname, session->buffered_format_id);
-	}
-    }
-
   // A background capability probe only came to read the format list, which is
   // already parsed above. It must not drive any pairing/auth handshake or set
   // auth state on the device, so stop cleanly here whatever the pairing flags
@@ -5902,14 +5845,68 @@ response_handler_info_probe(struct evrtsp_request *req, struct airplay_session *
   return seq_type;
 }
 
+// Gives the session the master session of the kind the receiver's /info answer
+// decided: buffered if the device is set to it and advertises it, otherwise
+// realtime ALAC. Probes and PIN prompts never get one, nothing in those paths
+// needs it. Returns -1 after setting the session failed, which the caller
+// turns into an abort of the start sequence.
+static int
+session_master_attach(struct airplay_session *session, struct output_device *device)
+{
+  enum airplay_buffered_kind kind = AIRPLAY_BUFFERED_KIND_NONE;
+  const char *reason = "realtime";
+
+  if (session->wants_buffered_kind != AIRPLAY_BUFFERED_KIND_NONE)
+    {
+      if (session->device_supports_buffered)
+	{
+	  kind = session->wants_buffered_kind;
+	  reason = "buffered, advertised";
+	}
+      else
+	reason = "buffered configured, not advertised, realtime instead";
+    }
+
+  session->master_session = master_session_make(&device->quality, session->use_ptp, kind);
+  if (!session->master_session)
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "Could not create %s master session for '%s'\n", kind == AIRPLAY_BUFFERED_KIND_NONE ? "realtime" : "buffered", session->devname);
+
+      // A budget rejection is distinguishable from any other setup failure so
+      // it can surface as a capacity-specific API error; either way this is a
+      // hard failure, not a soft retry candidate.
+      if (encoder_budget_rejected)
+	device->last_failure = OUTPUT_FAILURE_CAPACITY;
+      session->state = AIRPLAY_STATE_FAILED;
+      return -1;
+    }
+
+  if (kind != AIRPLAY_BUFFERED_KIND_NONE)
+    {
+      session->buffered_mode = true;
+      session->anchor_pending = true;
+    }
+
+  DPRINTF(E_INFO, L_AIRPLAY, "Stream mode for '%s': %s (kind %d, format id %u, %s timing)\n", session->devname, reason, kind, session->buffered_format_id, session->use_ptp ? "PTP" : "NTP");
+
+  return 0;
+}
+
 static enum airplay_seq_type
 response_handler_info_start(struct evrtsp_request *req, struct airplay_session *session)
 {
+  struct output_device *device;
   enum airplay_seq_type seq_type;
 
   seq_type = response_handler_info_generic(req, session);
-  if (seq_type != AIRPLAY_SEQ_ABORT && seq_type != AIRPLAY_SEQ_PIN_START)
-    session->next_seq = AIRPLAY_SEQ_START_PLAYBACK; // Pair and then run SEQ_START_PLAYBACK which sets up the playback
+  if (seq_type == AIRPLAY_SEQ_ABORT || seq_type == AIRPLAY_SEQ_PIN_START)
+    return seq_type;
+
+  device = outputs_device_get(session->device_id);
+  if (!device || session_master_attach(session, device) < 0)
+    return AIRPLAY_SEQ_ABORT;
+
+  session->next_seq = AIRPLAY_SEQ_START_PLAYBACK; // Pair and then run SEQ_START_PLAYBACK which sets up the playback
 
   return seq_type;
 }
