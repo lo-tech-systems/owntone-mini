@@ -157,8 +157,10 @@
 // timeline; the anchor is retried a bounded number of times before the
 // session is failed outright. Audio queued in the meantime is simply held by
 // the receiver, so streaming state is unaffected while a retry is pending.
-#define AIRPLAY_BUFFERED_ANCHOR_RETRIES_MAX   4
-#define AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS 1500
+// The wait is short so a receiver is anchored soon after its clock locks, and
+// the count keeps the whole allowance at about six seconds.
+#define AIRPLAY_BUFFERED_ANCHOR_RETRIES_MAX   12
+#define AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS 500
 // A session joining an already-anchored master session gets an anchor this
 // many frames past the current write head, and delivery to it is held until
 // the write head reaches that point - so its first delivered frame matches
