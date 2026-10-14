@@ -1611,11 +1611,13 @@ master_session_make(struct media_quality *quality, bool use_ptp, enum airplay_bu
 
   encoder_budget_rejected = false;
 
-  // First check if we already have a suitable session
+  // First check if we already have a suitable session. One whose encoder has
+  // failed is on its way out with its sessions and must not take a new one.
   for (ams = airplay_master_sessions; ams; ams = ams->next)
     {
       if (quality_is_equal(quality, &ams->rtp_session->quality) && use_ptp == ams->use_ptp
-          && kind == ams->buffered_kind)
+          && kind == ams->buffered_kind
+          && !(ams->encoder && airplay_encoder_failed(ams->encoder)))
 	return ams;
     }
 
@@ -2951,6 +2953,9 @@ packets_resend(struct airplay_session *session, uint16_t seqnum, int len)
   uint16_t s;
   int i;
   bool pkt_missing = false;
+
+  if (!session->master_session)
+    return;
 
   rtp_session = session->master_session->rtp_session;
 

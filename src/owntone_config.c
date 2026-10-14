@@ -616,6 +616,7 @@ config_write_json_to_path(const char *path, const char *json_str, bool sync_file
   FILE *fp;
   bool direct_write = false;
   int ret;
+  int err;
 
   if (!path || !json_str)
     return -1;
@@ -658,8 +659,9 @@ config_write_json_to_path(const char *path, const char *json_str, bool sync_file
     ret = -1;
   if (ret < 0)
     {
+      err = errno;
       fclose(fp);
-      DPRINTF(E_LOG, L_CONF, "Could not write %s: %s\n", direct_write ? path : tmppath, strerror(errno));
+      DPRINTF(E_LOG, L_CONF, "Could not write %s: %s\n", direct_write ? path : tmppath, strerror(err));
       return -1;
     }
   if (fclose(fp) != 0)
