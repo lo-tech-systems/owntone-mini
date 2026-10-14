@@ -544,6 +544,10 @@ struct airplay_session
   // anchor's point on the shared line is then held by this session even though
   // it is not confirmed yet (see master_session_anchor_holders).
   bool anchor_in_flight;
+  // Set while a rejected anchor waits for its retry timer. The session has no
+  // request outstanding then, so it does not hold the shared write head back
+  // (see buffered_frame_send).
+  bool anchor_retry_waiting;
   // Set once session_streaming_report() has told the player
   // OUTPUT_STATE_STREAMING for this session, so it is only reported once.
   bool streaming_reported;
@@ -1844,6 +1848,8 @@ anchor_retry_cb(int fd, short what, void *arg)
 {
   struct airplay_session *session = arg;
 
+  session->anchor_retry_waiting = false;
+
   if (session->state != AIRPLAY_STATE_STREAMING || !session->buffered_mode || session->anchor_pending)
     return;
 
@@ -2909,7 +2915,11 @@ buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
       // rtpTime. The counters are frozen below while holding.
       if (!session->anchor_confirmed)
 	{
-	  gated = true;
+	  // A session waiting out an anchor retry has nothing outstanding, and
+	  // its next anchor is taken at the head when the retry is sent (which
+	  // gates again), so it need not hold the head back meanwhile
+	  if (!session->anchor_retry_waiting)
+	    gated = true;
 	  continue;
 	}
 
@@ -5047,6 +5057,7 @@ response_handler_flush_buffered(struct evrtsp_request *req, struct airplay_sessi
   session->anchor_pending = true;
   session->anchor_confirmed = false; // Resumed audio must wait for the fresh anchor
   session->anchor_in_flight = false;
+  session->anchor_retry_waiting = false;
   evtimer_del(session->anchorev);
   session->master_session->buffered_marker_pending = true;
   // Playback resumes at a new wall time, so the old rtptime->networkTime
@@ -5121,6 +5132,7 @@ response_handler_flush_offset(struct evrtsp_request *req, struct airplay_session
   session->anchor_pending = true;
   session->anchor_confirmed = false;
   session->anchor_in_flight = false;
+  session->anchor_retry_waiting = false;
   evtimer_del(session->anchorev);
 
   if (!master_session_has_confirmed_anchor(session->master_session))
@@ -5211,6 +5223,7 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
   DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME for '%s': shared timing %s (%d other session(s) hold it)\n",
           session->devname, holders == 0 ? "dropped" : "kept", holders);
 
+  session->anchor_retry_waiting = true;
   evtimer_add(session->anchorev, &tv);
 
   return AIRPLAY_SEQ_CONTINUE;
