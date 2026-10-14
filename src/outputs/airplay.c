@@ -1559,6 +1559,8 @@ master_session_make(struct media_quality *quality, bool use_ptp, enum airplay_bu
   enum transcode_profile profile;
   struct transcode_encode_setup_args encode_args;
   uint64_t clock_id;
+  uint64_t start_ms;
+  char name[16];
   int ret;
   int cost = 0;    // set below when buffered; neutral default keeps gcc happy
   int budget = 0;  // across the two separate "if (buffered)" blocks in this function
@@ -1659,6 +1661,8 @@ master_session_make(struct media_quality *quality, bool use_ptp, enum airplay_bu
   if (alac24)
     ams->rtp_session->ssrc_id = AIRPLAY_SSRC_ID_ALAC48K_24;
 
+  start_ms = monotonic_ms();
+
   if (buffered)
     {
       // The encode context and its PCM/frame queues live on the encoder's own
@@ -1686,6 +1690,9 @@ master_session_make(struct media_quality *quality, bool use_ptp, enum airplay_bu
 	  goto error;
 	}
     }
+
+  snprintf(name, sizeof(name), "kind %d", kind);
+  outputs_step_time_log(L_AIRPLAY, "Encoder setup", name, start_ms);
 
   buffer_duration_ms = outputs_buffer_duration_ms_get();
   if (buffer_duration_ms <= AIRPLAY_AUDIO_LATENCY_MS)
@@ -2551,6 +2558,9 @@ airplay_metadata_send(struct output_metadata *metadata)
 {
   struct airplay_session *session;
   struct airplay_session *next;
+  uint64_t start_ms;
+  char name[24];
+  int count = 0;
   int ret;
 
   // Replace the current metadata BEFORE dispatching any sequences. The
@@ -2565,6 +2575,8 @@ airplay_metadata_send(struct output_metadata *metadata)
   airplay_metadata_purge();
   airplay_cur_metadata = metadata;
 
+  start_ms = monotonic_ms();
+
   for (session = airplay_sessions; session; session = next)
     {
       next = session->next;
@@ -2578,7 +2590,12 @@ airplay_metadata_send(struct output_metadata *metadata)
 	  session_failure(session);
 	  continue;
 	}
+
+      count++;
     }
+
+  snprintf(name, sizeof(name), "%d sessions", count);
+  outputs_step_time_log(L_AIRPLAY, "Metadata burst", name, start_ms);
 }
 
 
@@ -4982,6 +4999,7 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
   plist_t stream_connection_rtp;
   plist_t item;
   uint64_t uintval;
+  uint64_t start_ms;
   int ret;
 
   DPRINTF(E_INFO, L_AIRPLAY, "Setting up AirPlay session %u to %s [transport: AirPlay 2, intended: %s]\n",
@@ -5062,8 +5080,11 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
 
       DPRINTF(E_DBG, L_AIRPLAY, "Negotiated buffered streaming session; ports d=%u c=%u e=%u\n", session->buffered_data_port, session->control_port, session->events_port);
 
+      start_ms = monotonic_ms();
+
       ret = airplay_buffered_start(&session->buffered, evbase_player, session->address, session->buffered_data_port,
                                     session->shared_secret, session->shared_secret_len, session->buffered_format_id << 24);
+      outputs_step_time_log(L_AIRPLAY, "Data connect", session->devname, start_ms);
       if (ret < 0)
 	{
 	  DPRINTF(E_LOG, L_AIRPLAY, "Could not start buffered AirPlay stream to '%s'\n", session->devname);
@@ -5183,6 +5204,7 @@ response_handler_setup_session(struct evrtsp_request *req, struct airplay_sessio
   plist_t response;
   plist_t item;
   uint64_t uintval;
+  uint64_t start_ms;
   int ret;
   if (req->response_code == RTSP_UNAUTHORIZED)
     {
@@ -5227,7 +5249,10 @@ response_handler_setup_session(struct evrtsp_request *req, struct airplay_sessio
     }
 
   // Reverse connection, used to receive playback events from device
+  start_ms = monotonic_ms();
+
   ret = airplay_events_listen(session->devname, session->device_id, session->address, session->events_port, session->shared_secret, session->shared_secret_len);
+  outputs_step_time_log(L_AIRPLAY, "Events connect", session->devname, start_ms);
   if (ret < 0)
     {
       DPRINTF(E_WARN, L_AIRPLAY, "Could not connect to '%s' events port %u, proceeding anyway\n", session->devname, session->events_port);

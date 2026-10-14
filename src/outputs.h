@@ -403,6 +403,17 @@ outputs_buffer_duration_ms_get(void);
 bool
 outputs_exclusive_mode_get(void);
 
+// Milliseconds on a monotonic clock, for timing a step with outputs_step_time_log()
+uint64_t
+outputs_monotonic_ms(void);
+
+// Logs how long a step that ran on the player thread took, given the
+// outputs_monotonic_ms() value from before it started. One line per call: at
+// info level, or at the normal level if the step took long enough to delay the
+// audio of outputs that are already playing.
+void
+outputs_step_time_log(int domain, const char *what, const char *name, uint64_t start_ms);
+
 /* ----------------------- Called by backend modules ------------------------ */
 
 int

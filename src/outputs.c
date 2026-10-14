@@ -88,6 +88,10 @@ static struct output_definition *outputs[] = {
 
 #define OUTPUTS_MAX_CALLBACKS 64
 
+// A step on the player thread that takes this long (in milliseconds) delays the
+// audio of outputs that are already playing, so it is logged at the normal level
+#define OUTPUTS_STEP_SLOW_MS 20
+
 struct outputs_callback_register
 {
   output_status_cb cb;
@@ -1266,7 +1270,11 @@ encoding_reset(struct media_quality *quality)
   struct transcode_encode_setup_args encode_args = { 0 };
   struct output_quality_subscription *subscription;
   enum transcode_profile profile;
+  char name[32];
+  uint64_t start_ms;
   int i;
+
+  start_ms = outputs_monotonic_ms();
 
   profile = quality_to_xcode(quality);
   encode_args.src_ctx = transcode_decode_setup_raw(profile, quality);
@@ -1291,6 +1299,9 @@ encoding_reset(struct media_quality *quality)
     }
 
   transcode_decode_cleanup(&encode_args.src_ctx);
+
+  snprintf(name, sizeof(name), "%d/%d/%d", quality->sample_rate, quality->bits_per_sample, quality->channels);
+  outputs_step_time_log(L_PLAYER, "Subscription encoder rebuild", name, start_ms);
 
   return 0;
 }
@@ -1596,6 +1607,26 @@ bool
 outputs_exclusive_mode_get(void)
 {
   return outputs_exclusive_mode;
+}
+
+uint64_t
+outputs_monotonic_ms(void)
+{
+  struct timespec ts;
+
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+void
+outputs_step_time_log(int domain, const char *what, const char *name, uint64_t start_ms)
+{
+  uint64_t took_ms = outputs_monotonic_ms() - start_ms;
+
+  if (took_ms >= OUTPUTS_STEP_SLOW_MS)
+    DPRINTF(E_LOG, domain, "%s for '%s' took %u ms on the player thread\n", what, name, (unsigned int)took_ms);
+  else
+    DPRINTF(E_INFO, domain, "%s for '%s' took %u ms\n", what, name, (unsigned int)took_ms);
 }
 
 /* ----------------------- Called by backend modules ------------------------ */

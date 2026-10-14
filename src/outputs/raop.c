@@ -1901,6 +1901,7 @@ master_session_make(struct media_quality *quality, bool encrypt)
   struct raop_master_session *rms;
   struct transcode_encode_setup_args encode_args = { .profile = XCODE_ALAC, .quality = quality };
   uint64_t buffer_duration_ms;
+  uint64_t start_ms;
   int ret;
 
   // First check if we already have a suitable session
@@ -1928,6 +1929,8 @@ master_session_make(struct media_quality *quality, bool encrypt)
       return NULL;
     }
 
+  start_ms = outputs_monotonic_ms();
+
   encode_args.src_ctx = transcode_decode_setup_raw(XCODE_PCM16, quality);
   if (!encode_args.src_ctx)
     {
@@ -1942,6 +1945,8 @@ master_session_make(struct media_quality *quality, bool encrypt)
       DPRINTF(E_LOG, L_RAOP, "Will not be able to stream AirPlay, ffmpeg has no ALAC encoder\n");
       goto error;
     }
+
+  outputs_step_time_log(L_RAOP, "Encoder setup", "ALAC", start_ms);
 
   buffer_duration_ms = outputs_buffer_duration_ms_get();
   if (buffer_duration_ms <= RAOP_AUDIO_LATENCY_MS)
