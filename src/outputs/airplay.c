@@ -2933,7 +2933,35 @@ buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
   uint64_t now_ms = 0;
   bool wrote = false;
   bool gated = false;
+  bool origin_hold = false;
   int ret;
+  // While the head is still at the origin of the shared line, work out whether
+  // a session whose anchor names the origin is still unanswered and within its
+  // hold. The head has not moved, so no frame has been delivered on this line.
+  if (ams->buffered_anchor_mapped && ams->buffered_rtptime == ams->buffered_anchor_map_rtptime)
+    {
+      for (session = airplay_sessions; session; session = session->next)
+	{
+	  if (session->master_session != ams || !session->buffered_mode || session->audio_suppressed)
+	    continue;
+
+	  if (session->state != AIRPLAY_STATE_CONNECTED && session->state != AIRPLAY_STATE_STREAMING)
+	    continue;
+
+	  if (session->anchor_confirmed || !session->anchor_in_flight || session->buffered_start_rtptime != ams->buffered_anchor_map_rtptime)
+	    continue;
+
+	  if (!now_ms)
+	    now_ms = monotonic_ms();
+
+	  if (now_ms - session->anchor_sent_ms < AIRPLAY_BUFFERED_ANCHOR_HOLD_MAX_MS)
+	    {
+	      origin_hold = true;
+	      break;
+	    }
+	}
+    }
+
 
   // Start of a (re)primed buffer: remember where it begins so the anchor can
   // point at it (see buffered_anchor_rtptime).
@@ -2987,6 +3015,17 @@ buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
 		          session->devname, now_ms - session->anchor_sent_ms);
 		}
 	    }
+	  continue;
+	}
+
+      // At a group's first start every session named the line's origin frame,
+      // and the head has not moved from it, so nothing has been delivered on
+      // this line yet. A confirmed session waits, with the counters frozen,
+      // for the others still within their hold, so that all of them are
+      // delivered the origin frame on the same call.
+      if (origin_hold && session->buffered_start_rtptime == ams->buffered_anchor_map_rtptime)
+	{
+	  gated = true;
 	  continue;
 	}
 
@@ -5164,6 +5203,8 @@ response_handler_flush_buffered(struct evrtsp_request *req, struct airplay_sessi
   session->anchor_confirmed = false; // Resumed audio must wait for the fresh anchor
   session->anchor_in_flight = false;
   session->anchor_retry_waiting = false;
+  session->anchor_held = false;
+  session->anchor_sibling_waited = false;
   evtimer_del(session->anchorev);
 
   // While a sibling still has a confirmed anchor its line, its delivery and
@@ -5250,6 +5291,8 @@ response_handler_flush_offset(struct evrtsp_request *req, struct airplay_session
   session->anchor_confirmed = false;
   session->anchor_in_flight = false;
   session->anchor_retry_waiting = false;
+  session->anchor_held = false;
+  session->anchor_sibling_waited = false;
   evtimer_del(session->anchorev);
 
   if (!master_session_has_confirmed_anchor(session->master_session))
