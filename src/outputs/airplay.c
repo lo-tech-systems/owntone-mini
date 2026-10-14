@@ -6740,7 +6740,7 @@ sequence_continue_cb(struct evrtsp_request *req, void *arg)
 	      // an event, and will have the sequence resumed with
 	      // sequence_resume(). Treat the pause like a
 	      // request in flight: errors on the connection surface when the
-	      // next request is sent, as they do today for a queued request.
+	      // next request is sent, as they do for any queued request.
 	      if (session->suspended_seq_ctx)
 		DPRINTF(E_LOG, L_AIRPLAY, "Bug! Sequence suspended twice on '%s'\n", session->devname);
 
