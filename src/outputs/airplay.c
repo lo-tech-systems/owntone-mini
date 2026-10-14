@@ -551,6 +551,11 @@ struct airplay_session
   // request outstanding then, so it does not hold the shared write head back
   // (see buffered_frame_send).
   bool anchor_retry_waiting;
+  // The receiver's PTP statistics as they were when the latest anchor request
+  // was built, and the time of it, for the log line when the answer arrives
+  bool anchor_sent_stats_valid;
+  uint64_t anchor_sent_ms;
+  struct ptpd_peer_stats anchor_sent_stats;
   // Set once session_streaming_report() has told the player
   // OUTPUT_STATE_STREAMING for this session, so it is only reported once.
   bool streaming_reported;
@@ -877,6 +882,16 @@ timing_get_clock_ntp(struct ntp_stamp *ns)
   timespec_to_ntp(&ts, ns);
 
   return 0;
+}
+
+// Milliseconds on the same clock as the timestamps in ptpd_peer_stats
+static uint64_t
+monotonic_ms(void)
+{
+  struct timespec ts;
+
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
 // Converts uint64t libhash -> AA:BB:CC:DD:EE:FF:11:22
@@ -3614,6 +3629,10 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
 
   evbuffer_add(req->output_buffer, data, len);
 
+  // What the receiver's PTP peer had sent us when this anchor left
+  session->anchor_sent_stats_valid = (ptpd_peer_stats_get(session->ptpd_slave_id, &session->anchor_sent_stats) == 0);
+  session->anchor_sent_ms = monotonic_ms();
+
   // The request is written as soon as this returns
   session->anchor_in_flight = true;
 
@@ -5169,6 +5188,27 @@ response_handler_flush_offset(struct evrtsp_request *req, struct airplay_session
   return AIRPLAY_SEQ_CONTINUE;
 }
 
+// Describes how far the receiver's PTP peer had got when the latest anchor was
+// sent: its age, and how many delay requests it had sent us by then
+static void
+anchor_sent_stats_describe(char *buf, size_t size, struct airplay_session *session)
+{
+  struct ptpd_peer_stats *stats = &session->anchor_sent_stats;
+
+  if (!session->anchor_sent_stats_valid)
+    {
+      snprintf(buf, size, "clock statistics unavailable");
+      return;
+    }
+
+  if (stats->delay_req_count == 0 || stats->first_delay_req_ms < stats->added_ms)
+    snprintf(buf, size, "sent %" PRIi64 " ms after its timing peer was added, 0 delay requests from it by then",
+             (int64_t)(session->anchor_sent_ms - stats->added_ms));
+  else
+    snprintf(buf, size, "sent %" PRIi64 " ms after its timing peer was added, %" PRIu32 " delay requests from it by then (first %" PRIu64 " ms after peer add)",
+             (int64_t)(session->anchor_sent_ms - stats->added_ms), stats->delay_req_count, stats->first_delay_req_ms - stats->added_ms);
+}
+
 // Runs with proceed_on_rtsp_not_ok, since a rejected anchor is retryable: the
 // suspected cause of an in-band or RTSP-level rejection is that the anchor
 // raced the receiver's lock onto our PTP timeline (it can arrive under a
@@ -5182,6 +5222,7 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
   char *xml;
   size_t len;
   int64_t inband_status = 0;
+  char stats_desc[192];
   int holders;
 
   // The request is answered, whatever the answer
@@ -5198,16 +5239,21 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
 	plist_get_int_val(item, &inband_status);
     }
 
+  anchor_sent_stats_describe(stats_desc, sizeof(stats_desc), session);
+
   if (req->response_code == RTSP_OK && inband_status == 0)
     {
       if (response)
 	plist_free(response);
-      DPRINTF(E_INFO, L_AIRPLAY, "SETRATEANCHORTIME accepted by '%s', starting buffered audio\n", session->devname);
+      DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME accepted by '%s': %s\n", session->devname, stats_desc);
       session->anchor_confirmed = true;
       session->anchor_retries_left = AIRPLAY_BUFFERED_ANCHOR_RETRIES_MAX;
       evtimer_del(session->anchorev);
       return AIRPLAY_SEQ_CONTINUE;
     }
+
+  DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME rejected by '%s' (%d %s, in-band %" PRIi64 "): %s\n",
+          session->devname, req->response_code, req->response_code_line, inband_status, stats_desc);
 
   // The response body may say why the anchor was rejected
   if (response)
