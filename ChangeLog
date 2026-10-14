@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## Version 1.5.0 - 2026-10-14
 
 - fix: the two speakers of an AirPlay 2 stereo pair could start about half
   a second apart and stay that way. When one speaker rejected its first
@@ -30,13 +30,17 @@
   clears a stored pairing key
 - fix: a speaker whose encoder or sample-rate converter could not be built
   no longer stays connected but silent; the converter is retried
+- fix: stopping a speaker at the moment its session failed could crash
+  owntone-mini and stop every output
 - fix: shutdown can no longer hang waiting for background work
 - change: a device's learned formats are saved to the settings file a
-  moment after they are learned, with the data synced to disk; a pairing
-  key is still saved at once
+  moment after they are learned, with the data synced to disk. A pairing
+  key is saved at once, unless the settings file is being written at that
+  moment, in which case it is saved about a second later
 - change: a healthy start is now quiet at the normal log level, and
   anything that still holds up the audio thread for 20 ms or more is named
-  in the log
+  in the log. When the audio thread falls behind, the log now says how much
+  of the delay was spent working and how much waiting to be scheduled
 - change: the start-up timing logic is an explicit state machine with its
   own test program (`src/outputs/tests/airplay_anchor_test.c`), and the
   timing constants and the relationships between them are documented in
