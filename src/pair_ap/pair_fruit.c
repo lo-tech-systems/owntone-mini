@@ -342,7 +342,7 @@ srp_user_process_challenge(struct SRPUser *usr, const unsigned char *bytes_s, in
                            const unsigned char *bytes_B, int len_B,
                            const unsigned char **bytes_M, int *len_M )
 {
-  bnum s, B, k, v;
+  bnum s, B, k;
   bnum tmp1, tmp2, tmp3;
   bnum u, x;
 
@@ -352,12 +352,11 @@ srp_user_process_challenge(struct SRPUser *usr, const unsigned char *bytes_s, in
   bnum_bin2bn(s, bytes_s, len_s);
   bnum_bin2bn(B, bytes_B, len_B);
   k    = H_nn_pad(usr->alg, usr->ng->N, usr->ng->g, usr->ng->N_len);
-  bnum_new(v);
   bnum_new(tmp1);
   bnum_new(tmp2);
   bnum_new(tmp3);
 
-  if (!s || !B || !k || !v || !tmp1 || !tmp2 || !tmp3)
+  if (!s || !B || !k || !tmp1 || !tmp2 || !tmp3)
     goto cleanup1;
 
   u = H_nn_pad(usr->alg, usr->A, B, usr->ng->N_len);
@@ -368,8 +367,6 @@ srp_user_process_challenge(struct SRPUser *usr, const unsigned char *bytes_s, in
   // SRP-6a safety check
   if (!bnum_is_zero(B) && !bnum_is_zero(u))
     {
-      bnum_modexp(v, usr->ng->g, x, usr->ng->N);
-
       // S = (B - k*(g^x)) ^ (a + ux)
       bnum_mul(tmp1, u, x);
       bnum_add(tmp2, usr->a, tmp1);        // tmp2 = (a + ux)
@@ -394,7 +391,6 @@ srp_user_process_challenge(struct SRPUser *usr, const unsigned char *bytes_s, in
   bnum_free(tmp3);
   bnum_free(tmp2);
   bnum_free(tmp1);
-  bnum_free(v);
   bnum_free(k);
   bnum_free(B);
   bnum_free(s);
