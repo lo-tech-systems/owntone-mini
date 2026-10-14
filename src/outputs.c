@@ -1737,7 +1737,7 @@ metadata_cb_send(int fd, short what, void *arg)
   if (ret < 0)
     return;
 
-  DPRINTF(E_INFO, L_PLAYER, "Metadata update for item %u sent to outputs\n", metadata->item_id);
+  DPRINTF(E_DBG, L_PLAYER, "Metadata update for item %u sent to outputs\n", metadata->item_id);
 
   outputs[metadata->type]->metadata_send(metadata);
 }
@@ -2883,7 +2883,7 @@ resampler_warm_cb(void *arg)
   encode_ctx = encoding_ctx_build(&input_quality, &quality);
   if (!encode_ctx)
     {
-      DPRINTF(E_DBG, L_PLAYER, "Resampler warm-up from '%s' to '%s' failed\n", name, name_out);
+      DPRINTF(E_WARN, L_PLAYER, "Resampler warm-up from '%s' to '%s' failed\n", name, name_out);
       return;
     }
 

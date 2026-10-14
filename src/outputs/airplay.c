@@ -4774,7 +4774,7 @@ payload_make_pair_generic(int step, struct evrtsp_request *req, struct airplay_s
 	errmsg  = "Bug! Bad step number";
     }
 
-  DPRINTF(E_INFO, L_AIRPLAY, "Verification step %d request for '%s' built in %u ms\n", step, session->devname, (unsigned int)(monotonic_ms() - start_ms));
+  DPRINTF(E_DBG, L_AIRPLAY, "Verification step %d request for '%s' built in %u ms\n", step, session->devname, (unsigned int)(monotonic_ms() - start_ms));
 
   if (!body)
     {
@@ -5574,7 +5574,8 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
 	  return AIRPLAY_SEQ_CONTINUE;
 	}
 
-      DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME accepted by '%s' after %" PRIu64 " ms: %s\n", session->devname, answer_ms, stats_desc);
+      DPRINTF(E_INFO, L_AIRPLAY, "SETRATEANCHORTIME accepted by '%s' after %" PRIu64 " ms\n", session->devname, answer_ms);
+      DPRINTF(E_DBG, L_AIRPLAY, "SETRATEANCHORTIME accepted by '%s': %s\n", session->devname, stats_desc);
       session->anchor_confirmed = true;
       session->anchor_retries_left = AIRPLAY_BUFFERED_ANCHOR_RETRIES_MAX;
       evtimer_del(session->anchorev);
@@ -5621,7 +5622,7 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
   if (holders == 0)
     session->master_session->buffered_anchor_mapped = false;
 
-  DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME for '%s': shared timing %s (%d other session(s) hold it)\n",
+  DPRINTF(E_INFO, L_AIRPLAY, "SETRATEANCHORTIME for '%s': shared timing %s (%d other session(s) hold it)\n",
           session->devname, holders == 0 ? "dropped" : "kept", holders);
 
   session->anchor_retry_waiting = true;
@@ -7896,7 +7897,7 @@ airplay_write(struct output_buffer *obuf)
 	  else
 	    {
 	      if (session->anchor_held)
-		DPRINTF(E_LOG, L_AIRPLAY, "Releasing anchor for '%s': clock peer %" PRIu64 " ms old%s\n", session->devname,
+		DPRINTF(E_INFO, L_AIRPLAY, "Releasing anchor for '%s': clock peer %" PRIu64 " ms old%s\n", session->devname,
 		        now_ms - session->ptpd_peer_added_ms, session->anchor_sibling_waited ? ", waited for a sibling" : "");
 
 	      session->anchor_held = false;

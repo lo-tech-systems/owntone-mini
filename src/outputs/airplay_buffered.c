@@ -297,7 +297,7 @@ airplay_buffered_start(struct airplay_buffered_stream **bs, struct event_base *e
     }
 
   event_add(stream->readev, NULL);
-  DPRINTF(E_LOG, L_AIRPLAY, "Buffered socket read monitoring armed (fd %d)\n", fd);
+  DPRINTF(E_DBG, L_AIRPLAY, "Buffered socket read monitoring armed (fd %d)\n", fd);
 
   *bs = stream;
   return 0;
