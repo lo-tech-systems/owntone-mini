@@ -241,10 +241,8 @@ peer_stats_update(struct airptp_daemon *daemon, struct airptp_peer *peer, uint8_
 
   now = now_ms();
   atomic_store_explicit(&slot->last_delay_req_ms, now, memory_order_relaxed);
-  if (atomic_load_explicit(&slot->first_delay_req_ms, memory_order_relaxed) == 0) {
+  if (atomic_load_explicit(&slot->first_delay_req_ms, memory_order_relaxed) == 0)
     atomic_store_explicit(&slot->first_delay_req_ms, now, memory_order_relaxed);
-    airptp_logmsg("First delay request from peer id %" PRIu32 ", %" PRIu64 " ms after it was added", peer->id, now - atomic_load_explicit(&slot->added_ms, memory_order_relaxed));
-  }
 
   if (msg_type == PTP_MSGTYPE_PDELAY_REQ) {
     count = atomic_load_explicit(&slot->pdelay_req_count, memory_order_relaxed);
