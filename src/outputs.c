@@ -1367,12 +1367,9 @@ subscription_build_run(void *arg)
 
   pthread_mutex_unlock(&outputs_build_lock);
 
-  if (ret < 0)
-    {
-      // Not posted, so the job is still ours
-      DPRINTF(E_LOG, L_PLAYER, "Could not post the result of a subscription encoder setup\n");
-      subscription_build_job_free(job);
-    }
+  // Only fails if out of memory. The subscription would be left waiting for a
+  // result that never comes, so treat it like any other failed allocation.
+  CHECK_ERR(L_PLAYER, ret);
 }
 
 // *** Thread: worker ***
@@ -1619,7 +1616,9 @@ buffer_fill(struct output_buffer *obuf, void *buf, size_t bufsize, struct media_
 
       ret = transcode_encode(obuf->data[n].evbuf, output_quality_subscriptions[i].encode_ctx, frame, 0);
       transcode_frame_free(frame);
-      if (ret < 0)
+      // No output this time leaves no entry, since an entry without data would
+      // end the list for everything after it
+      if (ret <= 0)
 	continue;
 
       obuf->data[n].buffer  = evbuffer_pullup(obuf->data[n].evbuf, -1);
