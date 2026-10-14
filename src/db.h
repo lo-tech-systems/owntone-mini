@@ -9,7 +9,7 @@
  *   1. struct db_queue_item + db_queue_fetch_byitemid + free_queue_item
  *      → satisfied by queue.h (our in-memory single-pipe queue)
  *
- *   2. db_speaker_save(device)
+ *   2. db_speaker_save_auth_key(device), db_speaker_save_buffered_modes(device)
  *      → persists device->auth_key and device->buffered_modes to
  *        owntone-settings.json so that AirPlay 2 HomeKit pairing and the
  *        learned buffered-transport capability both survive a server
@@ -34,7 +34,14 @@ struct output_device;
 
 /* Persist device->auth_key and device->buffered_modes to the JSON config file
  * so AirPlay pairing and the learned buffered-transport capability both
- * survive a server restart.  Implemented in db.c. */
-void db_speaker_save(struct output_device *device);
+ * survive a server restart.  The file is written before this returns: use it
+ * when the user has just paired and the key must not be lost.  Implemented in
+ * db.c. */
+void db_speaker_save_auth_key(struct output_device *device);
+
+/* Persist device->buffered_modes to the JSON config file.  The file is written
+ * a moment later by a worker thread, so the caller never waits for it.
+ * Implemented in db.c. */
+void db_speaker_save_buffered_modes(struct output_device *device);
 
 #endif /* !__DB_H__ */

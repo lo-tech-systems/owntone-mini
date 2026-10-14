@@ -6321,8 +6321,8 @@ response_handler_pair_setup3(struct evrtsp_request *req, struct airplay_session 
   free(device->auth_key);
   device->auth_key = strdup(authorization_key);
 
-  // A blocking db call... :-~
-  db_speaker_save(device);
+  // Written now: the user has just paired, the key must not be lost
+  db_speaker_save_auth_key(device);
 
   // No longer AIRPLAY_STATE_AUTH
   session->state = AIRPLAY_STATE_STOPPED;

@@ -2287,7 +2287,7 @@ outputs_device_buffered_modes_set(struct output_device *device, uint32_t buffere
 
   // Persist here so every caller - not just the one that remembered to - keeps
   // the learned capability across a restart.
-  db_speaker_save(device);
+  db_speaker_save_buffered_modes(device);
 }
 
 int

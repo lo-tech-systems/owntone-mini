@@ -51,12 +51,15 @@
 #include <sys/stat.h>
 #include <pwd.h>
 #include <pthread.h>
+#include <stdint.h>
+#include <time.h>
 
 #include <json.h>
 
 #include "logger.h"
 #include "misc.h"
 #include "owntone_config.h"
+#include "worker.h"
 
 
 /* --------------------------------- Globals -------------------------------- */
@@ -80,6 +83,25 @@ static enum config_startup_actions config_startup_actions;
 // Strings returned by the getters are borrowed from the store, so callers
 // must copy them before the value can be replaced.
 static pthread_mutex_t config_lck = PTHREAD_MUTEX_INITIALIZER;
+
+// How long a deferred write waits, so that changes made close together are
+// written once. Whole seconds, as taken by worker_execute().
+#define CONFIG_FLUSH_DELAY_SEC 1
+
+// Writers of the settings file serialise on this. It is held across the file
+// write; config_lck is not, so readers never wait for file I/O.
+static pthread_mutex_t config_write_lck = PTHREAD_MUTEX_INITIALIZER;
+
+// Sequence number of the last snapshot taken (under config_lck) and of the
+// last one written to the file (under config_write_lck). A snapshot older than
+// what is already in the file is discarded, so two writers can never leave an
+// older state in the file.
+static uint64_t config_snapshot_seq;
+static uint64_t config_written_seq;
+
+// Deferred write state, under config_lck
+static bool config_dirty;
+static bool config_flush_scheduled;
 
 
 /* ----------------------- Built-in default config ------------------------- */
@@ -381,8 +403,7 @@ config_get_device_reconnect(const char *device)
   return ret;
 }
 
-static int config_write(void); /* forward declaration */
-static int config_write_json_to_path(const char *path, json_object *obj);
+static int config_write_json_to_path(const char *path, const char *json_str, bool sync_file);
 
 static void
 config_log_file_state(const char *path, const struct stat *sb)
@@ -400,6 +421,7 @@ config_ensure_exists(const char *path)
 {
   struct stat sb;
   json_object *defaults;
+  const char *json_str;
   int ret;
 
   config_startup_actions = CONFIG_STARTUP_UNCHANGED;
@@ -427,7 +449,15 @@ config_ensure_exists(const char *path)
       return -1;
     }
 
-  ret = config_write_json_to_path(path, defaults);
+  json_str = json_object_to_json_string_ext(defaults, JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_NOSLASHESCAPE);
+  if (!json_str)
+    {
+      DPRINTF(E_LOG, L_CONF, "Failed to serialise settings to JSON\n");
+      json_object_put(defaults);
+      return -1;
+    }
+
+  ret = config_write_json_to_path(path, json_str, false);
   json_object_put(defaults);
   if (ret < 0)
     return -1;
@@ -577,71 +607,20 @@ set_device_obj_prepare(const char *device)
   return dev;
 }
 
-int
-config_set_device_str(const char *device, const char *key, const char *value)
-{
-  json_object *dev;
-  int ret = -1;
-
-  if (!key)
-    return -1;
-
-  pthread_mutex_lock(&config_lck);
-  dev = set_device_obj_prepare(device);
-  if (dev)
-    {
-      json_object_object_add(dev, key, value ? json_object_new_string(value) : NULL);
-      ret = config_write();
-    }
-  pthread_mutex_unlock(&config_lck);
-
-  return ret;
-}
-
-int
-config_set_device_int(const char *device, const char *key, int value)
-{
-  json_object *dev;
-  int ret = -1;
-
-  if (!key)
-    return -1;
-
-  pthread_mutex_lock(&config_lck);
-  dev = set_device_obj_prepare(device);
-  if (dev)
-    {
-      json_object_object_add(dev, key, json_object_new_int(value));
-      ret = config_write();
-    }
-  pthread_mutex_unlock(&config_lck);
-
-  return ret;
-}
-
-
 /* ----------------------- API write-back ----------------------------------- */
 
 static int
-config_write_json_to_path(const char *path, json_object *obj)
+config_write_json_to_path(const char *path, const char *json_str, bool sync_file)
 {
   char tmppath[PATH_MAX];
   FILE *fp;
-  const char *json_str;
   bool direct_write = false;
   int ret;
 
-  if (!path || !obj)
+  if (!path || !json_str)
     return -1;
 
   snprintf(tmppath, sizeof(tmppath), "%s.tmp", path);
-
-  json_str = json_object_to_json_string_ext(obj, JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_NOSLASHESCAPE);
-  if (!json_str)
-    {
-      DPRINTF(E_LOG, L_CONF, "Failed to serialise settings to JSON\n");
-      return -1;
-    }
 
   DPRINTF(E_DBG, L_CONF, "Writing settings file '%s'\n", path);
 
@@ -673,7 +652,17 @@ config_write_json_to_path(const char *path, json_object *obj)
   ret = fputs(json_str, fp);
   if (ret >= 0)
     ret = fputc('\n', fp);
-  if (ret < 0 || fclose(fp) != 0)
+  // The new content must be on disk before the rename makes it the settings
+  // file, or a crash could leave an empty one
+  if (ret >= 0 && sync_file && (fflush(fp) != 0 || fsync(fileno(fp)) != 0))
+    ret = -1;
+  if (ret < 0)
+    {
+      fclose(fp);
+      DPRINTF(E_LOG, L_CONF, "Could not write %s: %s\n", direct_write ? path : tmppath, strerror(errno));
+      return -1;
+    }
+  if (fclose(fp) != 0)
     {
       DPRINTF(E_LOG, L_CONF, "Could not write %s: %s\n", direct_write ? path : tmppath, strerror(errno));
       return -1;
@@ -692,13 +681,228 @@ config_write_json_to_path(const char *path, json_object *obj)
   return 0;
 }
 
-static int
-config_write(void)
+// Caller holds config_lck. Returns a private copy of the serialised store and
+// sets *seq to its sequence number, or returns NULL.
+static char *
+config_snapshot_take(uint64_t *seq)
 {
+  const char *json_str;
+  char *copy;
+
   if (!root || !config_path)
+    return NULL;
+
+  json_str = json_object_to_json_string_ext(root, JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_NOSLASHESCAPE);
+  if (!json_str)
+    {
+      DPRINTF(E_LOG, L_CONF, "Failed to serialise settings to JSON\n");
+      return NULL;
+    }
+
+  copy = strdup(json_str);
+  if (copy)
+    *seq = ++config_snapshot_seq;
+
+  return copy;
+}
+
+// Writes a snapshot to the settings file unless a newer one has already been
+// written, and frees it. config_path is only set by config_load() before other
+// threads exist and freed by config_unload() after they are gone, so it is
+// read here without config_lck. With wait false, returns 1 without writing if
+// another writer has the file, for callers that must not wait for its I/O.
+static int
+config_snapshot_write(char *json, uint64_t seq, bool sync_file, bool wait)
+{
+  int ret = 0;
+
+  if (wait)
+    pthread_mutex_lock(&config_write_lck);
+  else if (pthread_mutex_trylock(&config_write_lck) != 0)
+    {
+      free(json);
+      return 1;
+    }
+
+  if (seq > config_written_seq)
+    {
+      ret = config_write_json_to_path(config_path, json, sync_file);
+      if (ret == 0)
+	config_written_seq = seq;
+    }
+  pthread_mutex_unlock(&config_write_lck);
+
+  free(json);
+  return ret;
+}
+
+// Caller holds config_lck, which is released here: the store is serialised
+// under it and the file is written after it is let go. Returns 0 on success.
+static int
+config_commit_unlock(bool wait)
+{
+  char *json;
+  uint64_t seq = 0;
+
+  json = config_snapshot_take(&seq);
+  pthread_mutex_unlock(&config_lck);
+  if (!json)
     return -1;
 
-  return config_write_json_to_path(config_path, root);
+  return config_snapshot_write(json, seq, false, wait);
+}
+
+static uint64_t
+config_monotonic_ms(void)
+{
+  struct timespec ts;
+
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+// Thread: worker
+static void
+config_flush_cb(void *arg)
+{
+  char *json = NULL;
+  uint64_t seq = 0;
+  uint64_t start_ms;
+  int ret;
+
+  pthread_mutex_lock(&config_lck);
+  config_flush_scheduled = false;
+  if (config_dirty && root)
+    {
+      json = config_snapshot_take(&seq);
+      config_dirty = (json == NULL);
+    }
+  pthread_mutex_unlock(&config_lck);
+
+  if (!json)
+    return;
+
+  start_ms = config_monotonic_ms();
+  ret = config_snapshot_write(json, seq, true, true);
+  if (ret < 0)
+    {
+      // Keep the change pending so that the next write, or the flush at
+      // shutdown, tries again
+      pthread_mutex_lock(&config_lck);
+      config_dirty = true;
+      pthread_mutex_unlock(&config_lck);
+      return;
+    }
+
+  DPRINTF(E_INFO, L_CONF, "Settings written (deferred, %u ms)\n", (unsigned int)(config_monotonic_ms() - start_ms));
+}
+
+// Marks the store as changed and has a worker thread write it shortly, unless
+// that is already arranged. Never does I/O on the calling thread.
+static void
+config_flush_request(void)
+{
+  bool schedule;
+
+  pthread_mutex_lock(&config_lck);
+  config_dirty = true;
+  schedule = !config_flush_scheduled;
+  if (schedule)
+    config_flush_scheduled = true;
+  pthread_mutex_unlock(&config_lck);
+
+  if (!schedule)
+    return;
+
+  if (worker_execute(config_flush_cb, NULL, 0, CONFIG_FLUSH_DELAY_SEC) < 0)
+    {
+      // The change stays pending; the next request or the flush at shutdown
+      // writes it
+      pthread_mutex_lock(&config_lck);
+      config_flush_scheduled = false;
+      pthread_mutex_unlock(&config_lck);
+    }
+}
+
+// Used by the per-device setters, which the player thread calls. If another
+// thread is writing the file, the change is handed to a worker thread instead
+// of waiting for that write.
+static int
+config_commit_unlock_nowait(void)
+{
+  int ret;
+
+  ret = config_commit_unlock(false);
+  if (ret != 1)
+    return ret;
+
+  config_flush_request();
+  return 0;
+}
+
+int
+config_set_device_str(const char *device, const char *key, const char *value)
+{
+  json_object *dev;
+
+  if (!key)
+    return -1;
+
+  pthread_mutex_lock(&config_lck);
+  dev = set_device_obj_prepare(device);
+  if (!dev)
+    {
+      pthread_mutex_unlock(&config_lck);
+      return -1;
+    }
+
+  json_object_object_add(dev, key, value ? json_object_new_string(value) : NULL);
+
+  return config_commit_unlock_nowait();
+}
+
+int
+config_set_device_int(const char *device, const char *key, int value)
+{
+  json_object *dev;
+
+  if (!key)
+    return -1;
+
+  pthread_mutex_lock(&config_lck);
+  dev = set_device_obj_prepare(device);
+  if (!dev)
+    {
+      pthread_mutex_unlock(&config_lck);
+      return -1;
+    }
+
+  json_object_object_add(dev, key, json_object_new_int(value));
+
+  return config_commit_unlock_nowait();
+}
+
+int
+config_set_device_int_deferred(const char *device, const char *key, int value)
+{
+  json_object *dev;
+
+  if (!key)
+    return -1;
+
+  pthread_mutex_lock(&config_lck);
+  dev = set_device_obj_prepare(device);
+  if (!dev)
+    {
+      pthread_mutex_unlock(&config_lck);
+      return -1;
+    }
+
+  json_object_object_add(dev, key, json_object_new_int(value));
+  pthread_mutex_unlock(&config_lck);
+
+  config_flush_request();
+  return 0;
 }
 
 int
@@ -718,10 +922,13 @@ config_set_str(const char *key, const char *value)
           || (current && value && strcmp(current, value) != 0));
 
   json_object_object_add(root, key, value ? json_object_new_string(value) : NULL);
-  ret = config_write();
+  ret = config_commit_unlock(true);
   if (ret == 0 && changed && config_key_requires_restart(key))
-    restart_required_pending = true;
-  pthread_mutex_unlock(&config_lck);
+    {
+      pthread_mutex_lock(&config_lck);
+      restart_required_pending = true;
+      pthread_mutex_unlock(&config_lck);
+    }
 
   return ret;
 }
@@ -741,10 +948,13 @@ config_delete(const char *key)
   pthread_mutex_lock(&config_lck);
   changed = (get_str_unlocked(key, NULL) != NULL);
   json_object_object_del(root, key);
-  ret = config_write();
+  ret = config_commit_unlock(true);
   if (ret == 0 && changed && config_key_requires_restart(key))
-    restart_required_pending = true;
-  pthread_mutex_unlock(&config_lck);
+    {
+      pthread_mutex_lock(&config_lck);
+      restart_required_pending = true;
+      pthread_mutex_unlock(&config_lck);
+    }
 
   return ret;
 }
@@ -786,10 +996,13 @@ config_set_int(const char *key, int value)
   pthread_mutex_lock(&config_lck);
   current = get_int_unlocked(key, INT_MIN);
   json_object_object_add(root, key, json_object_new_int(value));
-  ret = config_write();
+  ret = config_commit_unlock(true);
   if (ret == 0 && current != value && config_key_requires_restart(key))
-    restart_required_pending = true;
-  pthread_mutex_unlock(&config_lck);
+    {
+      pthread_mutex_lock(&config_lck);
+      restart_required_pending = true;
+      pthread_mutex_unlock(&config_lck);
+    }
 
   return ret;
 }
@@ -806,10 +1019,13 @@ config_set_bool(const char *key, bool value)
   pthread_mutex_lock(&config_lck);
   current = get_bool_unlocked(key, !value);
   json_object_object_add(root, key, json_object_new_boolean(value));
-  ret = config_write();
+  ret = config_commit_unlock(true);
   if (ret == 0 && current != value && config_key_requires_restart(key))
-    restart_required_pending = true;
-  pthread_mutex_unlock(&config_lck);
+    {
+      pthread_mutex_lock(&config_lck);
+      restart_required_pending = true;
+      pthread_mutex_unlock(&config_lck);
+    }
 
   return ret;
 }
@@ -876,7 +1092,8 @@ config_heal_defaults(void)
   config_startup_actions |= CONFIG_STARTUP_KEYS_HEALED;
   DPRINTF(E_WARN, L_CONF, "Settings file was missing %d key(s); writing defaults to '%s'\n", added, config_path);
 
-  return config_write();
+  pthread_mutex_lock(&config_lck);
+  return config_commit_unlock(true);
 }
 
 int
@@ -967,7 +1184,25 @@ config_reload(void)
 void
 config_unload(void)
 {
+  char *json = NULL;
+  uint64_t seq = 0;
+
+  // Changes that were left for a worker thread to write are written now,
+  // since no worker thread is left to do it
   pthread_mutex_lock(&config_lck);
+  if (config_dirty && root)
+    {
+      json = config_snapshot_take(&seq);
+      config_dirty = (json == NULL);
+    }
+  pthread_mutex_unlock(&config_lck);
+
+  if (json)
+    config_snapshot_write(json, seq, true, true);
+
+  pthread_mutex_lock(&config_lck);
+  config_dirty = false;
+  config_flush_scheduled = false;
   if (root)
     {
       json_object_put(root);

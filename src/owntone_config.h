@@ -110,6 +110,13 @@ int         config_set_device_str(const char *device, const char *key, const cha
 // config_set_device_str().
 int         config_set_device_int(const char *device, const char *key, int value);
 
+// Sets a per-device integer value like config_set_device_int(), but leaves the
+// file write to a worker thread a moment later instead of doing it now, so the
+// caller never waits for the file. For state learned from a receiver, which is
+// learned again if a crash loses it. Several changes close together are written
+// once, and anything still pending is written by config_unload().
+int         config_set_device_int_deferred(const char *device, const char *key, int value);
+
 // Tri-state reconnect setting per device: -1=auto-detect, 0=disabled, 1=enabled.
 // Absent or null in JSON means -1 (auto).
 int         config_get_device_reconnect(const char *device);
