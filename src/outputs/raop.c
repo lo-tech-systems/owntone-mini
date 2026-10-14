@@ -84,6 +84,8 @@
 // Probably using this value because 44100/352 and 48000/352 has good 32 byte
 // alignment, which improves performance of some encoders
 #define RAOP_SAMPLES_PER_PACKET              352
+// Requested send queue size of the data socket, in bytes
+#define RAOP_DATA_SNDBUF_SIZE                (1 << 20)
 
 #define RAOP_RTP_PAYLOADTYPE                 0x60
 
@@ -3583,6 +3585,7 @@ raop_cb_startup_volume(struct evrtsp_request *req, void *arg)
 {
   struct raop_session *rs = arg;
   int flags;
+  int sndbuf;
   int ret;
 
   rs->reqs_in_flight--;
@@ -3620,6 +3623,12 @@ raop_cb_startup_volume(struct evrtsp_request *req, void *arg)
       DPRINTF(E_LOG, L_RAOP, "Could not set data socket of '%s' non-blocking: %s\n", rs->devname, strerror(errno));
       goto cleanup;
     }
+
+  // Room for the burst of packets sent when the player catches up after a
+  // delay, so that the burst is not dropped here. Best effort: the kernel caps
+  // the size, and a smaller queue only means dropping sooner.
+  sndbuf = RAOP_DATA_SNDBUF_SIZE;
+  setsockopt(rs->server_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
 
   rs->state = RAOP_STATE_CONNECTED;
 

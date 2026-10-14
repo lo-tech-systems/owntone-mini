@@ -180,6 +180,8 @@
 // delivery to the others; it is delivered from wherever the head is when it
 // does answer.
 #define AIRPLAY_BUFFERED_ANCHOR_HOLD_MAX_MS   200
+// Requested send queue size of the realtime data socket, in bytes
+#define AIRPLAY_DATA_SNDBUF_SIZE              (1 << 20)
 // An anchor derived from an unheld stored mapping must name a time at least
 // this far ahead, or the receiver would be asked to play in the past
 #define AIRPLAY_BUFFERED_ANCHOR_MIN_AHEAD_MS  500
@@ -5032,6 +5034,7 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
   uint64_t uintval;
   uint64_t start_ms;
   int flags;
+  int sndbuf;
   int ret;
 
   DPRINTF(E_INFO, L_AIRPLAY, "Setting up AirPlay session %u to %s [transport: AirPlay 2, intended: %s]\n",
@@ -5155,6 +5158,12 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
 	  DPRINTF(E_LOG, L_AIRPLAY, "Could not set data socket of '%s' non-blocking: %s\n", session->devname, strerror(errno));
 	  goto error;
 	}
+
+      // Room for the burst of packets sent when the player catches up after a
+      // delay, so that the burst is not dropped here. Best effort: the kernel
+      // caps the size, and a smaller queue only means dropping sooner.
+      sndbuf = AIRPLAY_DATA_SNDBUF_SIZE;
+      setsockopt(session->server_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
     }
 
   session->state = AIRPLAY_STATE_SETUP;
