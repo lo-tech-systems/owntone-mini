@@ -618,35 +618,25 @@ struct airplay_session
   // buffered data connection (see buffered_frame_send). Copied from
   // device->tv_proxy_audio_suppress in airplay_device_start().
   bool audio_suppressed;
-  // Set whenever a fresh SETRATEANCHORTIME is needed (buffered_mode just
-  // decided, or after a FLUSHBUFFERED, which invalidates the receiver's
-  // previous anchor)
-  bool anchor_pending;
-  // Set while anchor_pending is being held back until the receiver's clock
-  // peer is old enough (see anchor_start_due), for the log line on release
-  bool anchor_held;
-  bool anchor_sibling_waited;
-  // Set once the receiver accepts SETRATEANCHORTIME. No audio is written to
-  // the data connection before this: it keeps the anchor-rejection retry path
-  // alive (a failed data write kills the session), and it makes anchor and
-  // data failures distinguishable in the logs.
-  bool anchor_confirmed;
-  // Set while a SETRATEANCHORTIME has been sent and not yet answered. The
-  // anchor's point on the shared line is then held by this session even though
-  // it is not confirmed yet (see master_session_anchor_holders).
-  bool anchor_in_flight;
+  // The anchor of a buffered session, see airplay_anchor.h for the states and
+  // the rules. Only anchor_event() writes these four fields and arms or
+  // deletes the retry timer.
+  enum airplay_anchor_state anchor_state;
+  // Why a pending anchor was held back by the write tick, for the line logged
+  // when it is released
+  enum airplay_anchor_hold_reason anchor_hold_reason;
+  // When the unanswered anchor was sent, for how long it may hold the shared
+  // write head and for the answer latency in the log
+  uint64_t anchor_sent_ms;
+  // Rejected anchors are retried from this timer, this many more times
+  struct event *anchorev;
+  int anchor_retries_left;
   // Set once the unanswered anchor has been held against the write head for
   // the longest allowed time, so that is only logged once per anchor
   bool anchor_hold_given_up;
-  // Set while a rejected anchor waits for its retry timer. The session has no
-  // request outstanding then, so it does not hold the shared write head back;
-  // buffered_frame_send decides that from anchor_in_flight, and nothing reads
-  // this flag.
-  bool anchor_retry_waiting;
   // The receiver's PTP statistics as they were when the latest anchor request
-  // was built, and the time of it, for the log line when the answer arrives
+  // was built, for the log line when the answer arrives
   bool anchor_sent_stats_valid;
-  uint64_t anchor_sent_ms;
   struct ptpd_peer_stats anchor_sent_stats;
   // Set once session_streaming_report() has told the player
   // OUTPUT_STATE_STREAMING for this session, so it is only reported once.
@@ -656,19 +646,6 @@ struct airplay_session
   // for a first/frozen anchor, or a slightly-future join point when joining
   // an already-anchored master session.
   uint32_t buffered_start_rtptime;
-  // Timer + budget for retrying a rejected SETRATEANCHORTIME, see
-  // response_handler_send_anchor()
-  struct event *anchorev;
-  int anchor_retries_left;
-  // The anchor's state, see airplay_anchor.h. It is set by anchor_event()
-  // alongside the flags above and checked against them by
-  // anchor_state_verify(); anchor_hold_reason is the state's counterpart of
-  // anchor_held and anchor_sibling_waited.
-  enum airplay_anchor_state anchor_state;
-  enum airplay_anchor_hold_reason anchor_hold_reason;
-  // Set once anchor_state_verify() has reported a disagreement for this
-  // session, so it is only reported once
-  bool anchor_verify_logged;
   unsigned short buffered_data_port;
   struct airplay_buffered_stream *buffered;
 
@@ -2009,16 +1986,14 @@ np_artwork_cb(int fd, short what, void *arg)
 
 // Retries a SETRATEANCHORTIME that the receiver rejected (see
 // response_handler_send_anchor). If the session was flushed or torn down
-// while the timer was pending, the regular anchor_pending machinery owns the
-// next anchor and this retry must not fire a stale one.
+// while the timer was pending, the anchor is no longer waiting for a retry and
+// this one must not fire a stale request.
 static void
 anchor_retry_cb(int fd, short what, void *arg)
 {
   struct airplay_session *session = arg;
 
-  session->anchor_retry_waiting = false;
-
-  if (session->state != AIRPLAY_STATE_STREAMING || !session->buffered_mode || session->anchor_pending)
+  if (session->state != AIRPLAY_STATE_STREAMING || !session->buffered_mode || session->anchor_state != ANCHOR_RETRY_WAIT)
     return;
 
   sequence_start(AIRPLAY_SEQ_SEND_ANCHOR, session, NULL, "anchor_retry");
@@ -3086,8 +3061,8 @@ packets_send(struct airplay_master_session *ams)
 
 // True for a buffered session on the given master session that is connected or
 // streaming. A session that has failed or is being torn down keeps its anchor
-// flags until it is freed, but it no longer plays. Callers add their own
-// conditions (an excluded session, an audio-suppressed one, the anchor flags).
+// state until it is freed, but it no longer plays. Callers add their own
+// conditions (an excluded session, an audio-suppressed one, the anchor state).
 static bool
 session_is_live_buffered(const struct airplay_session *session, const struct airplay_master_session *ams)
 {
@@ -3907,11 +3882,8 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
 
   // What the receiver's PTP peer had sent us when this anchor left
   session->anchor_sent_stats_valid = (ptpd_peer_stats_get(session->ptpd_slave_id, &session->anchor_sent_stats) == 0);
-  session->anchor_sent_ms = monotonic_ms();
-  session->anchor_hold_given_up = false;
 
   // The request is written as soon as this returns
-  session->anchor_in_flight = true;
   anchor_event(session, ANCHOR_EV_SENT, ANCHOR_HOLD_NONE);
 
   return 0;
@@ -5416,39 +5388,14 @@ response_handler_flush(struct evrtsp_request *req, struct airplay_session *sessi
 }
 
 // A FLUSHBUFFERED invalidates the receiver's anchor, so a fresh
-// SETRATEANCHORTIME must be sent before playback resumes (anchor_pending);
-// airplay_write() picks this up on the next CONNECTED->STREAMING transition.
+// SETRATEANCHORTIME must be sent before playback resumes; the flush event puts
+// the anchor back to pending and airplay_write() sends it on the next
+// CONNECTED->STREAMING transition.
 static enum airplay_seq_type
 response_handler_flush_buffered(struct evrtsp_request *req, struct airplay_session *session)
 {
   session->state = AIRPLAY_STATE_CONNECTED;
-  session->anchor_pending = true;
-  session->anchor_confirmed = false; // Resumed audio must wait for the fresh anchor
-  session->anchor_in_flight = false;
-  session->anchor_retry_waiting = false;
-  session->anchor_held = false;
-  session->anchor_sibling_waited = false;
-  evtimer_del(session->anchorev);
   anchor_event(session, ANCHOR_EV_FLUSH, ANCHOR_HOLD_NONE);
-
-  // While a sibling holds the shared line (its anchor is confirmed or still
-  // unanswered) the line, its delivery and the shared encoder are left alone,
-  // as in response_handler_flush_offset
-  if (master_session_anchor_holders(session->master_session, session) != 0)
-    return AIRPLAY_SEQ_CONTINUE;
-
-  session->master_session->buffered_marker_pending = true;
-  // Playback resumes at a new wall time, so the old rtptime->networkTime
-  // mapping no longer holds; the next anchor establishes a fresh one
-  session->master_session->buffered_anchor_mapped = false;
-  // Queued-but-unsent frames would otherwise carry seqnums past flushUntilSeq,
-  // and the receiver keeps those instead of discarding them. A live session
-  // that reaches this point is streaming, so it has a master session (see
-  // session_master_attach()), hence no NULL test here, matching the
-  // unconditional accesses above. Its encoder has not been stopped either,
-  // because an encoder is only stopped when the master session is freed.
-  if (session->master_session->encoder)
-    airplay_encoder_flush(session->master_session->encoder);
   return AIRPLAY_SEQ_CONTINUE;
 }
 
@@ -5488,17 +5435,21 @@ master_session_anchor_holders(struct airplay_master_session *ams, struct airplay
   return holders;
 }
 
-// The one writer of a session's anchor state: applies a transition of the state
-// machine in airplay_anchor.h. For now only the state and the hold reason are
-// applied, the flags, the retry budget, the timer and the shared line stay
-// with their own writers; the actions the transition calls for are returned.
-// An event that is not legal in the current state is logged and changes
-// nothing.
+// The one writer of a session's anchor state. Applies a transition of the state
+// machine in airplay_anchor.h and every side effect it calls for: the retry
+// timer, the retry budget, the send time, the hold qualifier, and the shared
+// line when the event says so. The actions the caller must take itself (end
+// the session, ignore an answer) are returned. An event that is not legal in
+// the current state is logged and changes nothing, which cannot happen if
+// every caller tests the state first. Runs on the player thread only.
 static unsigned
 anchor_event(struct airplay_session *session, enum airplay_anchor_event ev, enum airplay_anchor_hold_reason held_for)
 {
+  struct timeval retry_tv = { AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS / 1000, (AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS % 1000) * 1000 };
   struct airplay_anchor_ctx ctx;
   struct airplay_anchor_result res;
+  struct airplay_master_session *ams;
+  int holders;
 
   ctx.retries_left = session->anchor_retries_left;
   ctx.hold_reason = session->anchor_hold_reason;
@@ -5515,7 +5466,56 @@ anchor_event(struct airplay_session *session, enum airplay_anchor_event ev, enum
           airplay_anchor_state_name(session->anchor_state), airplay_anchor_state_name(res.state), airplay_anchor_event_name(ev));
 
   session->anchor_state = res.state;
+  session->anchor_retries_left = res.retries_left;
   session->anchor_hold_reason = res.hold_reason;
+
+  if (res.actions & ANCHOR_ACT_MARK_SENT)
+    {
+      session->anchor_sent_ms = monotonic_ms();
+      session->anchor_hold_given_up = false;
+    }
+
+  if (res.actions & ANCHOR_ACT_TIMER_DEL)
+    evtimer_del(session->anchorev);
+
+  if (res.actions & ANCHOR_ACT_TIMER_ARM)
+    evtimer_add(session->anchorev, &retry_tv);
+
+  ams = session->master_session;
+
+  // If no receiver holds the stored mapping, drop it so the retry computes a
+  // fresh now+lead anchor (a stale point drifts into the past across retries).
+  // A receiver holds it once it has confirmed an anchor on it or has one sent
+  // and not yet answered; the mapping is then live and the retry must re-send
+  // the same point, or that receiver would play on a line we have forgotten.
+  if (res.actions & ANCHOR_ACT_LINE_DROP_IF_UNHELD)
+    {
+      holders = master_session_anchor_holders(ams, session);
+      if (holders == 0)
+	ams->buffered_anchor_mapped = false;
+
+      DPRINTF(E_INFO, L_AIRPLAY, "SETRATEANCHORTIME for '%s': shared timing %s (%d other session(s) hold it)\n",
+              session->devname, holders == 0 ? "dropped" : "kept", holders);
+    }
+
+  // While a sibling holds the shared line (its anchor is confirmed or still
+  // unanswered) the line, its delivery and the shared encoder are left alone;
+  // dropping the line would leave that sibling on a line we have forgotten.
+  // A live session that reaches this point is streaming, so it has a master
+  // session (see session_master_attach()), hence no NULL test.
+  if ((res.actions & ANCHOR_ACT_LINE_RESET_IF_UNHELD) && master_session_anchor_holders(ams, session) == 0)
+    {
+      ams->buffered_marker_pending = true;
+      // Playback resumes at a new wall time, so the old rtptime->networkTime
+      // mapping no longer holds; the next anchor establishes a fresh one
+      ams->buffered_anchor_mapped = false;
+      // Queued-but-unsent frames would otherwise carry seqnums past
+      // flushUntilSeq, and the receiver keeps those instead of discarding
+      // them. The encoder has not been stopped either, because an encoder is
+      // only stopped when the master session is freed.
+      if (ams->encoder)
+	airplay_encoder_flush(ams->encoder);
+    }
 
   return res.actions;
 }
@@ -5523,40 +5523,21 @@ anchor_event(struct airplay_session *session, enum airplay_anchor_event ev, enum
 // Re-times ONE session after a live offset change. Receivers accept a
 // mid-stream SETRATEANCHORTIME but keep playing to their old schedule while
 // the frame flow is continuous, so the buffer must be invalidated first -
-// this is the pause/resume flow, scoped to a single session. Unlike
-// response_handler_flush_buffered, the shared master-session state is left
-// alone while any other session still has a confirmed anchor: the stored
-// mapping stays valid (this receiver rejoins it like a mid-play join, with
-// its offset applied to the transmitted anchor time), the shared encoder is
-// not flushed, and co-resident receivers play on undisturbed. In-flight
-// frames below flushUntilSeq are discarded receiver-side, so the per-session
-// send queue does not need clearing. If this was the only anchored session,
-// the counters will freeze on the delivery gate and a join-point anchor
-// would never be reached - fall back to exactly the full-flush behaviour,
-// which is correct when alone.
+// this is the pause/resume flow, scoped to a single session. As for any
+// flush, the shared master-session state is left alone while another session
+// holds the line: the stored mapping stays valid (this receiver rejoins it
+// like a mid-play join, with its offset applied to the transmitted anchor
+// time), the shared encoder is not flushed, and co-resident receivers play on
+// undisturbed. In-flight frames below flushUntilSeq are discarded
+// receiver-side, so the per-session send queue does not need clearing. If
+// this was the only anchored session, the counters will freeze on the delivery
+// gate and a join-point anchor would never be reached - so the full-flush
+// behaviour applies, which is correct when alone.
 static enum airplay_seq_type
 response_handler_flush_offset(struct evrtsp_request *req, struct airplay_session *session)
 {
   session->state = AIRPLAY_STATE_CONNECTED;
-  session->anchor_pending = true;
-  session->anchor_confirmed = false;
-  session->anchor_in_flight = false;
-  session->anchor_retry_waiting = false;
-  session->anchor_held = false;
-  session->anchor_sibling_waited = false;
-  evtimer_del(session->anchorev);
   anchor_event(session, ANCHOR_EV_FLUSH, ANCHOR_HOLD_NONE);
-
-  // A sibling whose anchor is confirmed or still unanswered holds the shared
-  // line; dropping it would leave that sibling on a line we have forgotten
-  if (master_session_anchor_holders(session->master_session, session) == 0)
-    {
-      session->master_session->buffered_marker_pending = true;
-      session->master_session->buffered_anchor_mapped = false;
-      if (session->master_session->encoder)
-	airplay_encoder_flush(session->master_session->encoder);
-    }
-
   return AIRPLAY_SEQ_CONTINUE;
 }
 
@@ -5589,18 +5570,16 @@ anchor_sent_stats_describe(char *buf, size_t size, struct airplay_session *sessi
 static enum airplay_seq_type
 response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session *session)
 {
-  struct timeval tv = { AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS / 1000, (AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS % 1000) * 1000 };
   plist_t response = NULL;
   char *xml;
   size_t len;
   int64_t inband_status = 0;
   char stats_desc[192];
   uint64_t answer_ms;
+  unsigned actions;
+  int retries_before;
   bool accepted;
-  int holders;
 
-  // The request is answered, whatever the answer
-  session->anchor_in_flight = false;
   answer_ms = monotonic_ms() - session->anchor_sent_ms;
 
   // Some receivers can return 200 OK while rejecting the anchor IN-BAND with
@@ -5617,32 +5596,38 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
   anchor_sent_stats_describe(stats_desc, sizeof(stats_desc), session);
 
   accepted = (req->response_code == RTSP_OK && inband_status == 0);
-  anchor_event(session, accepted ? ANCHOR_EV_ACCEPTED : ANCHOR_EV_REJECTED, ANCHOR_HOLD_NONE);
+
+  // The budget as it was when the answer arrived, for the log below
+  retries_before = session->anchor_retries_left;
+
+  actions = anchor_event(session, accepted ? ANCHOR_EV_ACCEPTED : ANCHOR_EV_REJECTED, ANCHOR_HOLD_NONE);
+
+  // An answer that no outstanding anchor matches, for instance one for an
+  // anchor that a flush has since replaced with a new one, must not confirm or
+  // reject the session's current anchor
+  if (actions & ANCHOR_ACT_IGNORED)
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME answer from '%s' ignored, no anchor of its own is outstanding (%s)\n",
+              session->devname, airplay_anchor_state_name(session->anchor_state));
+      if (response)
+	plist_free(response);
+      return AIRPLAY_SEQ_CONTINUE;
+    }
 
   if (accepted)
     {
       if (response)
 	plist_free(response);
-      // A flush answered while this anchor was outstanding has put the session
-      // back to waiting for a new anchor; the old one must not confirm it
-      if (session->anchor_pending)
-	{
-	  DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME answer from '%s' ignored, a new anchor is pending\n", session->devname);
-	  return AIRPLAY_SEQ_CONTINUE;
-	}
 
       DPRINTF(E_INFO, L_AIRPLAY, "SETRATEANCHORTIME accepted by '%s' after %" PRIu64 " ms\n", session->devname, answer_ms);
       DPRINTF(E_DBG, L_AIRPLAY, "SETRATEANCHORTIME accepted by '%s': %s\n", session->devname, stats_desc);
-      session->anchor_confirmed = true;
-      session->anchor_retries_left = AIRPLAY_BUFFERED_ANCHOR_RETRIES_MAX;
-      evtimer_del(session->anchorev);
       return AIRPLAY_SEQ_CONTINUE;
     }
 
-  if (session->anchor_retries_left > 0)
+  if (!(actions & ANCHOR_ACT_ABORT))
     DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME rejected by '%s' (%d %s, in-band %" PRIi64 ") after %" PRIu64 " ms, retrying in %d ms (%d retries left): %s\n",
             session->devname, req->response_code, req->response_code_line, inband_status, answer_ms,
-            AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS, session->anchor_retries_left - 1, stats_desc);
+            AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS, retries_before - 1, stats_desc);
   else
     DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME rejected by '%s' (%d %s, in-band %" PRIi64 ") after %" PRIu64 " ms, no retries left: %s\n",
             session->devname, req->response_code, req->response_code_line, inband_status, answer_ms, stats_desc);
@@ -5662,28 +5647,11 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
   else if (len > 0)
     DHEXDUMP(E_DBG, L_AIRPLAY, evbuffer_pullup(req->input_buffer, -1), (int)len, "SETRATEANCHORTIME error response (not a plist)\n");
 
-  if (session->anchor_retries_left <= 0)
+  if (actions & ANCHOR_ACT_ABORT)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME repeatedly rejected by '%s', giving up\n", session->devname);
       return AIRPLAY_SEQ_ABORT;
     }
-
-  session->anchor_retries_left--;
-
-  // If no receiver holds the stored mapping, drop it so the retry computes a
-  // fresh now+lead anchor (a stale point drifts into the past across retries).
-  // A receiver holds it once it has confirmed an anchor on it or has one sent
-  // and not yet answered; the mapping is then live and the retry must re-send
-  // the same point, or that receiver would play on a line we have forgotten.
-  holders = master_session_anchor_holders(session->master_session, session);
-  if (holders == 0)
-    session->master_session->buffered_anchor_mapped = false;
-
-  DPRINTF(E_INFO, L_AIRPLAY, "SETRATEANCHORTIME for '%s': shared timing %s (%d other session(s) hold it)\n",
-          session->devname, holders == 0 ? "dropped" : "kept", holders);
-
-  session->anchor_retry_waiting = true;
-  evtimer_add(session->anchorev, &tv);
 
   return AIRPLAY_SEQ_CONTINUE;
 }
@@ -5993,7 +5961,6 @@ session_master_attach(struct airplay_session *session, struct output_device *dev
   if (kind != AIRPLAY_BUFFERED_KIND_NONE)
     {
       session->buffered_mode = true;
-      session->anchor_pending = true;
       anchor_event(session, ANCHOR_EV_ATTACH, ANCHOR_HOLD_NONE);
     }
 
@@ -7769,29 +7736,30 @@ airplay_device_authorize(struct output_device *device, const char *pin, int call
   return 1;
 }
 
-// Whether a streaming buffered session may send its anchor yet. A receiver
-// whose clock peer is too young would likely reject it. Members of a group
-// are released together once the youngest has reached the minimum age, but a
-// session never waits more than the sibling wait for the others, a suppressed
-// session neither waits nor is waited for, and a session joining a group that
-// is already playing waits only for its own age. Records in the session when
-// it is held for a sibling rather than for its own age.
-static bool
-anchor_start_due(struct airplay_session *session, uint64_t now)
+// Whether a streaming buffered session may send its anchor yet, and if not,
+// why. A receiver whose clock peer is too young would likely reject it. Members
+// of a group are released together once the youngest has reached the minimum
+// age, but a session never waits more than the sibling wait for the others, a
+// suppressed session neither waits nor is waited for, and a session joining a
+// group that is already playing waits only for its own age. Returns
+// ANCHOR_HOLD_NONE when the anchor is due, otherwise whether the session is
+// held for its own clock peer or for a sibling's.
+static enum airplay_anchor_hold_reason
+anchor_start_hold_reason(struct airplay_session *session, uint64_t now)
 {
   struct airplay_session *sibling;
   uint64_t age;
   bool sibling_young = false;
 
   if (session->ptpd_peer_added_ms == 0)
-    return true;
+    return ANCHOR_HOLD_NONE;
 
   age = (now > session->ptpd_peer_added_ms) ? now - session->ptpd_peer_added_ms : 0;
   if (age < AIRPLAY_BUFFERED_ANCHOR_MIN_PEER_AGE_MS)
-    return false;
+    return ANCHOR_HOLD_OWN_AGE;
 
   if (session->audio_suppressed || age >= AIRPLAY_BUFFERED_ANCHOR_MIN_PEER_AGE_MS + AIRPLAY_BUFFERED_ANCHOR_SIBLING_WAIT_MS)
-    return true;
+    return ANCHOR_HOLD_NONE;
 
   for (sibling = airplay_sessions; sibling; sibling = sibling->next)
     {
@@ -7799,7 +7767,7 @@ anchor_start_due(struct airplay_session *session, uint64_t now)
 	continue;
 
       if (sibling->anchor_state == ANCHOR_CONFIRMED)
-	return true;
+	return ANCHOR_HOLD_NONE;
 
       if (sibling->audio_suppressed || sibling->anchor_state != ANCHOR_PENDING || sibling->ptpd_peer_added_ms == 0)
 	continue;
@@ -7808,47 +7776,7 @@ anchor_start_due(struct airplay_session *session, uint64_t now)
 	sibling_young = true;
     }
 
-  if (sibling_young)
-    session->anchor_sibling_waited = true;
-
-  return !sibling_young;
-}
-
-// Checks that the anchor state agrees with the flags it is about to replace.
-// Logged once per session at the normal level, for a live buffered session
-// only.
-static void
-anchor_state_verify(struct airplay_session *session)
-{
-  enum airplay_anchor_state expected;
-
-  if (session->anchor_verify_logged || !session->buffered_mode)
-    return;
-
-  if (session->state != AIRPLAY_STATE_CONNECTED && session->state != AIRPLAY_STATE_STREAMING)
-    return;
-
-  if (session->anchor_confirmed)
-    expected = ANCHOR_CONFIRMED;
-  else if (session->anchor_in_flight)
-    expected = ANCHOR_IN_FLIGHT;
-  else if (session->anchor_pending)
-    expected = ANCHOR_PENDING;
-  else if (session->anchor_retry_waiting)
-    expected = ANCHOR_RETRY_WAIT;
-  else
-    expected = ANCHOR_NONE;
-
-  if (session->anchor_state == expected &&
-      (session->anchor_hold_reason != ANCHOR_HOLD_NONE) == session->anchor_held &&
-      (session->anchor_hold_reason == ANCHOR_HOLD_SIBLING) == session->anchor_sibling_waited)
-    return;
-
-  session->anchor_verify_logged = true;
-  DPRINTF(E_LOG, L_AIRPLAY, "Anchor state for '%s' disagrees: flags say %s (P%d F%d R%d C%d H%d SW%d), state %s, reason %d\n",
-          session->devname, airplay_anchor_state_name(expected), session->anchor_pending, session->anchor_in_flight,
-          session->anchor_retry_waiting, session->anchor_confirmed, session->anchor_held, session->anchor_sibling_waited,
-          airplay_anchor_state_name(session->anchor_state), session->anchor_hold_reason);
+  return sibling_young ? ANCHOR_HOLD_SIBLING : ANCHOR_HOLD_NONE;
 }
 
 static void
@@ -7971,13 +7899,13 @@ airplay_write(struct output_buffer *obuf)
 	  session_volume_resync(session);
 	}
 
-      // Buffered receivers don't start playing until they've received a
-      // rate=1 SETRATEANCHORTIME, and audio is held until the receiver
-      // accepts it (see the anchor_confirmed gate in buffered_frame_send) so
-      // the first delivered frame carries exactly the anchor's rtpTime.
-      // anchor_pending is set when buffered_mode is first decided and again
-      // after every FLUSHBUFFERED, which invalidates the receiver's previous
-      // anchor.
+      // A buffered receiver plays nothing until it has accepted a rate=1
+      // SETRATEANCHORTIME, and audio is held until it does (see
+      // buffered_frame_send), so the first delivered frame carries exactly the
+      // anchor's rtpTime. A session owes an anchor when its buffered mode is
+      // decided and again after every flush, which invalidates the receiver's
+      // previous anchor; the anchor is sent from here once the receiver's
+      // clock peer is old enough.
       if (session->state == AIRPLAY_STATE_STREAMING && session->buffered_mode && session->anchor_state == ANCHOR_PENDING)
 	{
 	  // The anchor waits, still pending, until the receiver's clock peer is
@@ -7985,12 +7913,10 @@ airplay_write(struct output_buffer *obuf)
 	  if (!now_ms)
 	    now_ms = monotonic_ms();
 
-	  if (!anchor_start_due(session, now_ms))
+	  held_for = anchor_start_hold_reason(session, now_ms);
+	  if (held_for != ANCHOR_HOLD_NONE)
 	    {
-	      session->anchor_held = true;
-
-	      // Record the hold once per reason
-	      held_for = session->anchor_sibling_waited ? ANCHOR_HOLD_SIBLING : ANCHOR_HOLD_OWN_AGE;
+	      // Record the hold once per reason: it only feeds the release line
 	      if (session->anchor_hold_reason != held_for && session->anchor_hold_reason != ANCHOR_HOLD_SIBLING)
 		anchor_event(session, ANCHOR_EV_HELD, held_for);
 	    }
@@ -8000,15 +7926,11 @@ airplay_write(struct output_buffer *obuf)
 		DPRINTF(E_INFO, L_AIRPLAY, "Releasing anchor for '%s': clock peer %" PRIu64 " ms old%s\n", session->devname,
 		        now_ms - session->ptpd_peer_added_ms, session->anchor_hold_reason == ANCHOR_HOLD_SIBLING ? ", waited for a sibling" : "");
 
-	      session->anchor_held = false;
-	      session->anchor_sibling_waited = false;
 	      sequence_start(AIRPLAY_SEQ_SEND_ANCHOR, session, NULL, "anchor");
-	      session->anchor_pending = false;
 	    }
 	}
 
       session_streaming_report(session);
-      anchor_state_verify(session);
     }
 }
 
