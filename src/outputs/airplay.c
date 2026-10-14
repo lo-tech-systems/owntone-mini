@@ -1003,6 +1003,16 @@ monotonic_ms(void)
   return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+// Microseconds of cpu time used by the calling thread so far
+static uint64_t
+thread_cpu_us(void)
+{
+  struct timespec ts;
+
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+  return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
 // Converts uint64t libhash -> AA:BB:CC:DD:EE:FF:11:22
 static void
 device_id_colon_make(char *id_str, int size, uint64_t id)
@@ -6779,10 +6789,13 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
   const char *uri;
   uint64_t start_ms;
   uint64_t took_ms;
+  uint64_t start_cpu_us;
+  unsigned int cpu_ms;
   size_t bytes;
   int ret;
 
   start_ms = monotonic_ms();
+  start_cpu_us = thread_cpu_us();
 
   req = evrtsp_request_new(sequence_continue_cb, seq_ctx);
   if (!req)
@@ -6835,10 +6848,11 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
     goto error;
 
   took_ms = monotonic_ms() - start_ms;
+  cpu_ms = (unsigned int)((thread_cpu_us() - start_cpu_us) / 1000);
   if (took_ms >= AIRPLAY_REQUEST_BUILD_SLOW_MS)
-    DPRINTF(E_INFO, L_AIRPLAY, "%s: %s to '%s' built and queued in %u ms (%zu bytes)\n", seq_ctx->log_caller, cur_request->name, session->devname, (unsigned int)took_ms, bytes);
+    DPRINTF(E_INFO, L_AIRPLAY, "%s: %s to '%s' built and queued in %u ms (%u ms on cpu, %zu bytes)\n", seq_ctx->log_caller, cur_request->name, session->devname, (unsigned int)took_ms, cpu_ms, bytes);
   else
-    DPRINTF(E_DBG, L_AIRPLAY, "%s: %s to '%s' built and queued in %u ms (%zu bytes)\n", seq_ctx->log_caller, cur_request->name, session->devname, (unsigned int)took_ms, bytes);
+    DPRINTF(E_DBG, L_AIRPLAY, "%s: %s to '%s' built and queued in %u ms (%u ms on cpu, %zu bytes)\n", seq_ctx->log_caller, cur_request->name, session->devname, (unsigned int)took_ms, cpu_ms, bytes);
 
   evrtsp_connection_set_closecb(session->ctrl, NULL, NULL);
 

@@ -1179,6 +1179,83 @@ static uint64_t pb_jitter_max_us;
 static struct timespec pb_jitter_last_tick;
 static struct timespec pb_jitter_last_log;
 
+// The player thread's CPU clock at the start of the previous tick, taken
+// together with pb_jitter_last_tick. One clock read per tick; it is compared
+// only when a late-tick warning is about to be logged.
+static struct timespec pb_cpu_last_tick;
+
+static uint64_t
+timespec_ms(struct timespec ts)
+{
+  return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+// Time the calling thread has spent runnable but not on a cpu, in nanoseconds,
+// from the scheduler's per-thread statistics. Returns -1 if they cannot be
+// read. Only called when a late-tick warning is logged.
+static int
+pb_run_delay_get(uint64_t *wait_ns)
+{
+  unsigned long long run_ns;
+  unsigned long long delay_ns;
+  char buf[128];
+  int fd;
+  int n;
+
+  fd = open("/proc/thread-self/schedstat", O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+    return -1;
+
+  n = read(fd, buf, sizeof(buf) - 1);
+  close(fd);
+  if (n <= 0)
+    return -1;
+
+  buf[n] = '\0';
+  if (sscanf(buf, "%llu %llu", &run_ns, &delay_ns) != 2)
+    return -1;
+
+  *wait_ns = delay_ns;
+  return 0;
+}
+
+// Describes the span since the previous tick for a late-tick warning: how long
+// it was, how much of it the player thread spent on a cpu, and how much longer
+// the thread has waited for a cpu since the previous warning. A thread that was
+// busy shows a cpu time close to the span; one that was kept off the cpu shows
+// a small cpu time and a run delay that accounts for the lateness.
+static void
+pb_delay_detail(char *buf, size_t len, unsigned int now_s, unsigned int last_emit_s)
+{
+  static uint64_t last_wait_ns;
+  static bool last_wait_valid;
+  struct timespec wall;
+  struct timespec cpu;
+  uint64_t wait_ns;
+  int n;
+
+  if (pb_jitter_last_tick.tv_sec == 0 && pb_jitter_last_tick.tv_nsec == 0)
+    {
+      snprintf(buf, len, "no earlier tick to compare with");
+      return;
+    }
+
+  clock_gettime(CLOCK_MONOTONIC, &wall);
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu);
+
+  n = snprintf(buf, len, "%" PRIu64 " ms since last tick, %" PRIu64 " ms of it on cpu",
+               timespec_ms(timespec_sub(wall, pb_jitter_last_tick)), timespec_ms(timespec_sub(cpu, pb_cpu_last_tick)));
+
+  if (pb_run_delay_get(&wait_ns) == 0)
+    {
+      if (last_wait_valid && last_emit_s != 0 && n > 0 && (size_t)n < len)
+	snprintf(buf + n, len - n, "; waited %" PRIu64 " ms for a cpu over the last %u s", (wait_ns - last_wait_ns) / 1000000, now_s - last_emit_s);
+
+      last_wait_ns = wait_ns;
+      last_wait_valid = true;
+    }
+}
+
 static void
 playback_cb(int fd, short what, void *arg)
 {
@@ -1242,6 +1319,7 @@ playback_cb(int fd, short what, void *arg)
 	  static unsigned int pb_delay_suppressed;
 	  static uint64_t pb_delay_max_overrun;
 	  unsigned int pb_delay_now;
+	  char pb_delay_text[160];
 
 	  // Gate on the same check DPRINTF() applies internally, so that when
 	  // E_WARN/L_PLAYER is filtered out this costs nothing beyond that
@@ -1262,11 +1340,13 @@ playback_cb(int fd, short what, void *arg)
 	      // be wrongly suppressed.
 	      if (pb_delay_last_emit == 0 || pb_delay_now - pb_delay_last_emit >= 5)
 		{
+		  pb_delay_detail(pb_delay_text, sizeof(pb_delay_text), pb_delay_now, pb_delay_last_emit);
+
 		  if (pb_delay_suppressed > 0)
-		    DPRINTF(E_WARN, L_PLAYER, "Output delay detected: player is %" PRIu64 " ticks behind, catching up (max %" PRIu64 " ticks, %u similar suppressed)\n",
-			    overrun, pb_delay_max_overrun, pb_delay_suppressed);
+		    DPRINTF(E_WARN, L_PLAYER, "Output delay detected: player is %" PRIu64 " ticks behind, catching up (max %" PRIu64 " ticks, %u similar suppressed; %s)\n",
+			    overrun, pb_delay_max_overrun, pb_delay_suppressed, pb_delay_text);
 		  else
-		    DPRINTF(E_WARN, L_PLAYER, "Output delay detected: player is %" PRIu64 " ticks behind, catching up\n", overrun);
+		    DPRINTF(E_WARN, L_PLAYER, "Output delay detected: player is %" PRIu64 " ticks behind, catching up (%s)\n", overrun, pb_delay_text);
 
 		  pb_delay_last_emit = pb_delay_now;
 		  pb_delay_suppressed = 0;
@@ -1316,6 +1396,7 @@ playback_cb(int fd, short what, void *arg)
       pb_jitter_ticks++;
     }
   pb_jitter_last_tick = ts;
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &pb_cpu_last_tick);
 
   if (pb_jitter_ticks > 0 && timespec_cmp(timespec_sub(ts, pb_jitter_last_log), pb_jitter_log_interval) >= 0)
     {
