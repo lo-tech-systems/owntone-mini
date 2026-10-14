@@ -4,6 +4,7 @@
 #include <event2/event.h>
 #include <pthread.h>
 #include <inttypes.h>
+#include <stdatomic.h>
 
 #include "../airptp.h"
 #include "utils.h"
@@ -86,6 +87,22 @@ struct airptp_peer
   socklen_t naddr_len;
   bool is_active;
   uint64_t last_seen;
+  // Index of this peer's slot in the daemon's statistics array, -1 if none
+  int stats_slot;
+};
+
+// Written only by the daemon thread, read without locking by any other thread.
+// The array is indexed by slot, not by peer position, so removing a peer does
+// not move the others. A slot is free when id is 0.
+struct airptp_peer_stats_slot
+{
+  _Atomic uint32_t id;
+  _Atomic uint64_t added_ms;
+  _Atomic uint64_t first_delay_req_ms;
+  _Atomic uint64_t last_delay_req_ms;
+  _Atomic uint32_t delay_req_count;
+  _Atomic uint32_t pdelay_req_count;
+  _Atomic uint32_t signaling_count;
 };
 
 struct airptp_daemon
@@ -120,6 +137,8 @@ struct airptp_daemon
 
   struct airptp_peer peers[AIRPTP_MAX_PEERS];
   int num_peers;
+
+  struct airptp_peer_stats_slot peer_stats[AIRPTP_MAX_PEERS];
 };
 
 struct airptp_handle

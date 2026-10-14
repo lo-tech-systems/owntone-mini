@@ -274,6 +274,39 @@ airptp_peer_remove(uint32_t peer_id, struct airptp_handle *hdl)
   ptp_msg_peer_del_send(&peer, hdl, airptp_general_port);
 }
 
+int
+airptp_peer_stats_get(uint32_t peer_id, struct airptp_peer_stats *stats, struct airptp_handle *hdl)
+{
+  struct airptp_peer_stats_slot *slot;
+  int i;
+
+  if (!hdl || !hdl->is_daemon || hdl->state != AIRPTP_STATE_RUNNING || peer_id == 0)
+    return -1;
+
+  for (i = 0; i < AIRPTP_MAX_PEERS; i++) {
+    slot = &hdl->daemon.peer_stats[i];
+    if (atomic_load_explicit(&slot->id, memory_order_acquire) != peer_id)
+      continue;
+
+    // The writer stores the timestamps before it raises the count, so a count
+    // read first comes with the timestamps of at least that many requests
+    stats->delay_req_count = atomic_load_explicit(&slot->delay_req_count, memory_order_acquire);
+    stats->pdelay_req_count = atomic_load_explicit(&slot->pdelay_req_count, memory_order_relaxed);
+    stats->signaling_count = atomic_load_explicit(&slot->signaling_count, memory_order_relaxed);
+    stats->added_ms = atomic_load_explicit(&slot->added_ms, memory_order_relaxed);
+    stats->first_delay_req_ms = atomic_load_explicit(&slot->first_delay_req_ms, memory_order_relaxed);
+    stats->last_delay_req_ms = atomic_load_explicit(&slot->last_delay_req_ms, memory_order_relaxed);
+
+    // The slot was freed or reused while we read it
+    if (atomic_load_explicit(&slot->id, memory_order_acquire) != peer_id)
+      return -1;
+
+    return 0;
+  }
+
+  return -1;
+}
+
 void
 airptp_end(struct airptp_handle *hdl)
 {

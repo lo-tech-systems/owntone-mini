@@ -13,6 +13,24 @@ ptpd_slave_add(uint32_t *slave_id, const char *addr);
 void
 ptpd_slave_remove(uint32_t slave_id);
 
+// What a slave has sent our ptp service since it was added. Timestamps are
+// CLOCK_MONOTONIC milliseconds, first_delay_req_ms is 0 until a delay request
+// has arrived.
+struct ptpd_peer_stats
+{
+  uint64_t added_ms;
+  uint64_t first_delay_req_ms;
+  uint64_t last_delay_req_ms;
+  uint32_t delay_req_count;
+  uint32_t pdelay_req_count;
+  uint32_t signaling_count;
+};
+
+// Never blocks, safe to call from any thread. Returns -1 if the slave is not
+// known or its statistics are not available.
+int
+ptpd_peer_stats_get(uint32_t slave_id, struct ptpd_peer_stats *stats);
+
 // Looks for a shared airptpd daemon. If not found, binds priviliged ports 319
 // and 320, so must be called before the server drops priviliges.
 int

@@ -43,11 +43,28 @@ airptp_daemon_start(struct airptp_handle *hdl, uint64_t clock_id_seed, bool is_s
 struct airptp_handle *
 airptp_daemon_find(void);
 
+// Statistics on what a peer has sent us since it was added. Timestamps are
+// CLOCK_MONOTONIC milliseconds.
+struct airptp_peer_stats
+{
+  uint64_t added_ms;
+  uint64_t first_delay_req_ms;   // 0 if none yet
+  uint64_t last_delay_req_ms;
+  uint32_t delay_req_count;      // Delay_Req and Pdelay_Req together
+  uint32_t pdelay_req_count;
+  uint32_t signaling_count;
+};
+
 int
 airptp_peer_add(uint32_t *peer_id, const char *addr, struct airptp_handle *hdl);
 
 void
 airptp_peer_remove(uint32_t peer_id, struct airptp_handle *hdl);
+
+// Thread-safe and non-blocking. Returns 0 if the peer is known to an
+// in-process daemon, -1 otherwise (unknown id, daemon in another process).
+int
+airptp_peer_stats_get(uint32_t peer_id, struct airptp_peer_stats *stats, struct airptp_handle *hdl);
 
 // Frees ressources (incl. stops daemon if relevant)
 void

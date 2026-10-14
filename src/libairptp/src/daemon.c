@@ -29,6 +29,7 @@ SOFTWARE.
 #include <unistd.h>
 #include <inttypes.h>
 #include <errno.h>
+#include <time.h>
 
 // For shm_open
 #include <sys/mman.h>
@@ -36,6 +37,7 @@ SOFTWARE.
 #include <fcntl.h>
 
 #include "airptp_internal.h"
+#include "ptp_definitions.h"
 #include "ptp_msg_handle.h"
 
 #define DAEMON_INTERVAL_SECS_SHM_UPDATE 5
@@ -164,6 +166,24 @@ service_start(struct airptp_service *svc, event_callback_fn cb, struct airptp_da
 
 /* ------------------------------ Peer handling ----------------------------- */
 
+static uint64_t
+now_ms(void)
+{
+  struct timespec ts;
+
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void
+peer_stats_slot_free(struct airptp_daemon *daemon, struct airptp_peer *peer)
+{
+  if (peer->stats_slot < 0)
+    return;
+
+  atomic_store_explicit(&daemon->peer_stats[peer->stats_slot].id, 0, memory_order_release);
+}
+
 static void
 peer_clear(struct airptp_peer *peer)
 {
@@ -183,6 +203,7 @@ peers_prune(struct airptp_daemon *daemon)
       if (!peer->is_active)
 	{
 	  airptp_logmsg("Removing inactive peer with id %" PRIu32, peer->id);
+	  peer_stats_slot_free(daemon, peer);
 	  peer_clear(peer);
 	  n_pruned++;
 	  continue;
@@ -195,14 +216,55 @@ peers_prune(struct airptp_daemon *daemon)
   daemon->num_peers -= n_pruned;
 }
 
+// Counts what the peer sends us. Atomic stores only, since the statistics are
+// read from other threads without locking.
 static void
-peer_last_seen_update(struct airptp_daemon *daemon, union utils_net_sockaddr *peer_addr, socklen_t peer_addrlen)
+peer_stats_update(struct airptp_daemon *daemon, struct airptp_peer *peer, uint8_t msg_type)
+{
+  struct airptp_peer_stats_slot *slot;
+  uint64_t now;
+  uint32_t count;
+
+  if (peer->stats_slot < 0)
+    return;
+
+  slot = &daemon->peer_stats[peer->stats_slot];
+
+  if (msg_type == PTP_MSGTYPE_SIGNALING) {
+    count = atomic_load_explicit(&slot->signaling_count, memory_order_relaxed);
+    atomic_store_explicit(&slot->signaling_count, count + 1, memory_order_relaxed);
+    return;
+  }
+
+  if (msg_type != PTP_MSGTYPE_DELAY_REQ && msg_type != PTP_MSGTYPE_PDELAY_REQ)
+    return;
+
+  now = now_ms();
+  atomic_store_explicit(&slot->last_delay_req_ms, now, memory_order_relaxed);
+  if (atomic_load_explicit(&slot->first_delay_req_ms, memory_order_relaxed) == 0) {
+    atomic_store_explicit(&slot->first_delay_req_ms, now, memory_order_relaxed);
+    airptp_logmsg("First delay request from peer id %" PRIu32 ", %" PRIu64 " ms after it was added", peer->id, now - atomic_load_explicit(&slot->added_ms, memory_order_relaxed));
+  }
+
+  if (msg_type == PTP_MSGTYPE_PDELAY_REQ) {
+    count = atomic_load_explicit(&slot->pdelay_req_count, memory_order_relaxed);
+    atomic_store_explicit(&slot->pdelay_req_count, count + 1, memory_order_relaxed);
+  }
+
+  // The reader keys on this count, so it is raised last
+  count = atomic_load_explicit(&slot->delay_req_count, memory_order_relaxed);
+  atomic_store_explicit(&slot->delay_req_count, count + 1, memory_order_release);
+}
+
+static void
+peer_seen_update(struct airptp_daemon *daemon, union utils_net_sockaddr *peer_addr, socklen_t peer_addrlen, uint8_t msg_type)
 {
   int i;
 
   for (i = 0; i < daemon->num_peers; i++) {
     if (utils_net_address_is_same(peer_addr, &daemon->peers[i].naddr)) {
       daemon->peers[i].last_seen = time(NULL);
+      peer_stats_update(daemon, &daemon->peers[i], msg_type);
       break;
     }
   }
@@ -224,8 +286,10 @@ peer_exists(struct airptp_daemon *daemon, struct airptp_peer *peer)
 int
 daemon_peer_add(struct airptp_daemon *daemon, struct airptp_peer *peer)
 {
+  struct airptp_peer_stats_slot *slot;
   char straddr[64];
   uint32_t scope_id;
+  int i;
 
   // Clean up dead peers
   peers_prune(daemon);
@@ -244,6 +308,26 @@ daemon_peer_add(struct airptp_daemon *daemon, struct airptp_peer *peer)
 
   peer->last_seen = time(NULL);
   peer->is_active = true;
+
+  // The slot is filled in before its id is published, so a reader that sees
+  // the id sees a zeroed slot
+  peer->stats_slot = -1;
+  for (i = 0; peer->id != 0 && i < AIRPTP_MAX_PEERS; i++) {
+    slot = &daemon->peer_stats[i];
+    if (atomic_load_explicit(&slot->id, memory_order_relaxed) != 0)
+      continue;
+
+    atomic_store_explicit(&slot->added_ms, now_ms(), memory_order_relaxed);
+    atomic_store_explicit(&slot->first_delay_req_ms, 0, memory_order_relaxed);
+    atomic_store_explicit(&slot->last_delay_req_ms, 0, memory_order_relaxed);
+    atomic_store_explicit(&slot->delay_req_count, 0, memory_order_relaxed);
+    atomic_store_explicit(&slot->pdelay_req_count, 0, memory_order_relaxed);
+    atomic_store_explicit(&slot->signaling_count, 0, memory_order_relaxed);
+    atomic_store_explicit(&slot->id, peer->id, memory_order_release);
+    peer->stats_slot = i;
+    break;
+  }
+
   memcpy(&daemon->peers[daemon->num_peers], peer, sizeof(struct airptp_peer));
   daemon->num_peers++;
 
@@ -273,6 +357,7 @@ daemon_peer_del(struct airptp_daemon *daemon, struct airptp_peer *peer)
       peer = &daemon->peers[i];
       if (!found && (peer_id == peer->id))
 	{
+	  peer_stats_slot_free(daemon, peer);
 	  peer_clear(peer);
 	  found = true;
 	  continue;
@@ -356,7 +441,7 @@ incoming_cb(int fd, short what, void *arg)
       return;
     }
 
-  peer_last_seen_update(daemon, &peer_addr, peer_addrlen);
+  peer_seen_update(daemon, &peer_addr, peer_addrlen, req[0] & 0x0F);
 
   ptp_msg_handle(daemon, req, len, &peer_addr, peer_addrlen);
 }

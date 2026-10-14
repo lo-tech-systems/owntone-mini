@@ -97,6 +97,13 @@ main(int argc, char * argv[])
 
   sleep(1);
 
+  struct airptp_peer_stats stats;
+  ret = airptp_peer_stats_get(peer_id, &stats, hdl);
+  if (ret < 0)
+    printf("test1.c result no stats for peer_id=%" PRIu32 "\n", peer_id);
+  else
+    printf("test1.c result delay_req_count=%" PRIu32 " signaling_count=%" PRIu32 "\n", stats.delay_req_count, stats.signaling_count);
+
   airptp_end(hdl);
 
   return 0;

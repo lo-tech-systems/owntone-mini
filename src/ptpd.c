@@ -29,6 +29,7 @@
 #include "misc.h"
 #include "logger.h"
 #include "owntone_config.h"
+#include "ptpd.h"
 
 static struct airptp_handle *ptpd_hdl;
 static bool airptp_create_own_service = false;
@@ -72,6 +73,23 @@ void
 ptpd_slave_remove(uint32_t slave_id)
 {
   airptp_peer_remove(slave_id, ptpd_hdl);
+}
+
+int
+ptpd_peer_stats_get(uint32_t slave_id, struct ptpd_peer_stats *stats)
+{
+  struct airptp_peer_stats s;
+
+  if (airptp_peer_stats_get(slave_id, &s, ptpd_hdl) < 0)
+    return -1;
+
+  stats->added_ms = s.added_ms;
+  stats->first_delay_req_ms = s.first_delay_req_ms;
+  stats->last_delay_req_ms = s.last_delay_req_ms;
+  stats->delay_req_count = s.delay_req_count;
+  stats->pdelay_req_count = s.pdelay_req_count;
+  stats->signaling_count = s.signaling_count;
+  return 0;
 }
 
 // Thread: main (root priviliges may be required for binding)
