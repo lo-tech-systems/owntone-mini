@@ -2199,6 +2199,10 @@ pb_timer_stop(void)
 
   event_del(pb_timer_ev);
 
+  // The next tick is the first of a new run, not a late one
+  pb_jitter_last_tick.tv_sec = 0;
+  pb_jitter_last_tick.tv_nsec = 0;
+
   memset(&tick, 0, sizeof(struct itimerspec));
 
 #ifdef HAVE_TIMERFD
