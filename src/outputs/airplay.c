@@ -5135,7 +5135,12 @@ master_session_has_confirmed_anchor(struct airplay_master_session *ams)
 
   for (session = airplay_sessions; session; session = session->next)
     {
-      if (session->master_session == ams && session->buffered_mode && session->anchor_confirmed)
+      if (session->master_session != ams || !session->buffered_mode || !session->anchor_confirmed)
+	continue;
+
+      // A session that has failed or is being torn down keeps the flag until it
+      // is freed, but it no longer plays
+      if (session->state == AIRPLAY_STATE_CONNECTED || session->state == AIRPLAY_STATE_STREAMING)
 	return true;
     }
 
