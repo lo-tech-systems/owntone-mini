@@ -97,6 +97,12 @@ static struct output_definition *outputs[] = {
 // build is logged at the normal level, otherwise at the info level
 #define OUTPUTS_BUILD_SLOW_MS 100
 
+// A subscription whose context could not be built is tried again after this
+// many seconds, at most this many times, so a build that keeps failing neither
+// spins nor floods the log
+#define OUTPUTS_BUILD_RETRY_WAIT_SEC 2
+#define OUTPUTS_BUILD_RETRY_MAX 5
+
 struct outputs_callback_register
 {
   output_status_cb cb;
@@ -116,6 +122,7 @@ struct output_quality_subscription
   struct media_quality quality;
   struct encode_ctx *encode_ctx;
   uint64_t build_seq; // The job that is building the context, 0 if none
+  int build_failures; // Retries made since the last context was built
 };
 
 // Buffer used to pass data to the backends
@@ -1402,6 +1409,37 @@ subscription_build_discard(struct subscription_build_job *job)
 }
 
 // *** Thread: player ***
+// Makes the next write try to build the contexts that are missing
+static void
+subscription_build_retry_cb(int fd, short what, void *arg)
+{
+  if (!outputs_build_deinit)
+    outputs_got_new_subscription = true;
+}
+
+// *** Thread: player ***
+// Called when the build of a subscription's context has failed. Arranges for a
+// new try after a delay, up to a limit. The subscription gets no data in the
+// meantime, as before.
+static void
+subscription_build_retry(struct output_quality_subscription *subscription)
+{
+  struct timeval tv = { OUTPUTS_BUILD_RETRY_WAIT_SEC, 0 };
+
+  if (subscription->build_failures >= OUTPUTS_BUILD_RETRY_MAX)
+    {
+      DPRINTF(E_LOG, L_PLAYER, "Giving up building the subscription encoding context for %d/%d/%d\n",
+        subscription->quality.sample_rate, subscription->quality.bits_per_sample, subscription->quality.channels);
+      return;
+    }
+
+  if (event_base_once(evbase_player, -1, EV_TIMEOUT, subscription_build_retry_cb, NULL, &tv) < 0)
+    return;
+
+  subscription->build_failures++;
+}
+
+// *** Thread: player ***
 // Installs the result of a job in the subscription that waits for it, if there
 // still is one: a subscription of that quality with subscribers, that has no
 // context, that waits for this very job, and for an input quality that is still
@@ -1448,8 +1486,13 @@ subscription_build_done_cb(int fd, short what, void *arg)
     }
 
   if (!job->encode_ctx)
-    DPRINTF(E_LOG, L_PLAYER, "Could not create subscription encoding context for %d/%d/%d\n",
-      subscription->quality.sample_rate, subscription->quality.bits_per_sample, subscription->quality.channels);
+    {
+      DPRINTF(E_LOG, L_PLAYER, "Could not create subscription encoding context for %d/%d/%d\n",
+        subscription->quality.sample_rate, subscription->quality.bits_per_sample, subscription->quality.channels);
+      subscription_build_retry(subscription);
+    }
+  else
+    subscription->build_failures = 0;
 
   subscription->encode_ctx = job->encode_ctx;
   job->encode_ctx = NULL;
@@ -1523,7 +1566,10 @@ encoding_reset(struct media_quality *quality, bool all)
     {
       // Jobs out for the old input quality are discarded when they come back
       for (i = 0; output_quality_subscriptions[i].count > 0; i++)
-	output_quality_subscriptions[i].build_seq = 0;
+	{
+	  output_quality_subscriptions[i].build_seq = 0;
+	  output_quality_subscriptions[i].build_failures = 0;
+	}
 
       encode_args.src_ctx = transcode_decode_setup_raw(profile, quality);
       if (!encode_args.src_ctx)
