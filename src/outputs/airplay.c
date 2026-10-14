@@ -530,6 +530,7 @@ struct airplay_session
   bool supports_encryption;
 
   struct event *deferredev;
+  struct event *stopev;
 
   int reqs_in_flight;
   int cseq;
@@ -1836,6 +1837,9 @@ session_free(struct airplay_session *session)
   if (session->deferredev)
     event_free(session->deferredev);
 
+  if (session->stopev)
+    event_free(session->stopev);
+
   if (session->anchorev)
     event_free(session->anchorev);
 
@@ -2324,6 +2328,7 @@ session_make(struct output_device *device, int callback_id)
 
   CHECK_NULL(L_AIRPLAY, session = calloc(1, sizeof(struct airplay_session)));
   CHECK_NULL(L_AIRPLAY, session->deferredev = evtimer_new(evbase_player, deferred_session_failure_cb, session));
+  CHECK_NULL(L_AIRPLAY, session->stopev = evtimer_new(evbase_player, deferred_session_stop_cb, session));
   CHECK_NULL(L_AIRPLAY, session->anchorev = evtimer_new(evbase_player, anchor_retry_cb, session));
   CHECK_NULL(L_AIRPLAY, session->np_reassert_ev = evtimer_new(evbase_player, np_reassert_cb, session));
   CHECK_NULL(L_AIRPLAY, session->np_artwork_ev = evtimer_new(evbase_player, np_artwork_cb, session));
@@ -7720,9 +7725,10 @@ airplay_device_stop(struct output_device *device, int callback_id)
 
   // End an AirPlay 2 session by closing the connection rather than sending an
   // RTSP TEARDOWN (SEQ_STOP). RAOP/AirPlay 1 teardown lives in its own backend
-  // and is unaffected. Deferred to avoid re-entrancy.
+  // and is unaffected. Deferred to avoid re-entrancy. The event belongs to the
+  // session, so a session freed before it runs takes the event with it.
   evutil_timerclear(&tv);
-  event_base_once(evbase_player, -1, EV_TIMEOUT, deferred_session_stop_cb, session, &tv);
+  evtimer_add(session->stopev, &tv);
 
   return 1;
 }
