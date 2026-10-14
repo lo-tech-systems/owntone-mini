@@ -17,8 +17,9 @@
  * @param cb_arg arguments for callback
  * @param arg_size size of the arguments given
  * @param delay how much in seconds to delay the execution
+ * @return 0 if the work was handed to the pool, -1 if it was dropped
  */
-void
+int
 worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay);
 
 /* Can be called within a callback to get the worker thread's event base

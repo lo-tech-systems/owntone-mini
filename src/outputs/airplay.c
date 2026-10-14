@@ -5988,8 +5988,20 @@ pair_jobs_dispatch(void)
 	}
 
       pair_job_current = job;
+      if (worker_execute(pair_job_run, &job, sizeof(job), 0) < 0) // Copies the pointer
+	{
+	  // Never handed over, so the job and its context are still ours. Fail
+	  // this start and go on to the next job.
+	  DPRINTF(E_LOG, L_AIRPLAY, "Could not hand the pair setup computation for '%s' to a worker\n", session->devname);
+
+	  pair_job_current = NULL;
+	  pair_job_free(job);
+	  evtimer_del(session->pairev);
+	  sequence_resume(session, false); // May free the session, no use of it after this
+	  continue;
+	}
+
       pair_jobs_dispatched++;
-      worker_execute(pair_job_run, &job, sizeof(job), 0); // Copies the pointer
       return;
     }
 }
@@ -6078,6 +6090,47 @@ pair_job_done_cb(int fd, short what, void *arg)
   pair_job_free(job);
 
   sequence_resume(session, true); // May free the session
+  pair_jobs_dispatch();
+}
+
+// Fires when a suspended sequence has waited too long for its result
+static void
+pair_job_timeout_cb(int fd, short what, void *arg)
+{
+  struct airplay_session *session = arg;
+  struct airplay_pair_job *job;
+  struct airplay_pair_job *prev = NULL;
+
+  if (!session->suspended_seq_ctx)
+    return;
+
+  DPRINTF(E_LOG, L_AIRPLAY, "Pair setup for '%s' did not complete in %d s, giving up this attempt\n", session->devname, AIRPLAY_PAIR_COMPUTE_TIMEOUT_SEC);
+
+  // Release the pool slot if this session's job holds it. The job itself is
+  // left alone, the worker may still be using it, and its late result is
+  // discarded by serial when it arrives.
+  if (pair_job_current && pair_job_current->session_serial == session->serial)
+    pair_job_current = NULL;
+
+  // A job still waiting its turn is of no use any more
+  for (job = pair_job_queue_head; job; prev = job, job = job->next)
+    {
+      if (job->session_serial != session->serial)
+	continue;
+
+      if (prev)
+	prev->next = job->next;
+      else
+	pair_job_queue_head = job->next;
+
+      if (pair_job_queue_tail == job)
+	pair_job_queue_tail = prev;
+
+      pair_job_free(job);
+      break;
+    }
+
+  sequence_resume(session, false); // on_error may free the session
   pair_jobs_dispatch();
 }
 
@@ -6617,20 +6670,6 @@ sequence_resume(struct airplay_session *session, bool ok)
     }
 
   sequence_continue(seq_ctx);
-}
-
-// Fires when a suspended sequence has waited too long for its result
-static void
-pair_job_timeout_cb(int fd, short what, void *arg)
-{
-  struct airplay_session *session = arg;
-
-  if (!session->suspended_seq_ctx)
-    return;
-
-  DPRINTF(E_LOG, L_AIRPLAY, "Pair setup for '%s' did not complete in %d s, giving up this attempt\n", session->devname, AIRPLAY_PAIR_COMPUTE_TIMEOUT_SEC);
-
-  sequence_resume(session, false); // on_error may free the session
 }
 
 // All errors that may occur during a sequence are called back async

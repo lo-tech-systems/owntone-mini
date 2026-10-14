@@ -126,7 +126,7 @@ exit_cb(struct evthr *thr, void *shared)
 
 /* ---------------------------- Our worker API  --------------------------- */
 
-void
+int
 worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay)
 {
   struct worker_arg *cmdarg;
@@ -136,7 +136,7 @@ worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay)
   if (!cmdarg)
     {
       DPRINTF(E_LOG, L_MAIN, "Could not allocate worker_arg\n");
-      return;
+      return -1;
     }
 
   if (arg_size > 0)
@@ -146,7 +146,7 @@ worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay)
 	{
 	  DPRINTF(E_LOG, L_MAIN, "Out of memory\n");
 	  free(cmdarg);
-	  return;
+	  return -1;
 	}
 
       memcpy(argcpy, cb_arg, arg_size);
@@ -158,7 +158,14 @@ worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay)
   cmdarg->cb_arg = argcpy;
   cmdarg->delay = delay;
 
-  evthr_pool_defer(worker_threadpool, execute, cmdarg);
+  if (evthr_pool_defer(worker_threadpool, execute, cmdarg) != EVTHR_RES_OK)
+    {
+      free(argcpy);
+      free(cmdarg);
+      return -1;
+    }
+
+  return 0;
 }
 
 struct event_base *
