@@ -58,7 +58,8 @@
 #define MAX_FILTERS 9
 
 // Used for passing errors to DPRINTF (can't count on av_err2str being present)
-static char errbuf[64];
+// One per thread, since contexts are set up and used on several threads
+static __thread char errbuf[64];
 
 // The settings struct will be filled out based on the profile enum
 struct settings_ctx

@@ -32,6 +32,7 @@
 #include <inttypes.h>
 #include <time.h>
 #include <malloc.h>
+#include <pthread.h>
 
 #include <event2/event.h>
 
@@ -92,6 +93,10 @@ static struct output_definition *outputs[] = {
 // audio of outputs that are already playing, so it is logged at the normal level
 #define OUTPUTS_STEP_SLOW_MS 20
 
+// A subscription's context that takes a worker this long (in milliseconds) to
+// build is logged at the normal level, otherwise at the info level
+#define OUTPUTS_BUILD_SLOW_MS 100
+
 struct outputs_callback_register
 {
   output_status_cb cb;
@@ -110,6 +115,7 @@ struct output_quality_subscription
   int count;
   struct media_quality quality;
   struct encode_ctx *encode_ctx;
+  uint64_t build_seq; // The job that is building the context, 0 if none
 };
 
 // Buffer used to pass data to the backends
@@ -128,6 +134,17 @@ static struct timeval outputs_stop_timeout = { OUTPUTS_STOP_TIMEOUT, 0 };
 // Last element is a zero terminator
 static struct output_quality_subscription output_quality_subscriptions[OUTPUTS_MAX_QUALITY_SUBSCRIPTIONS + 1];
 static bool outputs_got_new_subscription;
+
+// Player thread only. The number of the last job made to build a subscription's
+// context, never 0
+static uint64_t outputs_build_seq;
+
+// Set in outputs_deinit(). A worker checks it and posts its result under the
+// lock, so no result is posted to the player event base once it is set. The
+// player thread takes the lock for that one assignment only and never waits for
+// a worker.
+static pthread_mutex_t outputs_build_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool outputs_build_deinit;
 
 struct output_group
 {
@@ -1288,11 +1305,209 @@ encoding_ctx_build(struct media_quality *input_quality, struct media_quality *qu
   return encode_ctx;
 }
 
+// A subscription's context is built by a worker. The job carries copies of the
+// qualities, never a pointer into the subscription array, which shifts when a
+// subscription is removed. The job owns the context it has built until the
+// completion has installed it in the subscription or handed it to a worker to
+// free.
+struct subscription_build_job
+{
+  uint64_t seq;
+  struct media_quality input_quality;
+  struct media_quality quality;
+  struct encode_ctx *encode_ctx;
+};
+
+static void
+subscription_build_job_free(struct subscription_build_job *job)
+{
+  transcode_encode_cleanup(&job->encode_ctx);
+  free(job);
+}
+
+static void
+subscription_build_done_cb(int fd, short what, void *arg);
+
+// *** Thread: worker ***
+// Touches nothing but the job it is given, the log, the settings and the
+// shutdown flag
+static void
+subscription_build_run(void *arg)
+{
+  struct subscription_build_job *job = *(struct subscription_build_job **)arg;
+  struct timeval tv = { 0, 0 };
+  char name[32];
+  uint64_t start_ms;
+  unsigned int took_ms;
+  int ret;
+
+  start_ms = outputs_monotonic_ms();
+
+  job->encode_ctx = encoding_ctx_build(&job->input_quality, &job->quality);
+
+  took_ms = (unsigned int)(outputs_monotonic_ms() - start_ms);
+
+  snprintf(name, sizeof(name), "%d/%d/%d", job->input_quality.sample_rate, job->input_quality.bits_per_sample, job->input_quality.channels);
+  DPRINTF((took_ms >= OUTPUTS_BUILD_SLOW_MS) ? E_LOG : E_INFO, L_PLAYER, "Subscription encoder setup for '%s' took %u ms on a worker\n", name, took_ms);
+
+  pthread_mutex_lock(&outputs_build_lock);
+
+  // Shutting down, the player event base may be about to go and nobody is
+  // waiting for the result
+  if (outputs_build_deinit)
+    {
+      pthread_mutex_unlock(&outputs_build_lock);
+      subscription_build_job_free(job);
+      return;
+    }
+
+  // The job belongs to the player thread from here, it must not be used after
+  // the completion has been posted
+  ret = event_base_once(evbase_player, -1, EV_TIMEOUT, subscription_build_done_cb, job, &tv);
+
+  pthread_mutex_unlock(&outputs_build_lock);
+
+  if (ret < 0)
+    {
+      // Not posted, so the job is still ours
+      DPRINTF(E_LOG, L_PLAYER, "Could not post the result of a subscription encoder setup\n");
+      subscription_build_job_free(job);
+    }
+}
+
+// *** Thread: worker ***
+static void
+encode_ctx_free_cb(void *arg)
+{
+  struct encode_ctx *encode_ctx = *(struct encode_ctx **)arg;
+
+  transcode_encode_cleanup(&encode_ctx);
+}
+
+// Takes the result of a job that is not wanted, without tearing the context
+// down on the player thread if a worker can do it
+static void
+subscription_build_discard(struct subscription_build_job *job)
+{
+  struct encode_ctx *encode_ctx = job->encode_ctx;
+
+  job->encode_ctx = NULL;
+  free(job);
+
+  if (!encode_ctx)
+    return;
+
+  if (worker_execute(encode_ctx_free_cb, &encode_ctx, sizeof(encode_ctx), 0) < 0)
+    {
+      DPRINTF(E_LOG, L_PLAYER, "Could not hand a subscription encoding context to a worker to free, freeing it on the player thread\n");
+      transcode_encode_cleanup(&encode_ctx);
+    }
+}
+
+// *** Thread: player ***
+// Installs the result of a job in the subscription that waits for it, if there
+// still is one: a subscription of that quality with subscribers, that has no
+// context, that waits for this very job, and for an input quality that is still
+// the current one. The pending marker of a subscription that was removed and
+// made again is not this job's, so the result of the first is not installed in
+// the second.
+static void
+subscription_build_done_cb(int fd, short what, void *arg)
+{
+  struct subscription_build_job *job = arg;
+  struct output_quality_subscription *subscription;
+  int i;
+
+  if (outputs_build_deinit)
+    {
+      subscription_build_job_free(job);
+      return;
+    }
+
+  for (i = 0; output_quality_subscriptions[i].count > 0; i++)
+    {
+      if (quality_is_equal(&job->quality, &output_quality_subscriptions[i].quality))
+	break;
+    }
+
+  subscription = &output_quality_subscriptions[i]; // Has no subscribers if there was no match
+
+  if (subscription->count == 0 || subscription->encode_ctx || subscription->build_seq != job->seq)
+    {
+      DPRINTF(E_DBG, L_PLAYER, "Discarding subscription encoder setup result, its subscription has changed\n");
+      subscription_build_discard(job);
+      return;
+    }
+
+  subscription->build_seq = 0;
+
+  if (!quality_is_equal(&job->input_quality, &output_buffer.data[0].quality))
+    {
+      // Retry for the current input quality at the next write
+      outputs_got_new_subscription = true;
+      DPRINTF(E_DBG, L_PLAYER, "Discarding subscription encoder setup result, the input quality has changed\n");
+      subscription_build_discard(job);
+      return;
+    }
+
+  if (!job->encode_ctx)
+    DPRINTF(E_LOG, L_PLAYER, "Could not create subscription encoding context for %d/%d/%d\n",
+      subscription->quality.sample_rate, subscription->quality.bits_per_sample, subscription->quality.channels);
+
+  subscription->encode_ctx = job->encode_ctx;
+  job->encode_ctx = NULL;
+  free(job);
+}
+
+// Hands the building of a subscription's context to a worker, unless a job is
+// out for it already. If the hand-over fails the context is built here.
+static void
+subscription_build_queue(struct output_quality_subscription *subscription, struct media_quality *quality)
+{
+  struct subscription_build_job *job;
+  char name[32];
+  uint64_t start_ms;
+  uint64_t seq;
+
+  if (subscription->build_seq)
+    return;
+
+  CHECK_NULL(L_PLAYER, job = calloc(1, sizeof(*job)));
+
+  seq = ++outputs_build_seq;
+  job->seq = seq;
+  job->input_quality = *quality;
+  job->quality = subscription->quality;
+
+  if (worker_execute(subscription_build_run, &job, sizeof(job), 0) == 0) // Copies the pointer
+    {
+      // The job is not ours from here. Its result is only taken up by the
+      // event loop, so setting the marker after the hand-over is in time.
+      subscription->build_seq = seq;
+      return;
+    }
+
+  free(job);
+
+  DPRINTF(E_LOG, L_PLAYER, "Could not hand the subscription encoder setup to a worker, building it on the player thread\n");
+
+  start_ms = outputs_monotonic_ms();
+
+  subscription->encode_ctx = encoding_ctx_build(quality, &subscription->quality);
+  if (!subscription->encode_ctx)
+    DPRINTF(E_LOG, L_PLAYER, "Could not create subscription encoding context for %d/%d/%d\n",
+      subscription->quality.sample_rate, subscription->quality.bits_per_sample, subscription->quality.channels);
+
+  snprintf(name, sizeof(name), "%d/%d/%d", quality->sample_rate, quality->bits_per_sample, quality->channels);
+  outputs_step_time_log(L_PLAYER, "Subscription encoder setup", name, start_ms);
+}
+
 // Creates the encoding (resampling) contexts for the subscriptions. With all
 // set, which is for a change of input quality, the existing contexts are first
-// destroyed and every subscription gets a new one. Otherwise only the
-// subscriptions that have no context yet get one, so the context of a
-// subscription that is already in use, and the state it holds, is left alone.
+// destroyed and every subscription gets a new one, built here. Otherwise only
+// the subscriptions that have no context yet get one, built by a worker, so the
+// context of a subscription that is already in use, and the state it holds, is
+// left alone. A subscription gets no data until its context is installed.
 static int
 encoding_reset(struct media_quality *quality, bool all)
 {
@@ -1307,10 +1522,12 @@ encoding_reset(struct media_quality *quality, bool all)
 
   profile = quality_to_xcode(quality);
 
-  // The decoding context is only needed if some subscription gets a context
-  // now, so when not resetting all of them it is made when first needed
   if (all)
     {
+      // Jobs out for the old input quality are discarded when they come back
+      for (i = 0; output_quality_subscriptions[i].count > 0; i++)
+	output_quality_subscriptions[i].build_seq = 0;
+
       encode_args.src_ctx = transcode_decode_setup_raw(profile, quality);
       if (!encode_args.src_ctx)
 	{
@@ -1332,14 +1549,10 @@ encoding_reset(struct media_quality *quality, bool all)
       if (subscription->encode_ctx)
 	continue; // Already set up for this input quality
 
-      if (!encode_args.src_ctx)
+      if (!all)
 	{
-	  encode_args.src_ctx = transcode_decode_setup_raw(profile, quality);
-	  if (!encode_args.src_ctx)
-	    {
-	      DPRINTF(E_LOG, L_PLAYER, "Could not create subscription decoding context (profile %d)\n", profile);
-	      return -1;
-	    }
+	  subscription_build_queue(subscription, quality);
+	  continue;
 	}
 
       encode_args.profile = quality_to_xcode(&subscription->quality);
@@ -1348,7 +1561,7 @@ encoding_reset(struct media_quality *quality, bool all)
     }
 
   if (!encode_args.src_ctx)
-    return 0; // Nothing needed a context
+    return 0; // Not resetting all, so the workers do the building
 
   transcode_decode_cleanup(&encode_args.src_ctx);
 
@@ -2842,6 +3055,13 @@ void
 outputs_deinit(void)
 {
   int i;
+
+  // A subscription build already with a worker frees itself when it finishes,
+  // from now on, instead of posting its result to the player event base. A
+  // result posted before this is either run and freed or dropped with the base.
+  pthread_mutex_lock(&outputs_build_lock);
+  outputs_build_deinit = true;
+  pthread_mutex_unlock(&outputs_build_lock);
 
   event_free(outputs_deferredev);
 
