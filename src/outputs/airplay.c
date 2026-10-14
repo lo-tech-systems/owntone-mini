@@ -5602,6 +5602,15 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
 
   actions = anchor_event(session, accepted ? ANCHOR_EV_ACCEPTED : ANCHOR_EV_REJECTED, ANCHOR_HOLD_NONE);
 
+  // An answer in a state that cannot have an anchor at all. The session could
+  // neither be anchored nor retried from here, so end it.
+  if (actions == 0)
+    {
+      if (response)
+	plist_free(response);
+      return AIRPLAY_SEQ_ABORT;
+    }
+
   // An answer that no outstanding anchor matches, for instance one for an
   // anchor that a flush has since replaced with a new one, must not confirm or
   // reject the session's current anchor
