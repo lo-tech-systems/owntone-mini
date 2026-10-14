@@ -100,6 +100,21 @@ init_cb(struct evthr *thr, void *shared)
   worker_thr = thr;
 
   thread_setname("worker");
+
+#if defined(__linux__)
+  // The pool carries work the audio threads must outrank (pairing
+  // computations, artwork preparation, API requests).
+  //
+  // This nice() value is RELATIVE to the process's current priority, not an
+  // absolute one: it only matters together with whatever baseline the
+  // owning systemd unit sets via Nice=. With the unit's Nice= at -12, these
+  // threads land at -2, i.e. still above default-priority (nice 0)
+  // processes. If the unit's baseline Nice= is ever changed, their effective
+  // priority moves with it.
+  errno = 0;
+  if (nice(10) == -1 && errno != 0)
+    DPRINTF(E_DBG, L_MAIN, "Could not lower worker thread priority: %s\n", strerror(errno));
+#endif
 }
 
 static void
