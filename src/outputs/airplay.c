@@ -3072,6 +3072,17 @@ packets_send(struct airplay_master_session *ams)
   return 0;
 }
 
+// True for a buffered session on the given master session that is connected or
+// streaming. A session that has failed or is being torn down keeps its anchor
+// flags until it is freed, but it no longer plays. Callers add their own
+// conditions (an excluded session, an audio-suppressed one, the anchor flags).
+static bool
+session_is_live_buffered(const struct airplay_session *session, const struct airplay_master_session *ams)
+{
+  return session->master_session == ams && session->buffered_mode &&
+         (session->state == AIRPLAY_STATE_CONNECTED || session->state == AIRPLAY_STATE_STREAMING);
+}
+
 // Buffered AirPlay 2 (type 103) counterpart to packets_send(). There is no
 // retransmit buffer and no rtp_packet_next/RTP header for the buffered
 // transport; framing uses ams->buffered_seqnum/buffered_rtptime directly.
@@ -3095,10 +3106,7 @@ buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
     {
       for (session = airplay_sessions; session; session = session->next)
 	{
-	  if (session->master_session != ams || !session->buffered_mode || session->audio_suppressed)
-	    continue;
-
-	  if (session->state != AIRPLAY_STATE_CONNECTED && session->state != AIRPLAY_STATE_STREAMING)
+	  if (!session_is_live_buffered(session, ams) || session->audio_suppressed)
 	    continue;
 
 	  if (session->anchor_confirmed || !session->anchor_in_flight || session->buffered_start_rtptime != ams->buffered_anchor_map_rtptime)
@@ -3117,10 +3125,7 @@ buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
 
   for (session = airplay_sessions; session; session = session->next)
     {
-      if (session->master_session != ams || !session->buffered_mode)
-	continue;
-
-      if (session->state != AIRPLAY_STATE_CONNECTED && session->state != AIRPLAY_STATE_STREAMING)
+      if (!session_is_live_buffered(session, ams))
 	continue;
 
       // TV proxy leader kept for control only: never deliver, never freeze the
@@ -5431,12 +5436,7 @@ master_session_has_confirmed_anchor(struct airplay_master_session *ams)
 
   for (session = airplay_sessions; session; session = session->next)
     {
-      if (session->master_session != ams || !session->buffered_mode || !session->anchor_confirmed)
-	continue;
-
-      // A session that has failed or is being torn down keeps the flag until it
-      // is freed, but it no longer plays
-      if (session->state == AIRPLAY_STATE_CONNECTED || session->state == AIRPLAY_STATE_STREAMING)
+      if (session_is_live_buffered(session, ams) && session->anchor_confirmed)
 	return true;
     }
 
@@ -5455,10 +5455,7 @@ master_session_anchor_holders(struct airplay_master_session *ams, struct airplay
 
   for (session = airplay_sessions; session; session = session->next)
     {
-      if (session == except || session->master_session != ams || !session->buffered_mode)
-	continue;
-
-      if (session->state != AIRPLAY_STATE_CONNECTED && session->state != AIRPLAY_STATE_STREAMING)
+      if (session == except || !session_is_live_buffered(session, ams))
 	continue;
 
       if (session->anchor_confirmed || session->anchor_in_flight)
@@ -7737,10 +7734,7 @@ anchor_start_due(struct airplay_session *session, uint64_t now)
 
   for (sibling = airplay_sessions; sibling; sibling = sibling->next)
     {
-      if (sibling == session || sibling->master_session != session->master_session || !sibling->buffered_mode)
-	continue;
-
-      if (sibling->state != AIRPLAY_STATE_CONNECTED && sibling->state != AIRPLAY_STATE_STREAMING)
+      if (sibling == session || !session_is_live_buffered(sibling, session->master_session))
 	continue;
 
       if (sibling->anchor_confirmed)
