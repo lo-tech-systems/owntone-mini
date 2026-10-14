@@ -161,6 +161,12 @@
 // the count keeps the whole allowance at about six seconds.
 #define AIRPLAY_BUFFERED_ANCHOR_RETRIES_MAX   12
 #define AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS 500
+// A receiver often rejects an anchor sent soon after it became our clock
+// peer, so the first anchor of a session is held until the peer is this old.
+// The members of a group are released together once the youngest is old
+// enough, but none waits longer than the sibling wait for another.
+#define AIRPLAY_BUFFERED_ANCHOR_MIN_PEER_AGE_MS 1200
+#define AIRPLAY_BUFFERED_ANCHOR_SIBLING_WAIT_MS 300
 // A session joining an already-anchored master session gets an anchor this
 // many frames past the current write head, and delivery to it is held until
 // the write head reaches that point - so its first delivered frame matches
@@ -540,6 +546,10 @@ struct airplay_session
   // decided, or after a FLUSHBUFFERED, which invalidates the receiver's
   // previous anchor)
   bool anchor_pending;
+  // Set while anchor_pending is being held back until the receiver's clock
+  // peer is old enough (see anchor_start_due), for the log line on release
+  bool anchor_held;
+  bool anchor_sibling_waited;
   // Set once the receiver accepts SETRATEANCHORTIME. No audio is written to
   // the data connection before this: it keeps the anchor-rejection retry path
   // alive (a failed data write kills the session), and it makes anchor and
@@ -598,6 +608,9 @@ struct airplay_session
   struct airplay_service *control_svc;
 
   uint32_t ptpd_slave_id;
+  // Monotonic time in ms at which the receiver was added as a clock peer, 0
+  // if it has not been
+  uint64_t ptpd_peer_added_ms;
 
   struct airplay_session *next;
 };
@@ -5082,6 +5095,8 @@ response_handler_setup_session(struct evrtsp_request *req, struct airplay_sessio
       ret = handle_timingpeerinfo(&session->ptpd_slave_id, response, session->local_v4_address, session->local_v6_address);
       if (ret < 0)
 	goto error;
+
+      session->ptpd_peer_added_ms = monotonic_ms();
     }
 
   plist_free(response);
@@ -7050,12 +7065,61 @@ airplay_device_authorize(struct output_device *device, const char *pin, int call
   return 1;
 }
 
+// Whether a streaming buffered session may send its anchor yet. A receiver
+// whose clock peer is too young would likely reject it. Members of a group
+// are released together once the youngest has reached the minimum age, but a
+// session never waits more than the sibling wait for the others, a suppressed
+// session neither waits nor is waited for, and a session joining a group that
+// is already playing waits only for its own age. Records in the session when
+// it is held for a sibling rather than for its own age.
+static bool
+anchor_start_due(struct airplay_session *session, uint64_t now)
+{
+  struct airplay_session *sibling;
+  uint64_t age;
+  bool sibling_young = false;
+
+  if (session->ptpd_peer_added_ms == 0)
+    return true;
+
+  age = (now > session->ptpd_peer_added_ms) ? now - session->ptpd_peer_added_ms : 0;
+  if (age < AIRPLAY_BUFFERED_ANCHOR_MIN_PEER_AGE_MS)
+    return false;
+
+  if (session->audio_suppressed || age >= AIRPLAY_BUFFERED_ANCHOR_MIN_PEER_AGE_MS + AIRPLAY_BUFFERED_ANCHOR_SIBLING_WAIT_MS)
+    return true;
+
+  for (sibling = airplay_sessions; sibling; sibling = sibling->next)
+    {
+      if (sibling == session || sibling->master_session != session->master_session || !sibling->buffered_mode)
+	continue;
+
+      if (sibling->state != AIRPLAY_STATE_CONNECTED && sibling->state != AIRPLAY_STATE_STREAMING)
+	continue;
+
+      if (sibling->anchor_confirmed)
+	return true;
+
+      if (sibling->audio_suppressed || !sibling->anchor_pending || sibling->ptpd_peer_added_ms == 0)
+	continue;
+
+      if (now - sibling->ptpd_peer_added_ms < AIRPLAY_BUFFERED_ANCHOR_MIN_PEER_AGE_MS)
+	sibling_young = true;
+    }
+
+  if (sibling_young)
+    session->anchor_sibling_waited = true;
+
+  return !sibling_young;
+}
+
 static void
 airplay_write(struct output_buffer *obuf)
 {
   struct airplay_master_session *ams;
   struct airplay_session *session;
   struct airplay_encoded_frame *frame, *next_frame;
+  uint64_t now_ms = 0;
   int i;
 
   for (ams = airplay_master_sessions; ams; ams = ams->next)
@@ -7166,8 +7230,24 @@ airplay_write(struct output_buffer *obuf)
       // anchor.
       if (session->state == AIRPLAY_STATE_STREAMING && session->buffered_mode && session->anchor_pending)
 	{
-	  sequence_start(AIRPLAY_SEQ_SEND_ANCHOR, session, NULL, "anchor");
-	  session->anchor_pending = false;
+	  // The anchor waits, still pending, until the receiver's clock peer is
+	  // old enough. The clock is read once, and only while one is waiting.
+	  if (!now_ms)
+	    now_ms = monotonic_ms();
+
+	  if (!anchor_start_due(session, now_ms))
+	    session->anchor_held = true;
+	  else
+	    {
+	      if (session->anchor_held)
+		DPRINTF(E_DBG, L_AIRPLAY, "Releasing anchor for '%s': clock peer %" PRIu64 " ms old%s\n", session->devname,
+		        now_ms - session->ptpd_peer_added_ms, session->anchor_sibling_waited ? ", waited for a sibling" : "");
+
+	      session->anchor_held = false;
+	      session->anchor_sibling_waited = false;
+	      sequence_start(AIRPLAY_SEQ_SEND_ANCHOR, session, NULL, "anchor");
+	      session->anchor_pending = false;
+	    }
 	}
 
       session_streaming_report(session);
