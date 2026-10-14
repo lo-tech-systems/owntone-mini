@@ -816,6 +816,8 @@ static void
 sequence_continue(struct airplay_seq_ctx *seq_ctx);
 static int
 master_session_anchor_holders(struct airplay_master_session *ams, struct airplay_session *except);
+static bool
+master_session_has_confirmed_anchor(struct airplay_master_session *ams);
 
 
 /* ------------------------------- MISC HELPERS ----------------------------- */
@@ -2935,10 +2937,16 @@ buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
       // rtpTime. The counters are frozen below while holding.
       if (!session->anchor_confirmed)
 	{
-	  // A session waiting out an anchor retry has nothing outstanding, and
-	  // its next anchor is taken at the head when the retry is sent (which
-	  // gates again), so it need not hold the head back meanwhile
-	  if (!session->anchor_retry_waiting)
+	  // Only a fresh anchor, which names the head as its first frame, needs
+	  // the head held while it is unanswered. The session whose anchor
+	  // defines the shared line keeps it held even if a sibling's derived
+	  // anchor has been accepted first, or the head would pass its first
+	  // frame. Any other unanswered anchor is a join point ahead of the head
+	  // once a sibling is confirmed, and holds nothing. A session waiting out
+	  // an anchor retry has nothing outstanding and holds nothing either.
+	  if (session->anchor_in_flight &&
+	      ((ams->buffered_anchor_mapped && session->buffered_start_rtptime == ams->buffered_anchor_map_rtptime) ||
+	       !master_session_has_confirmed_anchor(ams)))
 	    gated = true;
 	  continue;
 	}
@@ -5101,6 +5109,12 @@ response_handler_flush_buffered(struct evrtsp_request *req, struct airplay_sessi
   session->anchor_in_flight = false;
   session->anchor_retry_waiting = false;
   evtimer_del(session->anchorev);
+
+  // While a sibling still has a confirmed anchor its line, its delivery and
+  // the shared encoder are left alone, as in response_handler_flush_offset
+  if (master_session_has_confirmed_anchor(session->master_session))
+    return AIRPLAY_SEQ_CONTINUE;
+
   session->master_session->buffered_marker_pending = true;
   // Playback resumes at a new wall time, so the old rtptime->networkTime
   // mapping no longer holds; the next anchor establishes a fresh one
