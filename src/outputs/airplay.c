@@ -1525,7 +1525,7 @@ session_streaming_report(struct airplay_session *session)
 {
   if (session->streaming_reported || session->state != AIRPLAY_STATE_STREAMING)
     return;
-  if (session->buffered_mode && !session->anchor_confirmed)
+  if (session->buffered_mode && session->anchor_state != ANCHOR_CONFIRMED)
     return;
   if (session->callback_id < 0)
     return;
@@ -2806,7 +2806,7 @@ airplay_set_offset_one(struct output_device *device)
 
   if (session->buffered_mode)
     {
-      if (session->state == AIRPLAY_STATE_STREAMING && session->anchor_confirmed)
+      if (session->state == AIRPLAY_STATE_STREAMING && session->anchor_state == ANCHOR_CONFIRMED)
 	sequence_start(AIRPLAY_SEQ_FLUSH_OFFSET, session, NULL, "offset");
       return 0;
     }
@@ -3121,13 +3121,13 @@ buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
 	  if (!session_is_live_buffered(session, ams) || session->audio_suppressed)
 	    continue;
 
-	  if (session->anchor_confirmed || !session->anchor_in_flight || session->buffered_start_rtptime != ams->buffered_anchor_map_rtptime)
+	  if (session->anchor_state != ANCHOR_IN_FLIGHT || session->buffered_start_rtptime != ams->buffered_anchor_map_rtptime)
 	    continue;
 
 	  if (!now_ms)
 	    now_ms = monotonic_ms();
 
-	  if (now_ms - session->anchor_sent_ms < AIRPLAY_BUFFERED_ANCHOR_HOLD_MAX_MS)
+	  if (airplay_anchor_within_hold(session->anchor_state, session->anchor_sent_ms, now_ms, AIRPLAY_BUFFERED_ANCHOR_HOLD_MAX_MS))
 	    {
 	      origin_hold = true;
 	      break;
@@ -3153,7 +3153,7 @@ buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
       // rtpTime. The counters are frozen below while holding. Delivery to a
       // confirmed session may also wait at the origin for siblings within
       // their hold (see origin_hold below).
-      if (!session->anchor_confirmed)
+      if (session->anchor_state != ANCHOR_CONFIRMED)
 	{
 	  // Only a fresh anchor, which names the head as its first frame, needs
 	  // the head held while it is unanswered. The session whose anchor
@@ -3165,14 +3165,14 @@ buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
 	  // The hold is bounded: once the anchor has been unanswered for the
 	  // longest allowed time the head moves on, and the session is
 	  // delivered from wherever the head is if it is accepted afterwards.
-	  if (session->anchor_in_flight &&
+	  if (session->anchor_state == ANCHOR_IN_FLIGHT &&
 	      ((ams->buffered_anchor_mapped && session->buffered_start_rtptime == ams->buffered_anchor_map_rtptime) ||
 	       !master_session_has_confirmed_anchor(ams)))
 	    {
 	      if (!now_ms)
 		now_ms = monotonic_ms();
 
-	      if (now_ms - session->anchor_sent_ms < AIRPLAY_BUFFERED_ANCHOR_HOLD_MAX_MS)
+	      if (airplay_anchor_within_hold(session->anchor_state, session->anchor_sent_ms, now_ms, AIRPLAY_BUFFERED_ANCHOR_HOLD_MAX_MS))
 		gated = true;
 	      else if (!session->anchor_hold_given_up)
 		{
@@ -3777,6 +3777,14 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
   uint32_t delta;
   bool shared_head = false;
   int ret;
+
+  // Nobody is waiting for the answer to a request built with no anchor owed
+  if (session->anchor_state != ANCHOR_PENDING && session->anchor_state != ANCHOR_RETRY_WAIT)
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "Bug! Anchor request for '%s' built with no anchor owed (state %s)\n",
+              session->devname, airplay_anchor_state_name(session->anchor_state));
+      return 1; // Skip the request, the sequence completes with nothing sent
+    }
 
   if (ams->buffered_anchor_mapped)
     {
@@ -5451,7 +5459,7 @@ master_session_has_confirmed_anchor(struct airplay_master_session *ams)
 
   for (session = airplay_sessions; session; session = session->next)
     {
-      if (session_is_live_buffered(session, ams) && session->anchor_confirmed)
+      if (session_is_live_buffered(session, ams) && session->anchor_state == ANCHOR_CONFIRMED)
 	return true;
     }
 
@@ -5473,7 +5481,7 @@ master_session_anchor_holders(struct airplay_master_session *ams, struct airplay
       if (session == except || !session_is_live_buffered(session, ams))
 	continue;
 
-      if (session->anchor_confirmed || session->anchor_in_flight)
+      if (airplay_anchor_holds_line(session->anchor_state))
 	holders++;
     }
 
@@ -7790,10 +7798,10 @@ anchor_start_due(struct airplay_session *session, uint64_t now)
       if (sibling == session || !session_is_live_buffered(sibling, session->master_session))
 	continue;
 
-      if (sibling->anchor_confirmed)
+      if (sibling->anchor_state == ANCHOR_CONFIRMED)
 	return true;
 
-      if (sibling->audio_suppressed || !sibling->anchor_pending || sibling->ptpd_peer_added_ms == 0)
+      if (sibling->audio_suppressed || sibling->anchor_state != ANCHOR_PENDING || sibling->ptpd_peer_added_ms == 0)
 	continue;
 
       if (now - sibling->ptpd_peer_added_ms < AIRPLAY_BUFFERED_ANCHOR_MIN_PEER_AGE_MS)
@@ -7970,7 +7978,7 @@ airplay_write(struct output_buffer *obuf)
       // anchor_pending is set when buffered_mode is first decided and again
       // after every FLUSHBUFFERED, which invalidates the receiver's previous
       // anchor.
-      if (session->state == AIRPLAY_STATE_STREAMING && session->buffered_mode && session->anchor_pending)
+      if (session->state == AIRPLAY_STATE_STREAMING && session->buffered_mode && session->anchor_state == ANCHOR_PENDING)
 	{
 	  // The anchor waits, still pending, until the receiver's clock peer is
 	  // old enough. The clock is read once, and only while one is waiting.
@@ -7988,9 +7996,9 @@ airplay_write(struct output_buffer *obuf)
 	    }
 	  else
 	    {
-	      if (session->anchor_held)
+	      if (session->anchor_hold_reason != ANCHOR_HOLD_NONE)
 		DPRINTF(E_INFO, L_AIRPLAY, "Releasing anchor for '%s': clock peer %" PRIu64 " ms old%s\n", session->devname,
-		        now_ms - session->ptpd_peer_added_ms, session->anchor_sibling_waited ? ", waited for a sibling" : "");
+		        now_ms - session->ptpd_peer_added_ms, session->anchor_hold_reason == ANCHOR_HOLD_SIBLING ? ", waited for a sibling" : "");
 
 	      session->anchor_held = false;
 	      session->anchor_sibling_waited = false;
