@@ -58,6 +58,14 @@ net_mac_get(uint8_t *mac, size_t mac_size, const char *ifname);
 int
 net_connect(const char *addr, unsigned short port, int type, const char *log_service_name);
 
+// Starts a TCP connection to a numeric address without waiting for it. Returns
+// a non-blocking, close-on-exec socket on which connect() has either succeeded
+// or is in progress; the caller waits for the socket to become writable and
+// reads SO_ERROR to learn the outcome. Returns -1 if the socket could not be
+// made or the connection could not be started.
+int
+net_connect_start(const char *addr, unsigned short port, const char *log_service_name);
+
 void
 net_socket_close(struct net_socket *socket);
 

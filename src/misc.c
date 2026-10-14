@@ -377,7 +377,7 @@ net_mac_get(uint8_t *mac, size_t mac_size, const char *ifname)
 }
 
 static int
-net_connect_addrinfo(struct addrinfo *ai, int timeout_ms, bool set_nonblock, const char **errmsg)
+net_connect_addrinfo(struct addrinfo *ai, int timeout_ms, bool set_nonblock, bool wait, const char **errmsg)
 {
   int fd = -1;
   int flags;
@@ -416,6 +416,11 @@ net_connect_addrinfo(struct addrinfo *ai, int timeout_ms, bool set_nonblock, con
     {
       *errmsg = strerror(errno);
       goto error;
+    }
+  else if (!wait)
+    {
+      // The caller waits for the socket to become writable and reads SO_ERROR
+      return fd;
     }
   else if (ret != 0)
     {
@@ -465,7 +470,7 @@ net_connect_addrinfo(struct addrinfo *ai, int timeout_ms, bool set_nonblock, con
 }
 
 static int
-net_connect_impl(const char *addr, unsigned short port, int type, const char *log_service_name, int timeout_ms, bool set_nonblock)
+net_connect_impl(const char *addr, unsigned short port, int type, const char *log_service_name, int timeout_ms, bool set_nonblock, bool wait, int ai_flags)
 {
   struct addrinfo hints = { 0 };
   struct addrinfo *servinfo;
@@ -478,6 +483,7 @@ net_connect_impl(const char *addr, unsigned short port, int type, const char *lo
   DPRINTF(E_DBG, L_MISC, "Connecting to '%s' at %s (port %u)\n", log_service_name, addr, port);
 
   hints.ai_socktype = type;
+  hints.ai_flags = ai_flags;
   hints.ai_family = config_get_bool("ipv6", false) ? AF_UNSPEC : AF_INET;
 
   snprintf(strport, sizeof(strport), "%hu", port);
@@ -490,7 +496,11 @@ net_connect_impl(const char *addr, unsigned short port, int type, const char *lo
 
   for (ai = servinfo; ai && fd < 0; ai = ai->ai_next)
     {
-      fd = net_connect_addrinfo(ai, timeout_ms, set_nonblock, &errmsg);
+      fd = net_connect_addrinfo(ai, timeout_ms, set_nonblock, wait, &errmsg);
+
+      // When not waiting, only the first address is tried
+      if (!wait)
+	break;
     }
 
   freeaddrinfo(servinfo);
@@ -509,7 +519,13 @@ net_connect_impl(const char *addr, unsigned short port, int type, const char *lo
 int
 net_connect(const char *addr, unsigned short port, int type, const char *log_service_name)
 {
-  return net_connect_impl(addr, port, type, log_service_name, NET_CONNECT_TIMEOUT_MS, false);
+  return net_connect_impl(addr, port, type, log_service_name, NET_CONNECT_TIMEOUT_MS, false, true, 0);
+}
+
+int
+net_connect_start(const char *addr, unsigned short port, const char *log_service_name)
+{
+  return net_connect_impl(addr, port, SOCK_STREAM, log_service_name, 0, true, false, AI_NUMERICHOST | AI_NUMERICSERV);
 }
 
 void
