@@ -45,11 +45,22 @@ struct airplay_encoded_frame
 int
 airplay_encoder_start(struct airplay_encoder **enc, enum airplay_buffered_kind kind, struct media_quality *quality);
 
-// Signals stop, joins the thread, frees everything including queued PCM and
-// unclaimed frames. Safe to call with *enc == NULL. Blocks the caller for at
-// most one in-flight quantum encode (worst case ~30 ms for 5.1 upmix).
+// Signals the encoder to stop. With wait set the caller is blocked until the
+// thread has exited and freed everything (only for shutdown, when no audio is
+// playing, worst case one in-flight quantum encode, ~30 ms for 5.1 upmix);
+// otherwise the thread is left to finish its current quantum and to free its
+// state, including queued PCM and unclaimed frames, on its own, and the caller
+// returns at once. *enc is NULL on return either way, and the caller must not
+// use the encoder again. Safe to call with *enc == NULL.
 void
-airplay_encoder_stop(struct airplay_encoder **enc);
+airplay_encoder_stop(struct airplay_encoder **enc, bool wait);
+
+// Blocks until every encoder thread that was started has finished freeing
+// itself, or for a couple of seconds at most. For shutdown, after all
+// encoders have been stopped, so that no encoder thread runs on while the
+// rest of the program is torn down.
+void
+airplay_encoder_wait_all(void);
 
 // Player thread. Copies PCM into the in-queue; never blocks and never drops
 // audio to catch up. The queue is only bounded as a memory backstop against

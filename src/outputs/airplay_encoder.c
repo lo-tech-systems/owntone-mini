@@ -60,6 +60,18 @@
 // margin.
 #define ENCODER_QUEUE_FAIL_MS 5000
 
+// How long airplay_encoder_wait_all() waits for encoder threads to finish
+#define ENCODER_EXIT_WAIT_POLLS 200
+#define ENCODER_EXIT_WAIT_POLL_US 10000
+
+// Encoder threads that have been started and have not finished freeing
+// themselves, so that shutdown can wait for those that were stopped without
+// being waited for
+static pthread_mutex_t encoder_threads_lck = PTHREAD_MUTEX_INITIALIZER;
+static int encoder_threads_running;
+
+// The thread that owns the encoder frees it, once it has been stopped. Nothing
+// outside the thread may touch it after airplay_encoder_stop() has returned.
 struct airplay_encoder
 {
   // --- immutable after start ---
@@ -218,6 +230,9 @@ encoder_thread_run(void *arg)
   struct encoder_stats_snapshot stats;
   struct timespec t0;
   struct timespec t1;
+  uint64_t avg_us;
+  uint64_t max_us;
+  uint32_t queue_hw_ms;
   uint32_t gen;
   int pkt_len;
   int len;
@@ -247,15 +262,10 @@ encoder_thread_run(void *arg)
   clock_gettime(CLOCK_MONOTONIC, &t0);
   if (encoder_contexts_open(enc) < 0)
     {
-      // The owner finds out through airplay_encoder_failed(); until it stops
-      // us there is nothing to do
+      // The owner finds out through airplay_encoder_failed()
       pthread_mutex_lock(&enc->lock);
       enc->failed = true;
-      while (!enc->stop)
-        pthread_cond_wait(&enc->cond, &enc->lock);
-      pthread_mutex_unlock(&enc->lock);
-
-      return NULL;
+      goto stop_wait;
     }
   clock_gettime(CLOCK_MONOTONIC, &t1);
 
@@ -414,7 +424,34 @@ encoder_thread_run(void *arg)
         }
     }
 
+ stop_wait:
+  // However the loop ended, the owner still holds a pointer to us and may call
+  // into us until it stops us, so nothing is freed before that
+  while (!enc->stop)
+    pthread_cond_wait(&enc->cond, &enc->lock);
+
+  avg_us = enc->stat_quanta ? (enc->stat_encode_ns_total / enc->stat_quanta) / 1000 : 0;
+  max_us = enc->stat_encode_ns_max / 1000;
+  queue_hw_ms = (uint32_t)((uint64_t)enc->stat_queue_highwater_samples * 1000 / enc->quality.sample_rate);
+
   pthread_mutex_unlock(&enc->lock);
+
+  DPRINTF(E_INFO, L_AIRPLAY, "Encoder (kind %d) stopped: %u quanta, %u frames, avg %" PRIu64 " us, max %" PRIu64 " us, queue hw %u ms\n",
+          enc->kind, enc->stat_quanta, enc->stat_frames, avg_us, max_us, queue_hw_ms);
+
+  // The owner has dropped its pointer, so enc is ours alone from here on
+  transcode_encode_cleanup(&enc->encode_ctx);
+  free(enc->rawbuf);
+  evbuffer_free(enc->encoded_buffer);
+  evbuffer_free(enc->pcm);
+  encoder_frame_list_free(enc->frames_head);
+  pthread_mutex_destroy(&enc->lock);
+  pthread_cond_destroy(&enc->cond);
+  free(enc);
+
+  pthread_mutex_lock(&encoder_threads_lck);
+  encoder_threads_running--;
+  pthread_mutex_unlock(&encoder_threads_lck);
 
   return NULL;
 }
@@ -453,10 +490,19 @@ airplay_encoder_start(struct airplay_encoder **enc_p, enum airplay_buffered_kind
   CHECK_ERR(L_AIRPLAY, mutex_init(&enc->lock));
   CHECK_ERR(L_AIRPLAY, pthread_cond_init(&enc->cond, NULL));
 
+  pthread_mutex_lock(&encoder_threads_lck);
+  encoder_threads_running++;
+  pthread_mutex_unlock(&encoder_threads_lck);
+
   ret = pthread_create(&enc->tid, NULL, encoder_thread_run, enc);
   if (ret != 0)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "Encoder (kind %d): could not spawn thread: %s\n", kind, strerror(ret));
+
+      pthread_mutex_lock(&encoder_threads_lck);
+      encoder_threads_running--;
+      pthread_mutex_unlock(&encoder_threads_lck);
+
       pthread_mutex_destroy(&enc->lock);
       pthread_cond_destroy(&enc->cond);
       free(enc->rawbuf);
@@ -471,41 +517,52 @@ airplay_encoder_start(struct airplay_encoder **enc_p, enum airplay_buffered_kind
 }
 
 void
-airplay_encoder_stop(struct airplay_encoder **enc_p)
+airplay_encoder_stop(struct airplay_encoder **enc_p, bool wait)
 {
   struct airplay_encoder *enc = *enc_p;
-  uint64_t avg_us;
-  uint64_t max_us;
-  uint32_t queue_hw_ms;
+  pthread_t tid;
 
   if (!enc)
     return;
 
+  // The caller's pointer goes first: from the moment stop is set the thread
+  // may free enc, so the caller must have nothing left that can reach it
+  *enc_p = NULL;
+
   pthread_mutex_lock(&enc->lock);
+  tid = enc->tid;
   enc->stop = true;
   pthread_cond_signal(&enc->cond);
   pthread_mutex_unlock(&enc->lock);
 
-  pthread_join(enc->tid, NULL);
+  // enc may be freed by the thread from here on
+  if (wait)
+    pthread_join(tid, NULL);
+  else
+    pthread_detach(tid);
+}
 
-  // The worker thread has exited, so enc is now only touched by this
-  // (the caller's) thread and no lock is needed to read it.
-  avg_us = enc->stat_quanta ? (enc->stat_encode_ns_total / enc->stat_quanta) / 1000 : 0;
-  max_us = enc->stat_encode_ns_max / 1000;
-  queue_hw_ms = (uint32_t)((uint64_t)enc->stat_queue_highwater_samples * 1000 / enc->quality.sample_rate);
-  DPRINTF(E_INFO, L_AIRPLAY, "Encoder (kind %d) stopped: %u quanta, %u frames, avg %" PRIu64 " us, max %" PRIu64 " us, queue hw %u ms\n",
-          enc->kind, enc->stat_quanta, enc->stat_frames, avg_us, max_us, queue_hw_ms);
+void
+airplay_encoder_wait_all(void)
+{
+  int running;
+  int i;
 
-  transcode_encode_cleanup(&enc->encode_ctx);
-  free(enc->rawbuf);
-  evbuffer_free(enc->encoded_buffer);
-  evbuffer_free(enc->pcm);
-  encoder_frame_list_free(enc->frames_head);
-  pthread_mutex_destroy(&enc->lock);
-  pthread_cond_destroy(&enc->cond);
-  free(enc);
+  // Polled rather than signalled: this runs once, at shutdown, and a thread
+  // that was never stopped must not be able to hold up the exit for long
+  for (i = 0; i < ENCODER_EXIT_WAIT_POLLS; i++)
+    {
+      pthread_mutex_lock(&encoder_threads_lck);
+      running = encoder_threads_running;
+      pthread_mutex_unlock(&encoder_threads_lck);
 
-  *enc_p = NULL;
+      if (running == 0)
+	return;
+
+      usleep(ENCODER_EXIT_WAIT_POLL_US);
+    }
+
+  DPRINTF(E_WARN, L_AIRPLAY, "%d encoder thread(s) still running at shutdown\n", running);
 }
 
 void

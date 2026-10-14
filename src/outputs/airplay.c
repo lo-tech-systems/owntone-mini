@@ -839,6 +839,8 @@ static int encoder_cost_budget;
 // return can tell an admission rejection apart from any other setup failure,
 // without master_session_make needing a device pointer just for this.
 static bool encoder_budget_rejected;
+// Player thread only. Set when the module is shut down, see master_session_free()
+static bool airplay_shutting_down;
 
 /* Our own device ID, name and user agent. The two strings are owned copies:
  * see the note where they are set in airplay_init(). */
@@ -1517,8 +1519,10 @@ master_session_free(struct airplay_master_session *ams)
       encoder_cost_in_use -= cost;
     }
 
-  // Join the encoder thread before touching anything it might still be using.
-  airplay_encoder_stop(&ams->encoder);
+  // At shutdown wait for the encoder so nothing of ours runs after the logger
+  // is gone; otherwise let it finish on its own, the player must not wait for
+  // it. Nothing here uses the encoder's state, the encoder thread owns it.
+  airplay_encoder_stop(&ams->encoder, airplay_shutting_down);
 
   outputs_quality_unsubscribe(&ams->rtp_session->quality);
   rtp_session_free(ams->rtp_session);
@@ -8045,6 +8049,8 @@ airplay_deinit(void)
   struct airplay_session *session;
   struct airplay_pair_job *job;
 
+  airplay_shutting_down = true;
+
   airplay_events_deinit();
   service_stop(&airplay_control_svc);
   service_stop(&airplay_timing_svc);
@@ -8057,6 +8063,10 @@ airplay_deinit(void)
 
       session_free(session);
     }
+
+  // Encoders stopped earlier were not waited for, and must be gone before the
+  // logger is
+  airplay_encoder_wait_all();
 
   // Queued computations have no session left to serve
   while (pair_job_queue_head)
