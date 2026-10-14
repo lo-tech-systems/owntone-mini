@@ -48,3 +48,12 @@ owntone@.service
 !/.dev/Makefile
 
 /.claude/
+
+# Assistant instructions, memory and scratch files
+AGENTS.md
+.agents/
+.codex/
+CLAUDE.md
+CLAUDE.local.md
+MEMORY.md
+scratchpad/
