@@ -27,8 +27,8 @@ void
 memstats_log(const char *reason);
 
 // Starts the periodic tick that logs memstats_log() every 5 minutes while
-// playing and every hour while idle. Runs on the worker thread, which hops
-// onto the player thread for the actual logging.
+// playing and every hour while idle. Runs on the worker thread, which only asks
+// the player thread for the session count and the encoder budget.
 int
 memstats_init(void);
 

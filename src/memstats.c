@@ -101,8 +101,8 @@ memstats_arena_count(void)
   return count;
 }
 
-void
-memstats_log(const char *reason)
+static void
+memstats_log_with(const char *reason, int sessions, int enc_in_use, int enc_budget)
 {
   FILE *fp;
   unsigned long vm_rss_kb = 0;
@@ -115,9 +115,6 @@ memstats_log(const char *reason)
   unsigned long heap_inuse_mib;
   unsigned long heap_held_mib;
   int arenas;
-  int sessions;
-  int enc_in_use;
-  int enc_budget;
   struct mallinfo2 mi;
 
   fp = fopen("/proc/self/status", "r");
@@ -146,10 +143,6 @@ memstats_log(const char *reason)
 
   arenas = memstats_arena_count();
 
-  sessions = outputs_sessions_count();
-
-  airplay_encoder_budget_get(&enc_in_use, &enc_budget);
-
   DPRINTF(E_INFO, L_MAIN, "memory: rss %lu MiB (peak %lu, locked %lu), heap in-use %lu MiB held %lu MiB arenas %d, sessions %d, encoders %d/%d, system available %lu MiB, swap used %lu MiB%s%s\n",
           vm_rss_kb / 1024, vm_hwm_kb / 1024, vm_lck_kb / 1024,
           heap_inuse_mib, heap_held_mib, arenas,
@@ -160,6 +153,17 @@ memstats_log(const char *reason)
   memstats_last_logged = time(NULL);
 }
 
+void
+memstats_log(const char *reason)
+{
+  int enc_in_use;
+  int enc_budget;
+
+  airplay_encoder_budget_get(&enc_in_use, &enc_budget);
+
+  memstats_log_with(reason, outputs_sessions_count(), enc_in_use, enc_budget);
+}
+
 static void
 memstats_tick_cb(void *arg)
 {
@@ -167,6 +171,9 @@ memstats_tick_cb(void *arg)
   bool playing;
   time_t now;
   int interval;
+  int sessions;
+  int enc_in_use;
+  int enc_budget;
 
   if (memstats_stopped)
     return;
@@ -182,7 +189,11 @@ memstats_tick_cb(void *arg)
       // the player/encoder threads, and only at the (>=300s) log cadence so it
       // stays rare. Run before the log so the line reflects the post-trim state.
       malloc_trim(0);
-      player_memstats_log();
+
+      // The session count and the encoder budget belong to the player thread, so
+      // it only hands over copies of them and everything else is gathered here
+      if (player_memstats_sample(&sessions, &enc_in_use, &enc_budget) == 0)
+	memstats_log_with(NULL, sessions, enc_in_use, enc_budget);
       memstats_last_logged = now;
     }
 

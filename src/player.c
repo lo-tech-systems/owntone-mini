@@ -3562,10 +3562,20 @@ input_config_reload_cmd(void *arg, int *retval)
   return COMMAND_END;
 }
 
-static enum command_state
-memstats_log_cmd(void *arg, int *retval)
+struct memstats_sample
 {
-  memstats_log(NULL);
+  int sessions;
+  int enc_in_use;
+  int enc_budget;
+};
+
+static enum command_state
+memstats_sample_cmd(void *arg, int *retval)
+{
+  struct memstats_sample *sample = arg;
+
+  sample->sessions = outputs_sessions_count();
+  airplay_encoder_budget_get(&sample->enc_in_use, &sample->enc_budget);
   *retval = 0;
   return COMMAND_END;
 }
@@ -3601,9 +3611,19 @@ player_input_config_reload(void)
 }
 
 int
-player_memstats_log(void)
+player_memstats_sample(int *sessions, int *enc_in_use, int *enc_budget)
 {
-  return commands_exec_sync(cmdbase, memstats_log_cmd, NULL, NULL);
+  struct memstats_sample sample = { 0 };
+  int ret;
+
+  ret = commands_exec_sync(cmdbase, memstats_sample_cmd, NULL, &sample);
+  if (ret < 0)
+    return ret;
+
+  *sessions = sample.sessions;
+  *enc_in_use = sample.enc_in_use;
+  *enc_budget = sample.enc_budget;
+  return 0;
 }
 
 

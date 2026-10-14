@@ -73,10 +73,11 @@ player_get_status(struct player_status *status);
 int
 player_input_config_reload(void);
 
-// Runs memstats_log(NULL) on the player thread, as required since it reads
-// output session state.
+// Copies the figures for the memory statistics line that belong to the player
+// thread (the session count and the encoder budget), so the rest of the line can
+// be gathered on another thread.
 int
-player_memstats_log(void);
+player_memstats_sample(int *sessions, int *enc_in_use, int *enc_budget);
 
 void
 player_speaker_enumerate(spk_enum_cb cb, void *arg);
