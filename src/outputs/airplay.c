@@ -5327,8 +5327,13 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
       return AIRPLAY_SEQ_CONTINUE;
     }
 
-  DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME rejected by '%s' (%d %s, in-band %" PRIi64 "): %s\n",
-          session->devname, req->response_code, req->response_code_line, inband_status, stats_desc);
+  if (session->anchor_retries_left > 0)
+    DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME rejected by '%s' (%d %s, in-band %" PRIi64 "), retrying in %d ms (%d retries left): %s\n",
+            session->devname, req->response_code, req->response_code_line, inband_status,
+            AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS, session->anchor_retries_left - 1, stats_desc);
+  else
+    DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME rejected by '%s' (%d %s, in-band %" PRIi64 "), no retries left: %s\n",
+            session->devname, req->response_code, req->response_code_line, inband_status, stats_desc);
 
   // The response body may say why the anchor was rejected
   if (response)
@@ -5336,14 +5341,14 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
       xml = wplist_to_xml(response);
       if (xml)
 	{
-	  DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME error response from '%s' (rtsp %d, in-band status %" PRIi64 "):\n%s\n",
+	  DPRINTF(E_DBG, L_AIRPLAY, "SETRATEANCHORTIME error response from '%s' (rtsp %d, in-band status %" PRIi64 "):\n%s\n",
 	          session->devname, req->response_code, inband_status, xml);
 	  free(xml);
 	}
       plist_free(response);
     }
   else if (len > 0)
-    DHEXDUMP(E_LOG, L_AIRPLAY, evbuffer_pullup(req->input_buffer, -1), (int)len, "SETRATEANCHORTIME error response (not a plist)\n");
+    DHEXDUMP(E_DBG, L_AIRPLAY, evbuffer_pullup(req->input_buffer, -1), (int)len, "SETRATEANCHORTIME error response (not a plist)\n");
 
   if (session->anchor_retries_left <= 0)
     {
@@ -5352,8 +5357,6 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
     }
 
   session->anchor_retries_left--;
-  DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME rejected by '%s' (%d %s), retrying in %d ms (%d retries left)\n",
-          session->devname, req->response_code, req->response_code_line, AIRPLAY_BUFFERED_ANCHOR_RETRY_WAIT_MS, session->anchor_retries_left);
 
   // If no receiver holds the stored mapping, drop it so the retry computes a
   // fresh now+lead anchor (a stale point drifts into the past across retries).
