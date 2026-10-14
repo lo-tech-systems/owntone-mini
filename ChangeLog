@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased
+
+- fix: the two speakers of an AirPlay 2 stereo pair could start about half
+  a second apart and stay that way. When one speaker rejected its first
+  start-up timing, the shared timeline could be dropped while the other
+  speaker was about to accept it, leaving the two on different timelines.
+  The shared timeline is now kept while any speaker in the group holds it,
+  including on pause and resume and on a change of output delay
+- improvement: the speakers of a group now start on the same moment of
+  audio, instead of one playing alone for a fraction of a second
+- improvement: a speaker's start-up timing is sent once its clock has had
+  time to settle (about 1.2 s after it connects), the members of a group
+  are released together, and a rejected attempt is retried after 0.5 s
+  instead of 1.5 s, so first attempts are usually accepted and a group
+  starts sooner
+- improvement: starting a speaker no longer interrupts the audio of outputs
+  that are already playing. The pairing calculation, the connection to the
+  speaker's event channel, encoder set-up and tear-down, sample-rate
+  converter set-up, settings file writes and memory statistics no longer
+  run on the thread that writes audio to every output. Encoders that were
+  built and then thrown away at each start are no longer built, and the
+  first sample-rate converter is prepared at launch so it is not slow
+- improvement: audio to realtime AirPlay 2 and AirPlay 1 speakers is sent
+  without ever waiting on a congested network; a packet that cannot be sent
+  is dropped and resent if the speaker asks for it
+- fix: a speaker whose encoder or sample-rate converter could not be built
+  no longer stays connected but silent; the converter is retried
+- fix: shutdown can no longer hang waiting for background work
+- change: a device's learned formats are saved to the settings file a
+  moment after they are learned, with the data synced to disk; a pairing
+  key is still saved at once
+- change: a healthy start is now quiet at the normal log level, and
+  anything that still holds up the audio thread for 20 ms or more is named
+  in the log
+- change: the start-up timing logic is an explicit state machine with its
+  own test program (`src/outputs/tests/airplay_anchor_test.c`), and the
+  timing constants and the relationships between them are documented in
+  one place
+
 ## Version 1.4.3 - 2026-10-03
 
 - docs: the configuration, JSON API, man page, command-line and artwork
