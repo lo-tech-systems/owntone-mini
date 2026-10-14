@@ -1264,6 +1264,30 @@ quality_to_xcode(struct media_quality *quality)
   return XCODE_PCM16;
 }
 
+// Builds the context that converts audio of the input quality to the quality of
+// a subscription. The decoding context it needs only for the setup is made and
+// freed here. It touches nothing shared apart from the log and the settings, so
+// it can run on any thread, and the context it returns is used by one thread at
+// a time.
+static struct encode_ctx *
+encoding_ctx_build(struct media_quality *input_quality, struct media_quality *quality)
+{
+  struct transcode_encode_setup_args encode_args = { 0 };
+  struct encode_ctx *encode_ctx;
+
+  encode_args.src_ctx = transcode_decode_setup_raw(quality_to_xcode(input_quality), input_quality);
+  if (!encode_args.src_ctx)
+    return NULL;
+
+  encode_args.profile = quality_to_xcode(quality);
+  encode_args.quality = quality;
+  encode_ctx = transcode_encode_setup(encode_args);
+
+  transcode_decode_cleanup(&encode_args.src_ctx);
+
+  return encode_ctx;
+}
+
 // Creates the encoding (resampling) contexts for the subscriptions. With all
 // set, which is for a change of input quality, the existing contexts are first
 // destroyed and every subscription gets a new one. Otherwise only the
@@ -2600,6 +2624,47 @@ outputs_list(void)
   return outputs_device_list;
 }
 
+// *** Thread: worker ***
+// The first resampling context made after start-up is slower than later ones,
+// because the code and tables it uses are read in on first use. Builds and
+// frees one for the usual input quality and the usual receiver quality, so that
+// the cost is paid before anything plays. Touches nothing but the log and the
+// settings, and the contexts it makes are its own.
+static void
+resampler_warm_cb(void *arg)
+{
+  struct media_quality input_quality = { 0 };
+  struct media_quality quality = { 44100, 16, 2 };
+  struct encode_ctx *encode_ctx;
+  char name[32];
+  char name_out[32];
+  uint64_t start_ms;
+
+  input_quality.sample_rate = config_get_int("pipe_sample_rate", 44100);
+  input_quality.bits_per_sample = config_get_int("pipe_bits_per_sample", 16);
+  input_quality.channels = 2;
+
+  // Must still need the resampler
+  if (quality_is_equal(&input_quality, &quality))
+    quality.sample_rate = 48000;
+
+  snprintf(name, sizeof(name), "%d/%d/%d", input_quality.sample_rate, input_quality.bits_per_sample, input_quality.channels);
+  snprintf(name_out, sizeof(name_out), "%d/%d/%d", quality.sample_rate, quality.bits_per_sample, quality.channels);
+
+  start_ms = outputs_monotonic_ms();
+
+  encode_ctx = encoding_ctx_build(&input_quality, &quality);
+  if (!encode_ctx)
+    {
+      DPRINTF(E_DBG, L_PLAYER, "Resampler warm-up from '%s' to '%s' failed\n", name, name_out);
+      return;
+    }
+
+  transcode_encode_cleanup(&encode_ctx);
+
+  DPRINTF(E_INFO, L_PLAYER, "Resampler warm-up from '%s' to '%s' took %u ms on a worker\n", name, name_out, (unsigned int)(outputs_monotonic_ms() - start_ms));
+}
+
 int
 outputs_init(void)
 {
@@ -2653,6 +2718,10 @@ outputs_init(void)
 
   for (i = 0; i < ARRAY_SIZE(output_buffer.data); i++)
     output_buffer.data[i].evbuf = evbuffer_new();
+
+  // Not waited for, nothing depends on it. The worker pool exists already (it
+  // is started before the player), and ffmpeg is initialised in main().
+  worker_execute(resampler_warm_cb, NULL, 0, 0);
 
   return 0;
 }
