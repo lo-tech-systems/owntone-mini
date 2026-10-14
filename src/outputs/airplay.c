@@ -7730,11 +7730,18 @@ airplay_write(struct output_buffer *obuf)
 	      frame = next_frame;
 	    }
 
-	  if (airplay_encoder_failed(ams->encoder) && !ams->encoder_failure_handled)
+	  if (airplay_encoder_failed(ams->encoder))
 	    {
-	      ams->encoder_failure_handled = true;
+	      // The encoder makes its contexts on its own thread, so it can fail
+	      // while a session is still starting. This therefore runs on every
+	      // tick while it has failed: a session is ended once it is connected,
+	      // and a session that has been ended no longer matches below.
+	      if (!ams->encoder_failure_handled)
+		{
+		  ams->encoder_failure_handled = true;
 
-	      DPRINTF(E_LOG, L_AIRPLAY, "Buffered encoder (kind %d) failed, ending its sessions\n", ams->buffered_kind);
+		  DPRINTF(E_LOG, L_AIRPLAY, "Buffered encoder (kind %d) failed, ending its sessions\n", ams->buffered_kind);
+		}
 
 	      for (session = airplay_sessions; session; session = session->next)
 		{

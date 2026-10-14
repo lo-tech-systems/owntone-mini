@@ -37,9 +37,11 @@ struct airplay_encoded_frame
   struct airplay_encoded_frame *next;
 };
 
-// Creates the transcode context (on the calling thread, so failure is
-// synchronous) and spawns the encoder thread. quality is the ams input
-// quality (post quality-subscription). Returns 0 on success, -1 on error.
+// Spawns the encoder thread, which makes the transcode contexts itself so the
+// caller never waits for them. PCM written before they are ready queues. A
+// failure to make them is therefore not reported here but through
+// airplay_encoder_failed(). quality is the ams input quality (post
+// quality-subscription). Returns 0 on success, -1 on error.
 int
 airplay_encoder_start(struct airplay_encoder **enc, enum airplay_buffered_kind kind, struct media_quality *quality);
 

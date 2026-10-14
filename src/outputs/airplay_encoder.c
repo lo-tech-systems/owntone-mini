@@ -163,6 +163,49 @@ encoder_frame_list_free(struct airplay_encoded_frame *frame)
 
 /* --------------------------- Worker thread body -------------------------- */
 
+// Builds the contexts the encode loop runs on. Called on the encoder thread,
+// so the thread that started the encoder never waits for ffmpeg.
+static int
+encoder_contexts_open(struct airplay_encoder *enc)
+{
+  struct decode_ctx *src_ctx;
+  struct transcode_encode_setup_args encode_args = { 0 };
+  enum transcode_profile profile;
+  bool alac24 = (enc->kind == AIRPLAY_BUFFERED_KIND_ALAC24);
+
+  switch (enc->kind)
+    {
+      case AIRPLAY_BUFFERED_KIND_ALAC24:          profile = XCODE_ALAC48K_24_STEREO; break;
+      case AIRPLAY_BUFFERED_KIND_SURROUND_STEREO: profile = XCODE_AAC48K_51_STEREO;  break;
+      case AIRPLAY_BUFFERED_KIND_SURROUND_UPMIX:  profile = XCODE_AAC48K_51_DECODE;  break;
+      case AIRPLAY_BUFFERED_KIND_AAC_STEREO:      profile = XCODE_AAC48K_STEREO;     break;
+      case AIRPLAY_BUFFERED_KIND_AAC44_STEREO:    profile = XCODE_AAC44K_STEREO;     break;
+      case AIRPLAY_BUFFERED_KIND_NONE:
+      default:                                    profile = XCODE_ALAC;             break;
+    }
+
+  src_ctx = transcode_decode_setup_raw(alac24 ? XCODE_PCM32 : XCODE_PCM16, &enc->quality);
+  if (!src_ctx)
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "Encoder (kind %d): could not create decoding context\n", enc->kind);
+      return -1;
+    }
+
+  encode_args.profile = profile;
+  encode_args.quality = &enc->quality;
+  encode_args.src_ctx = src_ctx;
+
+  enc->encode_ctx = transcode_encode_setup(encode_args);
+  transcode_decode_cleanup(&src_ctx);
+  if (!enc->encode_ctx)
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "Encoder (kind %d): could not create encoding context\n", enc->kind);
+      return -1;
+    }
+
+  return 0;
+}
+
 static void *
 encoder_thread_run(void *arg)
 {
@@ -196,6 +239,27 @@ encoder_thread_run(void *arg)
   if (nice(10) == -1 && errno != 0)
     DPRINTF(E_DBG, L_AIRPLAY, "Could not lower encoder thread priority: %s\n", strerror(errno));
 #endif
+
+  // The contexts are made here rather than by the thread that started us, so
+  // that thread never waits for ffmpeg. PCM written in the meantime queues
+  // and is encoded a few milliseconds later; a buffered receiver is anchored
+  // seconds ahead, so nothing is lost.
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  if (encoder_contexts_open(enc) < 0)
+    {
+      // The owner finds out through airplay_encoder_failed(); until it stops
+      // us there is nothing to do
+      pthread_mutex_lock(&enc->lock);
+      enc->failed = true;
+      while (!enc->stop)
+        pthread_cond_wait(&enc->cond, &enc->lock);
+      pthread_mutex_unlock(&enc->lock);
+
+      return NULL;
+    }
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+
+  DPRINTF(E_INFO, L_AIRPLAY, "Encoder (kind %d): contexts ready after %u ms\n", enc->kind, (unsigned int)(timespec_diff_ns(&t0, &t1) / 1000000));
 
   pthread_mutex_lock(&enc->lock);
 
@@ -362,49 +426,11 @@ int
 airplay_encoder_start(struct airplay_encoder **enc_p, enum airplay_buffered_kind kind, struct media_quality *quality)
 {
   struct airplay_encoder *enc;
-  struct decode_ctx *src_ctx;
-  struct transcode_encode_setup_args encode_args = { 0 };
-  enum transcode_profile profile;
-  bool alac24 = (kind == AIRPLAY_BUFFERED_KIND_ALAC24);
   int ret;
-
-  switch (kind)
-    {
-      case AIRPLAY_BUFFERED_KIND_ALAC24:          profile = XCODE_ALAC48K_24_STEREO; break;
-      case AIRPLAY_BUFFERED_KIND_SURROUND_STEREO: profile = XCODE_AAC48K_51_STEREO;  break;
-      case AIRPLAY_BUFFERED_KIND_SURROUND_UPMIX:  profile = XCODE_AAC48K_51_DECODE;  break;
-      case AIRPLAY_BUFFERED_KIND_AAC_STEREO:      profile = XCODE_AAC48K_STEREO;     break;
-      case AIRPLAY_BUFFERED_KIND_AAC44_STEREO:    profile = XCODE_AAC44K_STEREO;     break;
-      case AIRPLAY_BUFFERED_KIND_NONE:
-      default:                                    profile = XCODE_ALAC;             break;
-    }
-
-  src_ctx = transcode_decode_setup_raw(alac24 ? XCODE_PCM32 : XCODE_PCM16, quality);
-  if (!src_ctx)
-    {
-      DPRINTF(E_LOG, L_AIRPLAY, "Encoder (kind %d): could not create decoding context\n", kind);
-      return -1;
-    }
-
-  encode_args.profile = profile;
-  encode_args.quality = quality;
-  encode_args.src_ctx = src_ctx;
 
   enc = calloc(1, sizeof(struct airplay_encoder));
   if (!enc)
-    {
-      transcode_decode_cleanup(&src_ctx);
-      return -1;
-    }
-
-  enc->encode_ctx = transcode_encode_setup(encode_args);
-  transcode_decode_cleanup(&src_ctx);
-  if (!enc->encode_ctx)
-    {
-      DPRINTF(E_LOG, L_AIRPLAY, "Encoder (kind %d): could not create encoding context\n", kind);
-      free(enc);
-      return -1;
-    }
+    return -1;
 
   enc->kind = kind;
   enc->quality = *quality;
@@ -415,7 +441,6 @@ airplay_encoder_start(struct airplay_encoder **enc_p, enum airplay_buffered_kind
   enc->pcm = evbuffer_new();
   if (!enc->rawbuf || !enc->encoded_buffer || !enc->pcm)
     {
-      transcode_encode_cleanup(&enc->encode_ctx);
       free(enc->rawbuf);
       if (enc->encoded_buffer)
         evbuffer_free(enc->encoded_buffer);
@@ -432,7 +457,6 @@ airplay_encoder_start(struct airplay_encoder **enc_p, enum airplay_buffered_kind
   if (ret != 0)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "Encoder (kind %d): could not spawn thread: %s\n", kind, strerror(ret));
-      transcode_encode_cleanup(&enc->encode_ctx);
       pthread_mutex_destroy(&enc->lock);
       pthread_cond_destroy(&enc->cond);
       free(enc->rawbuf);
