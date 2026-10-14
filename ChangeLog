@@ -25,6 +25,9 @@
 - improvement: audio to realtime AirPlay 2 and AirPlay 1 speakers is sent
   without ever waiting on a congested network; a packet that cannot be sent
   is dropped and resent if the speaker asks for it
+- improvement: a speaker that does not accept its audio connection no longer
+  holds up the other outputs, and a failed audio connection no longer
+  clears a stored pairing key
 - fix: a speaker whose encoder or sample-rate converter could not be built
   no longer stays connected but silent; the converter is retried
 - fix: shutdown can no longer hang waiting for background work

@@ -27,7 +27,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
-#include <fcntl.h>
+#include <time.h>
 #include <sys/socket.h>
 
 #include <event2/event.h>
@@ -70,9 +70,21 @@
 // buffered bitrate, ALAC24 ~290 KB/s, is well under 1 MiB).
 #define AIRPLAY_BUFFERED_MAX_QUEUE_BYTES (8 * 1024 * 1024)
 
+// The stream's connection, from the moment the connect is started. Writes are
+// only accepted while it is up; a failure anywhere (connect, write, backlog)
+// puts it down for good and the owner ends the session.
+enum airplay_buffered_link
+{
+  AIRPLAY_BUFFERED_LINK_CONNECTING = 0,
+  AIRPLAY_BUFFERED_LINK_UP,
+  AIRPLAY_BUFFERED_LINK_DOWN,
+};
+
 struct airplay_buffered_stream
 {
   int fd;
+  char *name;                 // The receiver, for the log lines
+  struct event *connectev;    // One shot: writable when the connect has an outcome, or the timeout
   struct event *writeev;
   struct event *readev;
   struct evbuffer *outbuf;
@@ -81,8 +93,24 @@ struct airplay_buffered_stream
   uint32_t format_id;
   uint64_t nonce_counter;
 
-  bool failed;
+  enum airplay_buffered_link link;
+  uint64_t connect_start_ms;
+
+  // Told once, when the connect has an outcome. May free the stream.
+  airplay_buffered_connect_cb connect_cb;
+  void *connect_cb_arg;
 };
+
+
+// Milliseconds on a monotonic clock
+static uint64_t
+monotonic_ms(void)
+{
+  struct timespec ts;
+
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 
 /* --------------------------- Framing/queueing -------------------------- */
@@ -180,7 +208,7 @@ write_cb(int fd, short what, void *arg)
 	}
 
       DPRINTF(E_LOG, L_AIRPLAY, "Write error on AirPlay buffered audio socket: %s\n", strerror(errno));
-      bs->failed = true;
+      bs->link = AIRPLAY_BUFFERED_LINK_DOWN;
       return;
     }
 
@@ -237,12 +265,47 @@ read_cb(int fd, short what, void *arg)
 
 /* ------------------------------- Interface ------------------------------- */
 
+// The connect has an outcome: the socket became writable, or the wait ran out.
+// Reads SO_ERROR to tell success from failure, brings the link up or down, and
+// tells the owner last of all, since the owner may free the stream from the
+// callback.
+static void
+connect_event_cb(int fd, short what, void *arg)
+{
+  struct airplay_buffered_stream *bs = arg;
+  airplay_buffered_connect_cb cb = bs->connect_cb;
+  void *cb_arg = bs->connect_cb_arg;
+  socklen_t len = sizeof(int);
+  int error = 0;
+
+  if (what & EV_TIMEOUT)
+    DPRINTF(E_LOG, L_AIRPLAY, "Buffered data connection to '%s' not accepted within %d ms\n", bs->name, NET_CONNECT_TIMEOUT_MS);
+  else if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error)
+    DPRINTF(E_LOG, L_AIRPLAY, "Buffered data connection to '%s' failed: %s\n", bs->name, strerror(error ? error : errno));
+  else
+    {
+      bs->link = AIRPLAY_BUFFERED_LINK_UP;
+
+      // Persistent read event, always armed once the link is up, so any
+      // unsolicited data the receiver writes back on this socket is logged
+      // rather than left to pile up unread (see read_cb() above)
+      event_add(bs->readev, NULL);
+      DPRINTF(E_DBG, L_AIRPLAY, "Buffered socket read monitoring armed (fd %d)\n", fd);
+      DPRINTF(E_INFO, L_AIRPLAY, "Buffered data connection to '%s' established in %u ms (fd %d)\n", bs->name, (unsigned int)(monotonic_ms() - bs->connect_start_ms), fd);
+      cb(cb_arg, true);
+      return;
+    }
+
+  bs->link = AIRPLAY_BUFFERED_LINK_DOWN;
+  cb(cb_arg, false);
+}
+
 int
-airplay_buffered_start(struct airplay_buffered_stream **bs, struct event_base *evbase, const char *address, unsigned short data_port, const uint8_t *shk, size_t shk_len, uint32_t format_id)
+airplay_buffered_start(struct airplay_buffered_stream **bs, struct event_base *evbase, const char *name, const char *address, unsigned short data_port, const uint8_t *shk, size_t shk_len, uint32_t format_id, airplay_buffered_connect_cb connect_cb, void *connect_cb_arg)
 {
   struct airplay_buffered_stream *stream;
+  struct timeval tv = { NET_CONNECT_TIMEOUT_MS / 1000, (NET_CONNECT_TIMEOUT_MS % 1000) * 1000 };
   int fd;
-  int flags;
 
   if (shk_len < AIRPLAY_BUFFERED_KEY_LEN)
     {
@@ -250,25 +313,21 @@ airplay_buffered_start(struct airplay_buffered_stream **bs, struct event_base *e
       return -1;
     }
 
-  fd = net_connect(address, data_port, SOCK_STREAM, "AirPlay data");
+  // Returns at once, with the socket nonblocking and the connect in progress
+  fd = net_connect_start(address, data_port, "AirPlay data");
   if (fd < 0)
     return -1;
-
-  // net_connect() leaves the socket blocking; the write path below must
-  // never block the caller, so switch to nonblocking after connect (same
-  // approach as the poll-based connect in net_connect_addrinfo() itself)
-  flags = fcntl(fd, F_GETFL, 0);
-  if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
-    {
-      DPRINTF(E_LOG, L_AIRPLAY, "Could not set AirPlay buffered audio socket nonblocking: %s\n", strerror(errno));
-      close(fd);
-      return -1;
-    }
 
   CHECK_NULL(L_AIRPLAY, stream = calloc(1, sizeof(struct airplay_buffered_stream)));
 
   stream->fd = fd;
   stream->format_id = format_id;
+  stream->link = AIRPLAY_BUFFERED_LINK_CONNECTING;
+  stream->connect_start_ms = monotonic_ms();
+  stream->connect_cb = connect_cb;
+  stream->connect_cb_arg = connect_cb_arg;
+
+  CHECK_NULL(L_AIRPLAY, stream->name = strdup(name));
 
   stream->cipher_hd = airplay_crypto_open(shk, AIRPLAY_BUFFERED_KEY_LEN);
   if (!stream->cipher_hd)
@@ -286,9 +345,7 @@ airplay_buffered_start(struct airplay_buffered_stream **bs, struct event_base *e
       goto error;
     }
 
-  // Persistent read event, always armed, so any unsolicited data the
-  // receiver writes back on this socket is logged rather than left to pile
-  // up unread (see read_cb() above)
+  // Armed when the link comes up, see connect_event_cb()
   stream->readev = event_new(evbase, fd, EV_READ | EV_PERSIST, read_cb, stream);
   if (!stream->readev)
     {
@@ -296,13 +353,23 @@ airplay_buffered_start(struct airplay_buffered_stream **bs, struct event_base *e
       goto error;
     }
 
-  event_add(stream->readev, NULL);
-  DPRINTF(E_DBG, L_AIRPLAY, "Buffered socket read monitoring armed (fd %d)\n", fd);
+  // A socket whose connect() already succeeded is writable at once, so it is
+  // reported on the next pass of the event loop, like any other outcome
+  stream->connectev = event_new(evbase, fd, EV_WRITE, connect_event_cb, stream);
+  if (!stream->connectev || event_add(stream->connectev, &tv) < 0)
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "Could not create AirPlay buffered audio connect event\n");
+      goto error;
+    }
+
+  DPRINTF(E_DBG, L_AIRPLAY, "Buffered data connection to '%s' started (fd %d)\n", name, fd);
 
   *bs = stream;
   return 0;
 
  error:
+  if (stream->connectev)
+    event_free(stream->connectev);
   if (stream->readev)
     event_free(stream->readev);
   if (stream->writeev)
@@ -310,6 +377,7 @@ airplay_buffered_start(struct airplay_buffered_stream **bs, struct event_base *e
   if (stream->outbuf)
     evbuffer_free(stream->outbuf);
   airplay_crypto_close(stream->cipher_hd);
+  free(stream->name);
   free(stream);
   close(fd);
 
@@ -321,7 +389,7 @@ airplay_buffered_write(struct airplay_buffered_stream *bs, const uint8_t *frame,
 {
   int ret;
 
-  if (!bs || bs->failed)
+  if (!bs || bs->link != AIRPLAY_BUFFERED_LINK_UP)
     return -1;
 
   // Receiver has stopped draining the socket and the backlog has run away:
@@ -331,14 +399,14 @@ airplay_buffered_write(struct airplay_buffered_stream *bs, const uint8_t *frame,
     {
       DPRINTF(E_LOG, L_AIRPLAY, "AirPlay buffered send backlog %zu bytes exceeds cap %d; receiver not draining, failing session\n",
 	      evbuffer_get_length(bs->outbuf), AIRPLAY_BUFFERED_MAX_QUEUE_BYTES);
-      bs->failed = true;
+      bs->link = AIRPLAY_BUFFERED_LINK_DOWN;
       return -1;
     }
 
   ret = frame_encrypt_and_queue(bs, frame, len, seqnum, rtptime, marker);
   if (ret < 0)
     {
-      bs->failed = true;
+      bs->link = AIRPLAY_BUFFERED_LINK_DOWN;
       return -1;
     }
 
@@ -363,7 +431,11 @@ airplay_buffered_stop(struct airplay_buffered_stream *bs)
     return;
 
   // Free the event before closing the fd it references to avoid a
-  // use-after-free/UB window if the event loop is still iterating
+  // use-after-free/UB window if the event loop is still iterating. The
+  // connect event goes first, so that its callback cannot run once the
+  // owner has begun to free the stream.
+  if (bs->connectev)
+    event_free(bs->connectev);
   if (bs->writeev)
     event_free(bs->writeev);
   if (bs->readev)
@@ -377,5 +449,6 @@ airplay_buffered_stop(struct airplay_buffered_stream *bs)
   if (bs->fd >= 0)
     close(bs->fd);
 
+  free(bs->name);
   free(bs);
 }

@@ -309,8 +309,9 @@ enum airplay_state {
 
 enum airplay_seq_type
 {
-  // Returned by a response handler that has handed work to another thread. The
-  // sequence is parked on the session until sequence_resume() is called.
+  // Returned by a response handler that has handed work to another thread, or
+  // is waiting for an event. The sequence is parked on the session until
+  // sequence_resume() is called.
   AIRPLAY_SEQ_SUSPEND = -2,
   AIRPLAY_SEQ_ABORT = -1,
   AIRPLAY_SEQ_START,
@@ -4912,6 +4913,26 @@ start_failure(struct airplay_session *session)
   session_failure(session);
 }
 
+// The data connection the receiver offered in its SETUP answer has an outcome.
+// The start sequence was parked waiting for it; it goes on to the next request,
+// or ends the way a failed SETUP ends it. A data port that does not answer is
+// not an authentication failure, so the pairing keys are kept.
+static void
+buffered_connect_cb(void *arg, bool connected)
+{
+  struct airplay_session *session = arg;
+
+  if (connected)
+    {
+      sequence_resume(session, true);
+      return;
+    }
+
+  DPRINTF(E_LOG, L_AIRPLAY, "Could not connect to the data port of '%s', ending the session\n", session->devname);
+  session->protocol_error = true;
+  sequence_resume(session, false); // May free the session, no use of it after this
+}
+
 // Context for a scheduled soft-start/probe retry. The session that failed has
 // already been torn down, so the retry is keyed by device id and the pending
 // player callback id, and carries the attempt counter forward to keep the
@@ -5090,7 +5111,6 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
   plist_t stream_connection_rtp;
   plist_t item;
   uint64_t uintval;
-  uint64_t start_ms;
   int flags;
   int sndbuf;
   int ret;
@@ -5173,16 +5193,25 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
 
       DPRINTF(E_DBG, L_AIRPLAY, "Negotiated buffered streaming session; ports d=%u c=%u e=%u\n", session->buffered_data_port, session->control_port, session->events_port);
 
-      start_ms = monotonic_ms();
-
-      ret = airplay_buffered_start(&session->buffered, evbase_player, session->address, session->buffered_data_port,
-                                    session->shared_secret, session->shared_secret_len, session->buffered_format_id << 24);
-      outputs_step_time_log(L_AIRPLAY, "Data connect", session->devname, start_ms);
+      // The data connection is made on the event loop, and the start waits
+      // for it there: the next request leaves once the receiver has accepted
+      // the connection, as it always has, and nothing here waits for the
+      // receiver.
+      ret = airplay_buffered_start(&session->buffered, evbase_player, session->devname, session->address, session->buffered_data_port,
+                                    session->shared_secret, session->shared_secret_len, session->buffered_format_id << 24,
+                                    buffered_connect_cb, session);
       if (ret < 0)
 	{
-	  DPRINTF(E_LOG, L_AIRPLAY, "Could not start buffered AirPlay stream to '%s'\n", session->devname);
+	  // The receiver answered, our socket did not; the keys are fine
+	  session->protocol_error = true;
+	  DPRINTF(E_LOG, L_AIRPLAY, "Could not start the data connection to '%s'\n", session->devname);
 	  goto error;
 	}
+
+      session->state = AIRPLAY_STATE_SETUP;
+
+      plist_free(response);
+      return AIRPLAY_SEQ_SUSPEND;
     }
   else
     {
@@ -6692,8 +6721,9 @@ sequence_continue_cb(struct evrtsp_request *req, void *arg)
 	{
 	  if (seq_type == AIRPLAY_SEQ_SUSPEND)
 	    {
-	      // The handler has handed work to another thread and will have the
-	      // sequence resumed with sequence_resume(). Treat the pause like a
+	      // The handler has handed work to another thread, or is waiting for
+	      // an event, and will have the sequence resumed with
+	      // sequence_resume(). Treat the pause like a
 	      // request in flight: errors on the connection surface when the
 	      // next request is sent, as they do today for a queued request.
 	      if (session->suspended_seq_ctx)
