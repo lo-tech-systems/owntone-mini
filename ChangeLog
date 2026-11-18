@@ -216,6 +216,11 @@
   player reading paused with nothing to play
 - fix: a configuration reload that changed the pipe no longer makes the
   player wait for the pipe thread
+- fix: a log message longer than 2 KB is no longer cut short. A receiver's
+  `GET /info` reply at debug level, which runs to several KB, is logged whole
+  (up to 16 KB), its model and OS version included
+- fix: background work scheduled for later and still waiting at shutdown is
+  freed, so a leak checker no longer reports it
 
 ## Version 1.5.0 - 2026-10-14
 
