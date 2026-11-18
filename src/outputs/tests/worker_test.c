@@ -312,6 +312,36 @@ test_pairing_runs_while_workers_are_held(void)
   case_end();
 }
 
+static int delayed_ran;
+
+static void
+delayed_cb(void *arg)
+{
+  pthread_mutex_lock(&lock);
+  delayed_ran++;
+  pthread_mutex_unlock(&lock);
+}
+
+// A delayed task still waiting when the pools stop is let go with its timer
+// and its argument (a leak checker sees any left over) and never runs
+static void
+test_a_delayed_task_waiting_at_shutdown_is_let_go(void)
+{
+  struct job_arg ja = { .n = 1 };
+  struct timespec settle = { 0, 200 * 1000 * 1000 };
+
+  case_begin("a_delayed_task_waiting_at_shutdown_is_let_go");
+
+  CHECK(worker_execute(delayed_cb, &ja, sizeof(ja), 3600) == 0);
+  nanosleep(&settle, NULL); // The worker arms the task's timer
+
+  worker_deinit();
+
+  CHECK(delayed_ran == 0);
+
+  case_end();
+}
+
 static void
 test_nothing_is_taken_without_the_pools(void)
 {
@@ -340,8 +370,8 @@ main(int argc, char *argv[])
   test_argument_is_copied();
   test_general_pool_keeps_its_name();
   test_pairing_runs_while_workers_are_held();
+  test_a_delayed_task_waiting_at_shutdown_is_let_go();
 
-  worker_deinit();
   worker_deinit(); // A second call finds nothing to stop
 
   test_nothing_is_taken_without_the_pools();

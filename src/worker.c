@@ -66,19 +66,32 @@ struct worker_arg
   void *cb_arg;
   int delay;
   struct event *timer;
+  LIST_ENTRY(worker_arg) next;
 };
 
+// The delayed tasks waiting on this thread's timers, let go when the thread
+// stops so a task still waiting at shutdown is not lost with its timer
+static __thread LIST_HEAD(worker_delayed, worker_arg) worker_delayed;
+
+static void
+worker_arg_free(struct worker_arg *cmdarg)
+{
+  if (cmdarg->timer)
+    event_free(cmdarg->timer);
+  free(cmdarg->cb_arg);
+  free(cmdarg);
+}
 
 static void
 execute_cb(int fd, short what, void *arg)
 {
   struct worker_arg *cmdarg = arg;
 
+  LIST_REMOVE(cmdarg, next);
+
   cmdarg->cb(cmdarg->cb_arg);
 
-  event_free(cmdarg->timer);
-  free(cmdarg->cb_arg);
-  free(cmdarg);
+  worker_arg_free(cmdarg);
 }
 
 static void
@@ -92,13 +105,13 @@ execute(struct evthr *thr, void *arg, void *shared)
     {
       evbase = evthr_get_base(thr);
       cmdarg->timer = evtimer_new(evbase, execute_cb, cmdarg);
+      LIST_INSERT_HEAD(&worker_delayed, cmdarg, next);
       evtimer_add(cmdarg->timer, &tv);
       return;
     }
 
   cmdarg->cb(cmdarg->cb_arg);
-  free(cmdarg->cb_arg);
-  free(cmdarg);
+  worker_arg_free(cmdarg);
 }
 
 // The pool's shared argument is the thread name, NULL for the general pool
@@ -125,9 +138,18 @@ init_cb(struct evthr *thr, void *shared)
 #endif
 }
 
+// Runs on the thread once its loop has ended, before its event base is freed
 static void
 exit_cb(struct evthr *thr, void *shared)
 {
+  struct worker_arg *cmdarg;
+
+  while ((cmdarg = LIST_FIRST(&worker_delayed)))
+    {
+      LIST_REMOVE(cmdarg, next);
+      worker_arg_free(cmdarg);
+    }
+
   worker_thr = NULL;
 }
 
