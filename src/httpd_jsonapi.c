@@ -493,10 +493,12 @@ jsonapi_reply_config(struct httpd_request *hreq)
   // The API features this build has, by name: "mute" means PUT
   // /api/outputs/{id} takes muted and the output rows carry it;
   // "async_outputs" means speaker writes answer without waiting for the
-  // speaker, whose outcome follows as its state
+  // speaker, whose outcome follows as its state; "output_state" means the
+  // event channel sends every speaker transition as an output_state event
   CHECK_NULL(L_WEB, japi_features = json_object_new_array());
   json_object_array_add(japi_features, json_object_new_string("mute"));
   json_object_array_add(japi_features, json_object_new_string("async_outputs"));
+  json_object_array_add(japi_features, json_object_new_string("output_state"));
   json_object_object_add(jreply, "api_features", japi_features);
 
   CHECK_ERRNO(L_WEB, evbuffer_add_printf(hreq->out_body, "%s", json_object_to_json_string(jreply)));

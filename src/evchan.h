@@ -85,4 +85,12 @@ evchan_event_receiver_command(uint64_t speaker_id, uint64_t member_id, const cha
 int
 evchan_event_device_volume(uint64_t speaker_id, uint64_t member_id, const char *name, const char *verb, const char *value);
 
+// Player thread. A speaker's transition: a phase change, or a change of its
+// selection, PIN state, hold or mute. speaker_id is the output row, member_id
+// the device that moved; st holds the row's values (state, reason and the
+// flags, as GET /api/outputs gives them now) and the moved device's own phase
+// and reason. st's strings must be static; the struct is copied.
+int
+evchan_event_output_state(uint64_t speaker_id, uint64_t member_id, const char *name, const struct evchan_output_state *st);
+
 #endif /* !__EVCHAN_H__ */

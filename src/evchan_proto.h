@@ -46,12 +46,30 @@ enum evchan_proto_cap
   EVCHAN_CAP_INCLUDE_TV       = (1 << 3),
   EVCHAN_CAP_START_VOLUME     = (1 << 4),
   EVCHAN_CAP_MUTE             = (1 << 5),
+  EVCHAN_CAP_OUTPUT_STATE     = (1 << 6),
 };
 
 enum evchan_proto_event_kind
 {
   EVCHAN_EVENT_RECEIVER_COMMAND,
   EVCHAN_EVENT_DEVICE_VOLUME,
+  EVCHAN_EVENT_OUTPUT_STATE,
+};
+
+// The values of one output_state event. The strings are static names (the
+// phase and failure names), so the struct is copied as it is
+struct evchan_output_state
+{
+  const char *state;
+  const char *reason;
+  const char *member_state;
+  const char *member_reason;
+  bool selected;
+  bool held;
+  bool holdable;
+  bool muted;
+  int volume;
+  bool pin_pending;
 };
 
 enum evchan_proto_msg_type
@@ -92,6 +110,12 @@ evchan_proto_changed_json(uint64_t seq);
 char *
 evchan_proto_event_json(uint64_t seq, enum evchan_proto_event_kind kind, const char *verb, const char *value, const char *protocol,
                         const char *speaker_id, const char *member_id, const char *speaker_name, uint64_t at_ms);
+
+// A speaker's transition: speaker_id is the output row, member_id the device
+// that moved (the same when it has its own row), speaker_name may be NULL
+char *
+evchan_proto_output_state_json(uint64_t seq, const char *speaker_id, const char *member_id, const char *speaker_name,
+                               const struct evchan_output_state *st, uint64_t at_ms);
 
 char *
 evchan_proto_pong_json(uint64_t seq, const char *t_json);

@@ -1981,11 +1981,43 @@ handle_flush(struct output_device *device, enum output_device_state status, int 
   return retval;
 }
 
+static void
+device_to_speaker_info(struct player_speaker_info *spk, struct output_device *device, uint32_t index);
+
 // Clients are told of a change to a device: its phase, its selection, its
-// PIN state, its hold or its mute
+// PIN state, its hold or its mute. The event carries the device's row as GET
+// /api/outputs would give it at this instant, built here on the player
+// thread, so an event and a read in the same turn agree; the moved device's
+// own phase and reason go with it
 static void
 speaker_announce(struct output_device *device)
 {
+  struct player_speaker_info *info;
+  struct evchan_output_state st;
+  struct output_device *row;
+
+  if (evchan_enabled())
+    {
+      CHECK_NULL(L_PLAYER, info = malloc(sizeof(*info)));
+
+      row = outputs_device_row(device);
+      device_to_speaker_info(info, row, 0);
+
+      st.state = output_phase_name(info->phase);
+      st.reason = output_failure_name(info->last_failure);
+      st.member_state = output_phase_name(device->phase);
+      st.member_reason = output_failure_name(device->last_failure);
+      st.selected = info->selected;
+      st.held = info->held;
+      st.holdable = info->holdable;
+      st.muted = info->muted;
+      st.volume = info->absvol;
+      st.pin_pending = info->pin_pending;
+
+      evchan_event_output_state(row->id, device->id, info->name, &st);
+      free(info);
+    }
+
   status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
 }
 
@@ -2243,7 +2275,10 @@ speaker_member_returned(void *arg, int *retval)
 	continue;
 
       if (outputs_device_hold_set(cur, false, "a member came back", device_level_edge_cb) == 0)
-	ended++;
+	{
+	  speaker_announce(cur);
+	  ended++;
+	}
     }
 
   if (ended)
@@ -3668,6 +3703,21 @@ speaker_group_select(struct output_device *device, int max_volume)
     }
 }
 
+// Mutes one device or ends its mute; a change is announced. 1 when accepted
+static int
+speaker_mute_one(struct output_device *device, bool muted)
+{
+  bool before = device->muted;
+
+  if (outputs_device_mute_set(device, muted, device_level_edge_cb) != 0)
+    return 0;
+
+  if (device->muted != before)
+    speaker_announce(device);
+
+  return 1;
+}
+
 // Mutes the device and every member of its group, or ends their mute, with or
 // without a session: the flag outlives a session. Returns how many changed.
 static int
@@ -3679,14 +3729,14 @@ speaker_group_mute_set(struct output_device *device, bool muted)
 
   group_id = outputs_device_group_id(device);
   if (!group_id)
-    return (outputs_device_mute_set(device, muted, device_level_edge_cb) == 0) ? 1 : 0;
+    return speaker_mute_one(device, muted);
 
   for (cur = outputs_list(); cur; cur = cur->next)
     {
       const char *cur_gid = outputs_device_group_id(cur);
 
-      if (cur_gid && strcmp(cur_gid, group_id) == 0 && outputs_device_mute_set(cur, muted, device_level_edge_cb) == 0)
-	n++;
+      if (cur_gid && strcmp(cur_gid, group_id) == 0)
+	n += speaker_mute_one(cur, muted);
     }
 
   return n;
@@ -4223,6 +4273,21 @@ speaker_offset_ms_set(void *arg, int *retval)
   return COMMAND_END;
 }
 
+// Holds one device or ends its hold; a change is announced. 1 when accepted
+static int
+speaker_hold_one(struct output_device *device, bool held)
+{
+  bool before = device->held;
+
+  if (outputs_device_hold_set(device, held, "by request", device_level_edge_cb) != 0)
+    return 0;
+
+  if (device->held != before)
+    speaker_announce(device);
+
+  return 1;
+}
+
 // Holds the speakers of a row, or ends their hold: the device and, for a group
 // (a stereo pair, an Apple TV and its HomePods), every member with a session,
 // so the members stop and restart together. -1 for an unknown device, -2 when
@@ -4245,10 +4310,7 @@ speaker_hold_set(void *arg, int *retval)
 
   group_id = outputs_device_group_id(device);
   if (!group_id)
-    {
-      if (outputs_device_hold_set(device, param->held, "by request", device_level_edge_cb) == 0)
-	accepted++;
-    }
+    accepted += speaker_hold_one(device, param->held);
   else
     {
       for (cur = outputs_list(); cur; cur = cur->next)
@@ -4258,8 +4320,7 @@ speaker_hold_set(void *arg, int *retval)
 	  if (!cur_gid || strcmp(cur_gid, group_id) != 0 || !cur->session)
 	    continue;
 
-	  if (outputs_device_hold_set(cur, param->held, "by request", device_level_edge_cb) == 0)
-	    accepted++;
+	  accepted += speaker_hold_one(cur, param->held);
 	}
     }
 

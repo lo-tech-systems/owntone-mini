@@ -68,7 +68,8 @@
 #define EVCHAN_PWBUF_SIZE       4096
 
 // What this build can report. Grows as the kinds of message are implemented.
-#define EVCHAN_CAPS             (EVCHAN_CAP_CHANGED | EVCHAN_CAP_RECEIVER_COMMAND | EVCHAN_CAP_DEVICE_VOLUME | EVCHAN_CAP_INCLUDE_TV | EVCHAN_CAP_START_VOLUME | EVCHAN_CAP_MUTE)
+#define EVCHAN_CAPS             (EVCHAN_CAP_CHANGED | EVCHAN_CAP_RECEIVER_COMMAND | EVCHAN_CAP_DEVICE_VOLUME | EVCHAN_CAP_INCLUDE_TV | EVCHAN_CAP_START_VOLUME | EVCHAN_CAP_MUTE \
+                                 | EVCHAN_CAP_OUTPUT_STATE)
 
 struct evchan_conn
 {
@@ -96,6 +97,9 @@ struct event_args
   char *verb;
   char *value;
   char *protocol;
+  // An output_state event's values, copied as they are (its strings are
+  // static names)
+  struct evchan_output_state output_state;
   uint64_t at_ms;
 };
 
@@ -562,13 +566,17 @@ event_exec(void *arg, int *retval)
       if (!c->hello_seen || c->closing)
 	continue;
 
-      json = evchan_proto_event_json(c->seq + 1, args->kind, args->verb, args->value, args->protocol, id, member, args->name, args->at_ms);
+      if (args->kind == EVCHAN_EVENT_OUTPUT_STATE)
+	json = evchan_proto_output_state_json(c->seq + 1, id, member, args->name, &args->output_state, args->at_ms);
+      else
+	json = evchan_proto_event_json(c->seq + 1, args->kind, args->verb, args->value, args->protocol, id, member, args->name, args->at_ms);
       if (conn_send(c, json) == 0)
 	sent = true;
     }
 
+  // Speaker transitions are many and need no one to hear them
   if (!sent)
-    DPRINTF(E_INFO, L_EVCHAN, "Event dropped, no client connected (%s)\n", args->verb);
+    DPRINTF((args->kind == EVCHAN_EVENT_OUTPUT_STATE) ? E_DBG : E_INFO, L_EVCHAN, "Event dropped, no client connected (%s)\n", args->verb);
 
   free(args->name);
   free(args->verb);
@@ -742,7 +750,7 @@ listener_cb(short event_mask, void *ctx)
 
 static int
 event_post(enum evchan_proto_event_kind kind, uint64_t speaker_id, uint64_t member_id, const char *name, const char *verb, const char *value,
-           const char *protocol)
+           const char *protocol, const struct evchan_output_state *output_state)
 {
   struct event_args *args;
 
@@ -751,6 +759,8 @@ event_post(enum evchan_proto_event_kind kind, uint64_t speaker_id, uint64_t memb
 
   CHECK_NULL(L_EVCHAN, args = calloc(1, sizeof(*args)));
   args->kind = kind;
+  if (output_state)
+    args->output_state = *output_state;
   args->speaker_id = speaker_id;
   args->member_id = member_id;
   args->name = name ? strdup(name) : NULL;
@@ -775,13 +785,19 @@ event_post(enum evchan_proto_event_kind kind, uint64_t speaker_id, uint64_t memb
 int
 evchan_event_receiver_command(uint64_t speaker_id, uint64_t member_id, const char *name, const char *verb, const char *protocol)
 {
-  return event_post(EVCHAN_EVENT_RECEIVER_COMMAND, speaker_id, member_id, name, verb, NULL, protocol);
+  return event_post(EVCHAN_EVENT_RECEIVER_COMMAND, speaker_id, member_id, name, verb, NULL, protocol, NULL);
 }
 
 int
 evchan_event_device_volume(uint64_t speaker_id, uint64_t member_id, const char *name, const char *verb, const char *value)
 {
-  return event_post(EVCHAN_EVENT_DEVICE_VOLUME, speaker_id, member_id, name, verb, value, NULL);
+  return event_post(EVCHAN_EVENT_DEVICE_VOLUME, speaker_id, member_id, name, verb, value, NULL, NULL);
+}
+
+int
+evchan_event_output_state(uint64_t speaker_id, uint64_t member_id, const char *name, const struct evchan_output_state *st)
+{
+  return event_post(EVCHAN_EVENT_OUTPUT_STATE, speaker_id, member_id, name, "output_state", NULL, NULL, st);
 }
 
 bool

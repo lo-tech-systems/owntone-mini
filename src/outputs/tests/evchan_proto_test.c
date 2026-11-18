@@ -146,7 +146,8 @@ array_len(json_object *obj, const char *key)
 
 /* ------------------------------ Server messages --------------------------- */
 
-#define ALL_CAPS (EVCHAN_CAP_CHANGED | EVCHAN_CAP_RECEIVER_COMMAND | EVCHAN_CAP_DEVICE_VOLUME | EVCHAN_CAP_INCLUDE_TV | EVCHAN_CAP_START_VOLUME | EVCHAN_CAP_MUTE)
+#define ALL_CAPS (EVCHAN_CAP_CHANGED | EVCHAN_CAP_RECEIVER_COMMAND | EVCHAN_CAP_DEVICE_VOLUME | EVCHAN_CAP_INCLUDE_TV | EVCHAN_CAP_START_VOLUME | EVCHAN_CAP_MUTE \
+                  | EVCHAN_CAP_OUTPUT_STATE)
 
 static void
 hello_has_protocol_and_all_capabilities(void)
@@ -161,14 +162,16 @@ hello_has_protocol_and_all_capabilities(void)
   CHECK(str_is(obj, "version", "1.6.0"));
   CHECK(str_is(obj, "boot", "3f9a1c2e77b04d15"));
   CHECK(int_is(obj, "uptime_ms", 1843));
-  CHECK(array_len(obj, "capabilities") == 6);
+  CHECK(array_len(obj, "capabilities") == 7);
   CHECK(array_has(obj, "capabilities", "changed"));
   CHECK(array_has(obj, "capabilities", "receiver_command"));
   CHECK(array_has(obj, "capabilities", "device_volume"));
   CHECK(array_has(obj, "capabilities", "include_tv"));
   CHECK(array_has(obj, "capabilities", "start_volume"));
   CHECK(array_has(obj, "capabilities", "mute"));
+  CHECK(array_has(obj, "capabilities", "output_state"));
   CHECK(strcmp(json_object_get_string(json_object_array_get_idx(member(obj, "capabilities"), 5)), "mute") == 0);
+  CHECK(strcmp(json_object_get_string(json_object_array_get_idx(member(obj, "capabilities"), 6)), "output_state") == 0);
   CHECK(int_is(obj, "ping_interval_ms", 10000));
   CHECK(int_is(obj, "idle_close_ms", 30000));
   CHECK(int_is(obj, "max_line", 4096));
@@ -190,6 +193,73 @@ hello_lists_only_the_capabilities_given(void)
   obj = parse_owned(evchan_proto_hello_json(1, "1.6.0", "0011223344556677", 0, 0));
   CHECK(array_len(obj, "capabilities") == 0);
   CHECK(member(obj, "capabilities") != NULL);
+  json_object_put(obj);
+  case_end();
+}
+
+// The members of an output_state event, in the order the contract gives them
+static void
+output_state_json(void)
+{
+  static const char *order[] = { "type", "seq", "kind", "speaker", "state", "reason", "member_state", "member_reason",
+                                 "selected", "held", "holdable", "muted", "volume", "pin_pending", "at_ms" };
+  struct evchan_output_state st = { "streaming", "none", "connecting", "none", true, false, true, false, 42, false };
+  struct evchan_output_state st2 = { "password", "pin_invalid", "password", "pin_invalid", false, true, false, true, 0, true };
+  json_object *obj;
+  json_object *speaker;
+  char longname[256];
+  size_t i;
+  int n;
+
+  case_begin("output_state_json");
+  obj = parse_owned(evchan_proto_output_state_json(118, "74291837465512", "74291837465513", "Speaker B (Stereo)", &st, 5532104));
+  CHECK(str_is(obj, "type", "event"));
+  CHECK(int_is(obj, "seq", 118));
+  CHECK(str_is(obj, "kind", "output_state"));
+  speaker = member(obj, "speaker");
+  CHECK(speaker && str_is(speaker, "id", "74291837465512"));
+  CHECK(speaker && str_is(speaker, "member_id", "74291837465513"));
+  CHECK(speaker && str_is(speaker, "name", "Speaker B (Stereo)"));
+  CHECK(str_is(obj, "state", "streaming"));
+  CHECK(str_is(obj, "reason", "none"));
+  CHECK(str_is(obj, "member_state", "connecting"));
+  CHECK(str_is(obj, "member_reason", "none"));
+  CHECK(member(obj, "selected") && json_object_get_boolean(member(obj, "selected")));
+  CHECK(member(obj, "held") && !json_object_get_boolean(member(obj, "held")));
+  CHECK(member(obj, "holdable") && json_object_get_boolean(member(obj, "holdable")));
+  CHECK(member(obj, "muted") && !json_object_get_boolean(member(obj, "muted")));
+  CHECK(int_is(obj, "volume", 42));
+  CHECK(member(obj, "pin_pending") && !json_object_get_boolean(member(obj, "pin_pending")));
+  CHECK(int_is(obj, "at_ms", 5532104));
+
+  // Member order as written
+  n = 0;
+  json_object_object_foreach(obj, key, val)
+    {
+      (void)val;
+      CHECK(n < (int)(sizeof(order) / sizeof(order[0])) && strcmp(key, order[n]) == 0);
+      n++;
+    }
+  CHECK(n == (int)(sizeof(order) / sizeof(order[0])));
+  json_object_put(obj);
+
+  // The flags the other way, a null name
+  obj = parse_owned(evchan_proto_output_state_json(119, "1", "2", NULL, &st2, 7));
+  speaker = member(obj, "speaker");
+  CHECK(speaker && json_object_object_get_ex(speaker, "name", NULL) && member(speaker, "name") == NULL);
+  CHECK(str_is(obj, "reason", "pin_invalid"));
+  CHECK(json_object_get_boolean(member(obj, "held")) && json_object_get_boolean(member(obj, "muted")));
+  CHECK(json_object_get_boolean(member(obj, "pin_pending")) && !json_object_get_boolean(member(obj, "selected")));
+  CHECK(int_is(obj, "volume", 0));
+  json_object_put(obj);
+
+  // A name of 255 bytes is sent whole
+  for (i = 0; i < sizeof(longname) - 1; i++)
+    longname[i] = 'a' + (i % 26);
+  longname[sizeof(longname) - 1] = '\0';
+  obj = parse_owned(evchan_proto_output_state_json(120, "1", "1", longname, &st, 8));
+  speaker = member(obj, "speaker");
+  CHECK(speaker && str_is(speaker, "name", longname));
   json_object_put(obj);
   case_end();
 }
@@ -553,6 +623,7 @@ main(int argc, char **argv)
 
   hello_has_protocol_and_all_capabilities();
   hello_lists_only_the_capabilities_given();
+  output_state_json();
   changed_message();
   event_receiver_command_with_name();
   event_without_a_name_has_null_name();

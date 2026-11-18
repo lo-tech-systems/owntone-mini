@@ -31,6 +31,7 @@ static const struct { unsigned bit; const char *name; } cap_names[] =
   { EVCHAN_CAP_INCLUDE_TV,       "include_tv" },
   { EVCHAN_CAP_START_VOLUME,     "start_volume" },
   { EVCHAN_CAP_MUTE,             "mute" },
+  { EVCHAN_CAP_OUTPUT_STATE,     "output_state" },
 };
 
 // Takes the object, returns its text and releases it
@@ -133,6 +134,43 @@ evchan_proto_event_json(uint64_t seq, enum evchan_proto_event_kind kind, const c
   else
     json_object_object_add(obj, "value", json_object_new_string(value ? value : ""));
   json_object_object_add(obj, "speaker", jspeaker);
+  json_object_object_add(obj, "at_ms", json_object_new_int64((int64_t)at_ms));
+
+  return object_finish(obj);
+}
+
+char *
+evchan_proto_output_state_json(uint64_t seq, const char *speaker_id, const char *member_id, const char *speaker_name,
+                               const struct evchan_output_state *st, uint64_t at_ms)
+{
+  json_object *obj;
+  json_object *jspeaker;
+
+  obj = message_new("event", seq);
+  jspeaker = json_object_new_object();
+  if (!obj || !jspeaker)
+    {
+      json_object_put(obj);
+      json_object_put(jspeaker);
+      return NULL;
+    }
+
+  json_object_object_add(jspeaker, "id", json_object_new_string(speaker_id));
+  json_object_object_add(jspeaker, "member_id", json_object_new_string(member_id));
+  json_object_object_add(jspeaker, "name", speaker_name ? json_object_new_string(speaker_name) : NULL);
+
+  json_object_object_add(obj, "kind", json_object_new_string("output_state"));
+  json_object_object_add(obj, "speaker", jspeaker);
+  json_object_object_add(obj, "state", json_object_new_string(st->state));
+  json_object_object_add(obj, "reason", json_object_new_string(st->reason));
+  json_object_object_add(obj, "member_state", json_object_new_string(st->member_state));
+  json_object_object_add(obj, "member_reason", json_object_new_string(st->member_reason));
+  json_object_object_add(obj, "selected", json_object_new_boolean(st->selected));
+  json_object_object_add(obj, "held", json_object_new_boolean(st->held));
+  json_object_object_add(obj, "holdable", json_object_new_boolean(st->holdable));
+  json_object_object_add(obj, "muted", json_object_new_boolean(st->muted));
+  json_object_object_add(obj, "volume", json_object_new_int(st->volume));
+  json_object_object_add(obj, "pin_pending", json_object_new_boolean(st->pin_pending));
   json_object_object_add(obj, "at_ms", json_object_new_int64((int64_t)at_ms));
 
   return object_finish(obj);
