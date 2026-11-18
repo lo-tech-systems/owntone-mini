@@ -280,6 +280,10 @@ struct output_device
   bool held;
   enum output_hold_kind hold_kind;
 
+  // The supervisor muted the device: 0 is put on the wire and its own level
+  // stays in volume. Outlives its sessions; cleared when it is deselected.
+  bool muted;
+
   // Address
   char *v4_address;
   char *v6_address;
@@ -608,6 +612,13 @@ outputs_device_offset_set(struct output_device *device);
 // or it cannot be held.
 int
 outputs_device_hold_set(struct output_device *device, bool held, const char *why, output_status_cb cb);
+
+// Mutes the device (0 on the wire, its own level kept) or ends its mute. Needs
+// no session: the flag stands and the next start sends 0. On a device that is
+// not selected the flag is kept for its next start and cleared when it is next
+// deselected. cb is given the answer to a level sent for it. Always 0.
+int
+outputs_device_mute_set(struct output_device *device, bool muted, output_status_cb cb);
 
 // The kind of hold the device's session would take now (OUTPUT_HOLD_NONE when
 // it has no session, is stopping, or cannot be held)

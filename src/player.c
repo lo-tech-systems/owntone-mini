@@ -205,6 +205,7 @@ struct speaker_attr_param
   enum output_mode mode;
   int offset_ms;
   bool held;
+  bool muted;
 
   int audio_fd;
   int metadata_fd;
@@ -2972,6 +2973,9 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
   spk->output_type[sizeof(spk->output_type) - 1] = '\0';
   spk->relvol = device->relvol;
   spk->absvol = device->volume;
+  // A row's mute is the row device's own flag; the group walk sets every
+  // member alike
+  spk->muted = device->muted;
   spk->offset_ms = device->offset_ms;
 
   spk->supported_formats = device->supported_formats;
@@ -3126,6 +3130,30 @@ speaker_group_select(struct output_device *device, int max_volume)
       if (cur_gid && strcmp(cur_gid, group_id) == 0)
         outputs_device_select(cur, max_volume);
     }
+}
+
+// Mutes the device and every member of its group, or ends their mute, with or
+// without a session: the flag outlives a session. Returns how many changed.
+static int
+speaker_group_mute_set(struct output_device *device, bool muted)
+{
+  struct output_device *cur;
+  const char *group_id;
+  int n = 0;
+
+  group_id = outputs_device_group_id(device);
+  if (!group_id)
+    return (outputs_device_mute_set(device, muted, device_level_edge_cb) == 0) ? 1 : 0;
+
+  for (cur = outputs_list(); cur; cur = cur->next)
+    {
+      const char *cur_gid = outputs_device_group_id(cur);
+
+      if (cur_gid && strcmp(cur_gid, group_id) == 0 && outputs_device_mute_set(cur, muted, device_level_edge_cb) == 0)
+	n++;
+    }
+
+  return n;
 }
 
 static void
@@ -3724,6 +3752,30 @@ speaker_hold_set(void *arg, int *retval)
           outputs_device_display_name(device), accepted);
 
   *retval = (accepted > 0) ? 0 : -2;
+  return COMMAND_END;
+}
+
+// Mutes the speakers of a row, or ends their mute. -1 for an unknown device.
+static enum command_state
+speaker_mute_set(void *arg, int *retval)
+{
+  struct speaker_attr_param *param = arg;
+  struct output_device *device;
+  int n;
+
+  device = outputs_device_get(param->spk_id);
+  if (!device)
+    {
+      *retval = -1;
+      return COMMAND_END;
+    }
+
+  n = speaker_group_mute_set(device, param->muted);
+
+  DPRINTF(E_INFO, L_PLAYER, "%s '%s': %d speaker(s)\n", param->muted ? "Mute" : "Mute ended for",
+	  outputs_device_display_name(device), n);
+
+  *retval = 0;
   return COMMAND_END;
 }
 
@@ -4760,6 +4812,18 @@ player_speaker_hold_set(uint64_t id, bool held)
   param.held = held;
 
   return commands_exec_sync(cmdbase, speaker_hold_set, speaker_generic_bh, &param);
+}
+
+int
+player_speaker_mute_set(uint64_t id, bool muted)
+{
+  struct speaker_attr_param param;
+
+  memset(&param, 0, sizeof(param));
+  param.spk_id = id;
+  param.muted = muted;
+
+  return commands_exec_sync(cmdbase, speaker_mute_set, speaker_generic_bh, &param);
 }
 
 int

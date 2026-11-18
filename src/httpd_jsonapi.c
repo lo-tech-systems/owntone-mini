@@ -467,6 +467,7 @@ jsonapi_reply_config(struct httpd_request *hreq)
 {
   json_object *jreply;
   json_object *jbuildopts;
+  json_object *japi_features;
   char **buildopts;
   int i;
 
@@ -489,6 +490,11 @@ jsonapi_reply_config(struct httpd_request *hreq)
     json_object_object_add(jreply, "event_socket", json_object_new_string(evchan_socket_path()));
   else
     json_object_object_add(jreply, "event_socket", NULL);
+  // The API features this build has, by name: "mute" means PUT
+  // /api/outputs/{id} takes muted and the output rows carry it
+  CHECK_NULL(L_WEB, japi_features = json_object_new_array());
+  json_object_array_add(japi_features, json_object_new_string("mute"));
+  json_object_object_add(jreply, "api_features", japi_features);
 
   CHECK_ERRNO(L_WEB, evbuffer_add_printf(hreq->out_body, "%s", json_object_to_json_string(jreply)));
   jparse_free(jreply);
@@ -647,6 +653,7 @@ speaker_to_json(struct player_speaker_info *spk)
   json_object_object_add(output, "needs_auth_key", json_object_new_boolean(spk->needs_auth_key));
   json_object_object_add(output, "pin_pending", json_object_new_boolean(spk->pin_pending));
   json_object_object_add(output, "volume", json_object_new_int(spk->absvol));
+  json_object_object_add(output, "muted", json_object_new_boolean(spk->muted));
   json_object_object_add(output, "offset_ms", json_object_new_int(spk->offset_ms));
   json_object_object_add(output, "format", json_object_new_string(media_format_to_string(spk->format)));
   json_object_object_add(output, "supported_formats", supported_formats);
@@ -786,6 +793,15 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
       ret = output_mode_put(request, output_id);
       if (ret < 0)
         goto error;
+    }
+
+  // Before the enable, so a speaker switched on in the same request starts
+  // silent
+  if (jparse_contains_key(request, "muted", json_type_boolean))
+    {
+      ret = player_speaker_mute_set(output_id, jparse_bool_from_obj(request, "muted"));
+      if (ret < 0)
+	goto error;
     }
 
   if (has_selected)

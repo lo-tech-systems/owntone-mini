@@ -2509,6 +2509,10 @@ outputs_device_deselect(struct output_device *device)
 {
   device->selected = 0;
 
+  if (device->muted)
+    DPRINTF(E_DBG, L_PLAYER, "Mute of '%s' ends with its selection\n", device->name);
+  device->muted = false;
+
   vol_adjust();
 }
 
@@ -2643,7 +2647,7 @@ outputs_device_volume_register(struct output_device *device, int absvol, int rel
 bool
 outputs_device_silent(struct output_device *device)
 {
-  return device->hold_kind == OUTPUT_HOLD_MUTE;
+  return device->muted || device->hold_kind == OUTPUT_HOLD_MUTE;
 }
 
 int
@@ -2841,6 +2845,49 @@ outputs_device_hold_set(struct output_device *device, bool held, const char *why
 	    device->name, why, silence_edge_unsent(device, ret), device->volume);
   else
     DPRINTF(E_INFO, L_PLAYER, "Hold of '%s' ended (%s): nothing sent (%s)\n", device->name, why, silence_edge_unsent(device, ret));
+
+  return 0;
+}
+
+int
+outputs_device_mute_set(struct output_device *device, bool muted, output_status_cb cb)
+{
+  bool was_silent;
+  int ret;
+
+  if (device->muted == muted)
+    return 0;
+
+  was_silent = outputs_device_silent(device);
+  device->muted = muted;
+
+  // Held by mute: the wire stays at 0
+  if (outputs_device_silent(device) == was_silent)
+    {
+      if (muted)
+	DPRINTF(E_INFO, L_PLAYER, "Muted '%s' (already silent, level %d kept)\n", device->name, device->volume);
+      else
+	DPRINTF(E_INFO, L_PLAYER, "Unmuted '%s' (still held, level %d kept)\n", device->name, device->volume);
+      return 0;
+    }
+
+  // The flag stands either way; when nothing is sent now, the start's level
+  // row or the stale-wire re-send carries it
+  ret = silence_edge_send(device, cb);
+  if (ret == 1)
+    {
+      if (muted)
+	DPRINTF(E_INFO, L_PLAYER, "Muting '%s': 0 sent, keeping %d\n", device->name, device->volume);
+      else
+	DPRINTF(E_INFO, L_PLAYER, "Unmuting '%s': %d sent\n", device->name, device->volume);
+    }
+  else
+    {
+      if (muted)
+	DPRINTF(E_INFO, L_PLAYER, "Muted '%s': nothing sent now (%s), level %d kept\n", device->name, silence_edge_unsent(device, ret), device->volume);
+      else
+	DPRINTF(E_INFO, L_PLAYER, "Unmuted '%s': nothing sent now (%s)\n", device->name, silence_edge_unsent(device, ret));
+    }
 
   return 0;
 }

@@ -30,6 +30,7 @@ static const struct { unsigned bit; const char *name; } cap_names[] =
   { EVCHAN_CAP_DEVICE_VOLUME,    "device_volume" },
   { EVCHAN_CAP_INCLUDE_TV,       "include_tv" },
   { EVCHAN_CAP_START_VOLUME,     "start_volume" },
+  { EVCHAN_CAP_MUTE,             "mute" },
 };
 
 // Takes the object, returns its text and releases it

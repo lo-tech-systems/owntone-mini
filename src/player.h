@@ -54,6 +54,10 @@ struct player_speaker_info {
   bool held;
   bool holdable;
 
+  // The supervisor muted the speakers the row stands for: absvol is the level
+  // they return to
+  bool muted;
+
   // True for an Apple TV that leads a group of HomePods which are present
   bool has_homepods;
 
@@ -175,6 +179,11 @@ player_speaker_offset_ms_set(uint64_t id, int offset_ms);
 // hold. -1 for an unknown speaker, -2 when it could not be held.
 int
 player_speaker_hold_set(uint64_t id, bool held);
+
+// Mutes a speaker and the rest of its group, or ends the mute. -1 for an
+// unknown speaker.
+int
+player_speaker_mute_set(uint64_t id, bool muted);
 
 int
 player_speaker_mode_set(uint64_t id, enum output_mode mode);
