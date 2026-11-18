@@ -360,6 +360,7 @@ enum airplay_seq_type
   AIRPLAY_SEQ_SEND_ANCHOR,
   AIRPLAY_SEQ_FLUSH_BUFFERED,
   AIRPLAY_SEQ_FLUSH_OFFSET,
+  AIRPLAY_SEQ_FLUSH_RESUME,
   AIRPLAY_SEQ_CONTINUE, // Must be last element
 };
 
@@ -639,6 +640,10 @@ struct airplay_session
   // buffered data connection (see buffered_frame_send). Copied from
   // device->tv_proxy_audio_suppress in airplay_device_start().
   bool audio_suppressed;
+  // The receiver paused itself and the supervisor asked for it to be held:
+  // no frames are written to it, and a connected session is not promoted,
+  // until the hold ends (see airplay_device_hold_set)
+  bool held;
   // The anchor of a buffered session, see airplay_anchor.h for the states and
   // the rules. Only anchor_event() writes these four fields and arms or
   // deletes the retry timer.
@@ -3201,6 +3206,13 @@ buffered_frame_send(struct airplay_master_session *ams, uint8_t *buf, int len)
 	  continue;
 	}
 
+      // A held receiver has paused itself and would stop reading once its
+      // buffer is full, which fails the session on the send backlog cap. It is
+      // sent nothing, and freezes nothing: the head moves on in real time and
+      // the resume flush and anchor rejoin it there.
+      if (session->held)
+	continue;
+
       // At a group's first start every session named the line's origin frame,
       // and the head has not moved from it, so nothing has been delivered on
       // this line yet. A confirmed session waits, with the counters frozen,
@@ -5632,6 +5644,21 @@ response_handler_flush_offset(struct evrtsp_request *req, struct airplay_session
   return AIRPLAY_SEQ_CONTINUE;
 }
 
+// Ends a hold (see airplay_device_hold_set). The receiver paused itself, and
+// its own Play does not restart it: it has to be flushed and given a fresh
+// anchor, as for an offset change. The session stays held until this answer,
+// so no frame reaches it between the request and the flush taking effect; the
+// next write then promotes it, which re-anchors it and sends the MediaRemote
+// resume.
+static enum airplay_seq_type
+response_handler_flush_resume(struct evrtsp_request *req, struct airplay_session *session)
+{
+  session->held = false;
+  session->state = AIRPLAY_STATE_CONNECTED;
+  anchor_event(session, ANCHOR_EV_FLUSH, ANCHOR_HOLD_NONE);
+  return AIRPLAY_SEQ_CONTINUE;
+}
+
 // Describes how far the receiver's PTP peer had got when the latest anchor was
 // sent: its age, and how many delay requests it had sent us by then
 static void
@@ -6630,6 +6657,7 @@ static struct airplay_seq_definition airplay_seq_definition[] =
   { AIRPLAY_SEQ_SEND_ANCHOR, NULL, session_failure },
   { AIRPLAY_SEQ_FLUSH_BUFFERED, session_status, session_failure },
   { AIRPLAY_SEQ_FLUSH_OFFSET, NULL, session_failure },
+  { AIRPLAY_SEQ_FLUSH_RESUME, NULL, session_failure },
 };
 
 // The size of the second array dimension MUST at least be the size of largest
@@ -6733,6 +6761,9 @@ static struct airplay_seq_request airplay_seq_request[][10] =
   },
   {
     { AIRPLAY_SEQ_FLUSH_OFFSET, "FLUSHBUFFERED (offset)", EVRTSP_REQ_FLUSHBUFFERED, payload_make_flush_buffered, response_handler_flush_offset, "application/x-apple-binary-plist", NULL, false },
+  },
+  {
+    { AIRPLAY_SEQ_FLUSH_RESUME, "FLUSHBUFFERED (resume)", EVRTSP_REQ_FLUSHBUFFERED, payload_make_flush_buffered, response_handler_flush_resume, "application/x-apple-binary-plist", NULL, false },
   },
 };
 
@@ -7825,6 +7856,69 @@ airplay_device_flush(struct output_device *device, int callback_id)
   return 1;
 }
 
+// Pushes the MediaRemote timeline for a hold or its end, so the receiver's own
+// paused state and ours agree in this and every later push
+static void
+hold_nowplaying_send(struct airplay_session *session, bool paused)
+{
+  if (!session->mrp || !airplay_cur_metadata)
+    {
+      DPRINTF(E_DBG, L_AIRPLAY, "No MediaRemote %s for '%s': no now-playing yet\n", paused ? "pause" : "resume", session->devname);
+      return;
+    }
+
+  session->mrp->paused = paused;
+  sequence_start(AIRPLAY_SEQ_SEND_NOWPLAYING_PROGRESS, session, airplay_cur_metadata,
+                 paused ? "POST /command (NowPlayingInfo update, hold)" : "POST /command (NowPlayingInfo update, hold end)");
+}
+
+// Holds or ends the hold of a buffered session whose receiver paused itself.
+// While held it is sent no audio (see buffered_frame_send) and a connected
+// session is not promoted. Ending the hold of a streaming session flushes it
+// and re-anchors it (see response_handler_flush_resume); a connected one is
+// promoted by the next write. A TV proxy leader with its audio suppressed
+// carries no audio, so only its MediaRemote state changes. Returns 0, or -1
+// when the session cannot be held (not buffered, or not connected or
+// streaming).
+static int
+airplay_device_hold_set(struct output_device *device, bool held)
+{
+  struct airplay_session *session = device->session;
+
+  if (!session || !session->buffered_mode ||
+      (session->state != AIRPLAY_STATE_CONNECTED && session->state != AIRPLAY_STATE_STREAMING))
+    return -1;
+
+  if (held)
+    {
+      if (session->held)
+	return 0;
+
+      session->held = true;
+      DPRINTF(E_INFO, L_AIRPLAY, "Holding '%s': it paused itself\n", session->devname);
+      hold_nowplaying_send(session, true);
+      return 0;
+    }
+
+  if (!session->held)
+    return 0;
+
+  DPRINTF(E_INFO, L_AIRPLAY, "Ending the hold of '%s'\n", session->devname);
+
+  if (session->audio_suppressed || session->state == AIRPLAY_STATE_CONNECTED)
+    {
+      session->held = false;
+      // A connected session sends the resume itself when it is promoted
+      if (session->audio_suppressed)
+	hold_nowplaying_send(session, false);
+      return 0;
+    }
+
+  // Stays held until the flush is answered
+  sequence_start(AIRPLAY_SEQ_FLUSH_RESUME, session, NULL, "resume");
+  return 0;
+}
+
 static void
 airplay_device_cb_set(struct output_device *device, int callback_id)
 {
@@ -8050,7 +8144,7 @@ airplay_write(struct output_buffer *obuf)
       // context is not ready, or the resampler emitted nothing for its quality
       // on this write) has not been sent its start sync packet and first
       // packet yet, so it waits for a write that has
-      if (session->state == AIRPLAY_STATE_CONNECTED && (!session->master_session || outputs_buffer_has_quality(obuf, &session->master_session->rtp_session->quality)))
+      if (session->state == AIRPLAY_STATE_CONNECTED && !session->held && (!session->master_session || outputs_buffer_has_quality(obuf, &session->master_session->rtp_session->quality)))
 	{
 	  // Start sending progress to keep ATV's alive
 	  if (!event_pending(keep_alive_timer, EV_TIMEOUT, NULL))
@@ -8368,6 +8462,7 @@ struct output_definition output_airplay =
   .device_free_extra = airplay_device_free_extra,
   .device_volume_set = airplay_set_volume_one,
   .device_offset_set = airplay_set_offset_one,
+  .device_hold_set = airplay_device_hold_set,
   .device_volume_to_pct = airplay_volume_to_pct,
   .write = airplay_write,
   .metadata_prepare = airplay_metadata_prepare,

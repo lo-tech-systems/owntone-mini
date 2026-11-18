@@ -146,8 +146,14 @@ connection, for example when an Apple TV goes into standby or its remote's
 pause button is pressed. The daemon used to answer a pause by deselecting the
 output and flagging it as `paused_by_device`. It now only reports the command
 as a `receiver_command` event, and the output stays selected and keeps
-playing. Deciding what a command means is left to the supervisor. The
+playing. Deciding what a command means is left to the supervisor, which can
+hold a speaker that paused itself and later restart it with the output's
+`hold` field (see [the JSON API](json-api.md#update-an-output)). The
 `paused_by_device` field has been removed from the output object.
+
+An Apple TV's remote sends `paus` and `play` from most screens, and the toggle
+`plps` (play or pause, whichever applies) while its full-screen now-playing
+view is up. It also sends `play` on its own when that view opens.
 
 A volume set by a receiver is still applied by the daemon, and is now also
 reported as a `device_volume` event.
