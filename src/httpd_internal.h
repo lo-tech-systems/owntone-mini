@@ -31,6 +31,7 @@
 #define HTTP_FORBIDDEN         403	/**< user not having the necessary permissions */
 #define HTTP_NOTFOUND          404	/**< could not find content for uri */
 #define HTTP_BADMETHOD         405 	/**< method not allowed for this uri */
+#define HTTP_CONFLICT          409	/**< the request conflicts with the current state */
 #define HTTP_ENTITYTOOLARGE    413	/**< request is larger than the server is able to process */
 #define HTTP_EXPECTATIONFAILED 417	/**< we can't handle this expectation */
 #define HTTP_INTERNAL          500     /**< internal error */

@@ -87,6 +87,8 @@
 
 // Audio and metadata outputs
 #include "outputs.h"
+#include "outputs_group_flags.h"
+#include "speakers_summary.h"
 
 // Audio and metadata input
 #include "input.h"
@@ -2723,6 +2725,79 @@ playback_flush(void *arg, int *retval)
   return COMMAND_END;
 }
 
+// Replaces the session facts of an Apple TV's row with those of the HomePods it
+// leads, reduced to one state: streaming if any streams, else starting if any
+// is starting or connected, else password, else failed, else stopped. A PIN is
+// pending if any of them waits for one, and a capacity failure of any of them
+// is reported.
+static void
+homepods_session_of(struct player_speaker_info *spk, struct output_device *device)
+{
+  struct output_device *cur;
+  const char *group_id;
+  struct speakers_seen seen = { false, false, false, false };
+  bool pin_pending = false;
+  bool capacity = false;
+
+  group_id = outputs_device_group_id(device);
+  if (!group_id)
+    return;
+
+  for (cur = outputs_list(); cur; cur = cur->next)
+    {
+      const char *cur_gid = outputs_device_group_id(cur);
+
+      if (cur == device || !cur_gid || strcmp(cur_gid, group_id) != 0)
+        continue;
+
+      if (cur->pin_pending)
+        pin_pending = true;
+      if (cur->last_failure == OUTPUT_FAILURE_CAPACITY)
+        capacity = true;
+
+      switch (cur->state)
+        {
+          case OUTPUT_STATE_STREAMING:
+            seen.streaming = true;
+            break;
+          case OUTPUT_STATE_STARTUP:
+          case OUTPUT_STATE_CONNECTED:
+            seen.starting = true;
+            break;
+          case OUTPUT_STATE_PASSWORD:
+            seen.password = true;
+            break;
+          case OUTPUT_STATE_FAILED:
+            seen.failed = true;
+            break;
+          default:
+            break;
+        }
+    }
+
+  switch (speakers_summary_resolve(seen))
+    {
+      case SPEAKERS_SUMMARY_STREAMING:
+        spk->state = OUTPUT_STATE_STREAMING;
+        break;
+      case SPEAKERS_SUMMARY_STARTING:
+        spk->state = OUTPUT_STATE_STARTUP;
+        break;
+      case SPEAKERS_SUMMARY_PASSWORD:
+        spk->state = OUTPUT_STATE_PASSWORD;
+        break;
+      case SPEAKERS_SUMMARY_FAILED:
+        spk->state = OUTPUT_STATE_FAILED;
+        break;
+      default:
+        spk->state = OUTPUT_STATE_STOPPED;
+        break;
+    }
+
+  spk->pin_pending = pin_pending;
+  spk->last_failure = capacity ? OUTPUT_FAILURE_CAPACITY : OUTPUT_FAILURE_NONE;
+}
+
 static void
 device_to_speaker_info(struct player_speaker_info *spk, struct output_device *device, uint32_t index)
 {
@@ -2772,6 +2847,11 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
   spk->row_name[sizeof(spk->row_name) - 1] = '\0';
 
   spk->has_homepods = outputs_device_leads_tv_proxy_group(device);
+
+  // An Apple TV enabled without itself plays nothing: its row shows what its
+  // HomePods are doing
+  if (spk->has_homepods && outputs_device_tv_proxy_excluded(device))
+    homepods_session_of(spk, device);
 }
 
 static bool
@@ -2833,13 +2913,20 @@ speaker_is_in_selected_set(struct output_device *device, uint64_t *ids, int nspk
   return false;
 }
 
-// Returns true for TV proxy group followers (the HomePods). Followers must
-// never be started directly - they are started by tv_proxy_followers_start()
-// once the Apple TV's probe succeeds - so every start path calls this to skip
-// them.
+// Returns true for devices a group start must pass over: TV proxy group
+// followers (the HomePods), which must never be started directly - they are
+// started by tv_proxy_followers_start() once the Apple TV's probe succeeds -
+// and an Apple TV left out of its group, which is given no session at all.
 static bool
-tv_proxy_follower_skip(struct output_device *device)
+group_start_skip(struct output_device *device)
 {
+  if (outputs_device_tv_proxy_excluded(device))
+    {
+      DPRINTF(E_DBG, L_PLAYER, "TV proxy: not starting Apple TV '%s', its group plays without it\n",
+              outputs_device_display_name(device));
+      return true;
+    }
+
   if (!outputs_device_is_tv_proxy_follower(device))
     return false;
 
@@ -2918,7 +3005,7 @@ speaker_group_start(struct output_device *device, output_status_cb cb, bool only
       if (!cur_gid || strcmp(cur_gid, group_id) != 0)
         continue;
 
-      if (tv_proxy_follower_skip(cur))
+      if (group_start_skip(cur))
         continue;
 
       ret = outputs_device_start(cur, cb, only_probe);
@@ -3167,12 +3254,12 @@ speaker_get_byindex(void *arg, int *retval)
 }
 
 // A speaker command that fails at once has already changed the selection but
-// has no session callback to announce it, so announce it here. -4 is a refusal
-// that changed nothing.
+// has no session callback to announce it, so announce it here. -4 and -5 are
+// refusals that changed nothing.
 static void
 speaker_cmd_failed_notify(int retval)
 {
-  if (retval < 0 && retval != -4)
+  if (retval < 0 && retval != -4 && retval != -5)
     status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
 }
 
@@ -3229,20 +3316,47 @@ speaker_set(void *arg, int *retval)
   return COMMAND_END;
 }
 
+struct speaker_enable_param
+{
+  uint64_t id;
+  int include_tv;
+};
+
 static enum command_state
 speaker_enable(void *arg, int *retval)
 {
-  uint64_t *id = arg;
+  struct speaker_enable_param *param = arg;
   struct output_device *device;
+  struct tv_proxy_enable enable;
   int max_volume;
 
   *retval = -1;
 
-  device = outputs_device_get(*id);
+  device = outputs_device_get(param->id);
   if (!device)
     return COMMAND_END;
 
-  DPRINTF(E_DBG, L_PLAYER, "Speaker enable: '%s' (id=%" PRIu64 ")\n", outputs_device_display_name(device), *id);
+  DPRINTF(E_DBG, L_PLAYER, "Speaker enable: '%s' (id=%" PRIu64 ")\n", outputs_device_display_name(device), param->id);
+
+  // The option is fixed for the life of a selection: the Apple TV either has
+  // a session or has none, and swapping that under a playing group is a stop
+  // and a start, which the caller does as a disable and an enable.
+  enable = tv_proxy_enable_resolve(outputs_device_leads_tv_proxy_group(device), param->include_tv,
+                                   device->selected, device->tv_proxy_speakers_only);
+  if (enable.refusal)
+    {
+      // Nothing has been selected or started
+      *retval = enable.refusal;
+      return COMMAND_END;
+    }
+
+  if (enable.set_flag)
+    {
+      device->tv_proxy_speakers_only = enable.flag;
+      if (param->include_tv >= 0)
+        DPRINTF(E_INFO, L_PLAYER, "Speaker enable: '%s' %s the Apple TV\n",
+                outputs_device_display_name(device), enable.flag ? "without" : "with");
+    }
 
   max_volume = (player_state != PLAY_STOPPED) ? outputs_volume_get() : -1;
 
@@ -3891,11 +4005,15 @@ player_speaker_get_byindex(struct player_speaker_info *spk, uint32_t index)
 }
 
 int
-player_speaker_enable(uint64_t id)
+player_speaker_enable(uint64_t id, int include_tv)
 {
+  struct speaker_enable_param param;
   int ret;
 
-  ret = commands_exec_sync(cmdbase, speaker_enable, speaker_generic_bh, &id);
+  param.id = id;
+  param.include_tv = include_tv;
+
+  ret = commands_exec_sync(cmdbase, speaker_enable, speaker_generic_bh, &param);
 
   return ret;
 }

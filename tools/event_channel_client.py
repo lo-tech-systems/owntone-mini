@@ -3,9 +3,13 @@
 
   event_channel_client.py check     connect, print the server's hello, list the outputs
   event_channel_client.py observe   print every message as it arrives
+  event_channel_client.py enable TVID --speakers-only | --with-tv
+                                    enable an Apple TV's group with or without the
+                                    Apple TV and print its row until it streams or fails
 
 The socket path comes from GET /api/config on the daemon's HTTP port unless
---socket is given. Python 3, standard library only.
+--socket is given (the enable command uses only the HTTP port). Python 3,
+standard library only.
 
 Exit status: 0 on success, 1 on any other failure, 2 when the server does not
 speak protocol 1, 3 when the server closed an observed connection.
@@ -22,6 +26,7 @@ import urllib.request
 PROTOCOL = 1
 PING_INTERVAL_S = 10
 CLIENT_NAME = "event_channel_client"
+ENABLE_TIMEOUT_S = 30
 
 EXIT_FAIL = 1
 EXIT_PROTOCOL = 2
@@ -214,6 +219,65 @@ def cmd_observe(args):
             logfile.close()
 
 
+def http_put_json(base, path, body, timeout=120):
+    """PUT a JSON body; returns (status, parsed reply or None)."""
+    req = urllib.request.Request(base.rstrip("/") + path, data=json.dumps(body).encode("utf-8"),
+                                 method="PUT", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status, data = resp.status, resp.read()
+    except urllib.error.HTTPError as err:
+        status, data = err.code, err.read()
+    try:
+        return status, json.loads(data.decode("utf-8")) if data else None
+    except ValueError:
+        return status, None
+
+
+def cmd_enable(args):
+    body = {"selected": True, "include_tv": not args.speakers_only}
+    status, reply = http_put_json(args.url, "/api/outputs/%s" % args.id, body)
+
+    if status == 409:
+        error = (reply or {}).get("error") or "reselect_required"
+        if error == "group_not_present":
+            print("409 conflict: %s (the Apple TV does not lead a group of HomePods just now; "
+                  "try again when its HomePods are present)" % error, file=sys.stderr)
+        else:
+            print("409 conflict: %s (disable the output first, then enable it with the other option)"
+                  % error, file=sys.stderr)
+        return EXIT_FAIL
+    if status >= 300:
+        print("the enable failed: HTTP %d %s" % (status, json.dumps(reply) if reply else ""), file=sys.stderr)
+        return EXIT_FAIL
+
+    deadline = time.monotonic() + ENABLE_TIMEOUT_S
+    last = None
+    while True:
+        try:
+            row = http_get_json(args.url, "/api/outputs/%s" % args.id)
+        except (urllib.error.URLError, OSError, ValueError) as err:
+            print("could not read /api/outputs/%s: %s" % (args.id, err), file=sys.stderr)
+            return EXIT_FAIL
+
+        text = describe_row(row)
+        if text != last:
+            print("%s %s" % (stamp(), text), flush=True)
+            last = text
+
+        # The row shows what it plays: the HomePods when it was enabled without
+        # the Apple TV
+        session = (row.get("session") or {}).get("state")
+        if session == "failed":
+            return EXIT_FAIL
+        if session == "streaming":
+            return 0
+        if time.monotonic() >= deadline:
+            print("still not streaming after %d s" % ENABLE_TIMEOUT_S, file=sys.stderr)
+            return EXIT_FAIL
+        time.sleep(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Client for the owntone-mini notifier socket")
     parser.add_argument("--url", default="http://localhost:3689", help="base URL of the daemon's HTTP API (default %(default)s)")
@@ -227,10 +291,18 @@ def main():
     obs.add_argument("--no-ping", action="store_true", help="never send a ping (the server closes the connection after about 30 s)")
     obs.add_argument("--stall", action="store_true", help="stop reading after the hello and leave the connection open")
 
+    ena = sub.add_parser("enable", help="enable an Apple TV's group with or without the Apple TV and watch it start")
+    ena.add_argument("id", metavar="TVID", help="id of the Apple TV's output")
+    mode = ena.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--speakers-only", action="store_true", help="play on the HomePods only")
+    mode.add_argument("--with-tv", action="store_true", help="play on the Apple TV and the HomePods")
+
     args = parser.parse_args()
 
     if args.command == "check":
         return cmd_check(args)
+    if args.command == "enable":
+        return cmd_enable(args)
     return cmd_observe(args)
 
 

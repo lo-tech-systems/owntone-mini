@@ -660,6 +660,7 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
   uint64_t output_id;
   json_object *request = NULL;
   bool selected;
+  int include_tv;
   int volume;
   int offset_ms;
   const char *pin;
@@ -691,11 +692,25 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
   if (jparse_contains_key(request, "selected", json_type_boolean))
     {
       selected = jparse_bool_from_obj(request, "selected");
-      ret = selected ? player_speaker_enable(output_id) : player_speaker_disable(output_id);
+      include_tv = -1;
+      if (jparse_contains_key(request, "include_tv", json_type_boolean))
+	include_tv = jparse_bool_from_obj(request, "include_tv") ? 1 : 0;
+
+      ret = selected ? player_speaker_enable(output_id, include_tv) : player_speaker_disable(output_id);
       if (ret == -3)
 	{
 	  jparse_free(request);
 	  return jsonapi_reply_error(hreq, HTTP_SERVUNAVAIL, "encoder_capacity");
+	}
+      if (ret == -4)
+	{
+	  jparse_free(request);
+	  return jsonapi_reply_error(hreq, HTTP_CONFLICT, "reselect_required");
+	}
+      if (ret == -5)
+	{
+	  jparse_free(request);
+	  return jsonapi_reply_error(hreq, HTTP_CONFLICT, "group_not_present");
 	}
       if (ret < 0)
 	goto error;
@@ -1073,6 +1088,12 @@ jsonapi_request(struct httpd_request *hreq)
 	break;
       case HTTP_NOTFOUND:            /* 404 Not Found */
 	httpd_send_error(hreq, status_code, "Not Found");
+	break;
+      case HTTP_CONFLICT:            /* 409 Conflict */
+	if (evbuffer_get_length(hreq->out_body) > 0)
+	  httpd_send_reply(hreq, status_code, "Conflict", HTTPD_SEND_NO_GZIP);
+	else
+	  httpd_send_error(hreq, status_code, "Conflict");
 	break;
       case HTTP_SERVUNAVAIL:            /* 503 Service Unavailable */
 	if (evbuffer_get_length(hreq->out_body) > 0)

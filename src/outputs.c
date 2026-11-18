@@ -41,6 +41,7 @@
 #include "transcode.h"
 #include "worker.h"
 #include "outputs.h"
+#include "outputs_group_flags.h"
 #include "listener.h"
 #include "owntone_config.h"
 #include "memstats.h"
@@ -700,28 +701,92 @@ outputs_device_is_tv_proxy_group(struct output_device *device)
   return meta && meta->is_tv_proxy_group;
 }
 
+// The canonical device whose group metadata names it as the Apple TV leading
+// the TV proxy group with the given id, or NULL
+static struct output_device *
+tv_proxy_group_leader_device(const char *group_id)
+{
+  struct output_device *cur;
+  struct output_device *meta;
+
+  if (!group_id)
+    return NULL;
+
+  for (cur = outputs_device_list; cur; cur = cur->next)
+    {
+      meta = group_meta_device(cur);
+      if (meta && meta->is_tv_proxy_group && meta->is_grouped && meta->is_group_leader
+          && meta->group_id && strcmp(meta->group_id, group_id) == 0)
+        return cur;
+    }
+
+  return NULL;
+}
+
+// True if the Apple TV leading the device's group (or the device itself, if it
+// is that Apple TV) has been excluded from the group's session
+static bool
+tv_proxy_group_speakers_only(struct output_device *device)
+{
+  struct output_device *meta = group_meta_device(device);
+  struct output_device *leader;
+
+  if (!meta)
+    return false;
+
+  if (meta->is_grouped && meta->is_group_leader)
+    return device->tv_proxy_speakers_only;
+
+  leader = tv_proxy_group_leader_device(meta->group_id);
+
+  return leader && leader->tv_proxy_speakers_only;
+}
+
+static struct tv_proxy_roles
+tv_proxy_roles_get(struct output_device *device)
+{
+  struct output_device *meta = group_meta_device(device);
+  struct tv_proxy_flags flags = { 0 };
+
+  if (!meta)
+    return (struct tv_proxy_roles){ 0 };
+
+  flags.tv_proxy_group = meta->is_tv_proxy_group;
+  flags.grouped = meta->is_grouped;
+  flags.leader = meta->is_group_leader;
+  // Only a TV proxy group can have an excluded Apple TV
+  flags.leader_speakers_only = meta->is_tv_proxy_group && tv_proxy_group_speakers_only(device);
+
+  return tv_proxy_flags_resolve(flags);
+}
+
 bool
 outputs_device_is_tv_proxy_follower(struct output_device *device)
 {
-  struct output_device *meta = group_meta_device(device);
-
-  return meta && meta->is_tv_proxy_group && !(meta->is_grouped && meta->is_group_leader);
+  return tv_proxy_roles_get(device).follower;
 }
 
 bool
 outputs_device_is_tv_proxy_leader(struct output_device *device)
 {
-  struct output_device *meta = group_meta_device(device);
-
-  return meta && meta->is_tv_proxy_group && meta->is_grouped && meta->is_group_leader;
+  return tv_proxy_roles_get(device).leader;
 }
 
+// True for the Apple TV that structurally leads a group of HomePods, whether or
+// not it has been excluded from the group's session
 bool
 outputs_device_leads_tv_proxy_group(struct output_device *device)
 {
-  struct output_device *meta = group_meta_device(device);
+  return tv_proxy_roles_get(device).leads_group;
+}
 
-  return meta && meta->is_tv_proxy_group && meta->is_grouped && meta->is_group_leader;
+// The exclusion is kept even if the Apple TV stops leading its group (its
+// HomePods left the network), so that it is not started on its own until an
+// enable clears it
+bool
+outputs_device_tv_proxy_excluded(struct output_device *device)
+{
+  return device->tv_proxy_speakers_only;
 }
 
 const char *
@@ -2319,6 +2384,11 @@ outputs_device_start(struct output_device *device, output_status_cb cb, bool onl
   if (device->session)
     return 0; // Device is already running, nothing to do
 
+  // An Apple TV left out of its HomePod group is given no session, whoever
+  // asks; the group start paths skip it before getting here
+  if (outputs_device_tv_proxy_excluded(device))
+    return 0;
+
   device->tv_proxy_audio_suppress = 0;
   device->tv_proxy_followers_deferred = 0;
 
@@ -2761,8 +2831,8 @@ outputs_start(output_status_cb started_cb, output_status_cb stopped_cb, bool onl
 
       // Followers are hidden members of a TV proxy group; the player starts
       // them itself once the group leader's (the Apple TV's) probe succeeds,
-      // so skip them here.
-      if (outputs_device_is_tv_proxy_follower(device))
+      // so skip them here. An Apple TV left out of its group gets no session.
+      if (outputs_device_is_tv_proxy_follower(device) || outputs_device_tv_proxy_excluded(device))
 	continue;
 
       ret = outputs_device_start(device, started_cb, only_probe);

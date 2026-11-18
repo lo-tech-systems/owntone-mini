@@ -69,13 +69,16 @@ owntone_SOURCES = main.c \
 	commands.c commands.h \
 	evchan.c evchan.h \
 	evchan_proto.c evchan_proto.h \
+	outputs_group_flags.h \
 	ptpd.c ptpd.h \
 	outputs/plist_wrap.h
 
-check_PROGRAMS = airplay_anchor_test evchan_proto_test
+check_PROGRAMS = airplay_anchor_test evchan_proto_test tv_proxy_mode_test speakers_summary_test
 TESTS = $(check_PROGRAMS)
 airplay_anchor_test_SOURCES = outputs/tests/airplay_anchor_test.c outputs/airplay_anchor.c outputs/airplay_anchor.h
 evchan_proto_test_SOURCES = outputs/tests/evchan_proto_test.c evchan_proto.c evchan_proto.h
 evchan_proto_test_LDADD = $(OWNTONE_LIBS)
+tv_proxy_mode_test_SOURCES = outputs/tests/tv_proxy_mode_test.c outputs_group_flags.h
+speakers_summary_test_SOURCES = outputs/tests/speakers_summary_test.c speakers_summary.h
 
 SUBDIRS = libairptp

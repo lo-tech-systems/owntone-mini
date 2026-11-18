@@ -132,6 +132,10 @@ struct output_device
   // session even though no follower is streaming yet; consumed by
   // outputs_device_start().
   unsigned tv_proxy_start_direct:1;
+  // Set on the canonical device of an Apple TV that leads a HomePod group when
+  // the group was enabled without the Apple TV: the HomePods play as a plain
+  // stereo pair and this device is given no session.
+  unsigned tv_proxy_speakers_only:1;
   // Outcome of the last real (non-probe) start of a TV proxy leader: set when
   // its session was started because followers are streaming, so the session is
   // kept for control/metadata/volume only and is sent no audio. Cleared on
@@ -539,6 +543,11 @@ outputs_device_is_tv_proxy_leader(struct output_device *device);
 // not it currently behaves as one.
 bool
 outputs_device_leads_tv_proxy_group(struct output_device *device);
+
+// True when the device is an Apple TV leading a HomePod group that was enabled
+// without it: it is given no session and the HomePods play as a stereo pair.
+bool
+outputs_device_tv_proxy_excluded(struct output_device *device);
 
 // True once any follower of leader's TV proxy group has a session and is
 // actually streaming audio. Used to gate when the leader's own session may
