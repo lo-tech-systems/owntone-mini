@@ -123,7 +123,9 @@
   `SETPEERS`). A receiver that refuses `SETPEERSX` is sent `SETPEERS` in the
   same start, and from then on until the daemon restarts. Each start logs
   which was sent, and about 3 seconds after a receiver becomes our clock
-  peer, how many delay requests it has sent us
+  peer, how many delay requests it has sent us. The cause, and the format of
+  the `SETPEERSX` message, were found by the Music Assistant airplay-cli
+  project
 - change: the now-playing channel (track details and whether it is playing)
   goes to every receiver that advertises it, not only to Apple TVs. A receiver
   with a screen that is not an Apple TV showed the stream as paused.
