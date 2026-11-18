@@ -823,6 +823,9 @@ static void
 evrtsp_connectioncb(int fd, short what, void *arg)
 {
   struct evrtsp_connection *evcon = arg;
+  struct evrtsp_request *request;
+  void (*cb)(struct evrtsp_request *, void *);
+  void *cb_arg;
   int error;
   socklen_t errsz = sizeof(error);
 
@@ -860,16 +863,26 @@ evrtsp_connectioncb(int fd, short what, void *arg)
  cleanup:
   evrtsp_connection_reset(evcon);
 
-  /* for now, we just signal all requests by executing their callbacks */
-  while (TAILQ_FIRST(&evcon->requests) != NULL) {
-    struct evrtsp_request *request = TAILQ_FIRST(&evcon->requests);
-    TAILQ_REMOVE(&evcon->requests, request, next);
-    request->evcon = NULL;
+  /* signal the request that was waiting for the connection */
+  request = TAILQ_FIRST(&evcon->requests);
+  if (request == NULL)
+    return;
 
-    /* we might want to set an error here */
-    request->cb(request, request->cb_arg);
-    evrtsp_request_free(request);
-  }
+  TAILQ_REMOVE(&evcon->requests, request, next);
+  request->evcon = NULL;
+
+  /* a request queued behind it gets its own attempt */
+  if (TAILQ_FIRST(&evcon->requests) != NULL)
+    evrtsp_connection_connect(evcon);
+
+  /* save the callback; it may free the connection, so it is the last use of it */
+  cb = request->cb;
+  cb_arg = request->cb_arg;
+  evrtsp_request_free(request);
+
+  /* as for any other connection failure, the callback is given no request */
+  if (cb != NULL)
+    (*cb)(NULL, cb_arg);
 }
 
 /*
