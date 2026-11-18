@@ -2637,6 +2637,17 @@ operation_begin(struct output_device *device, enum output_op op)
   device->op_started_ms = monotonic_ms();
 }
 
+// A start, a probe or an authorise the backend took: the device is starting,
+// so the reason of an earlier attempt no longer stands and a failure state
+// left from it no longer hides the selection
+static void
+operation_starting(struct output_device *device)
+{
+  device->state = OUTPUT_STATE_STARTUP;
+  device->last_failure = OUTPUT_FAILURE_NONE;
+  outputs_device_phase_set(device, OUTPUT_PHASE_CONNECTING);
+}
+
 // The backend did not take the operation: nothing is in flight
 static void
 operation_not_begun(struct output_device *device)
@@ -2735,7 +2746,7 @@ outputs_device_start(struct output_device *device, output_status_cb cb, bool onl
   callback_settle(device, id, fresh, ret > 0);
   if (ret > 0)
     {
-      outputs_device_phase_set(device, OUTPUT_PHASE_CONNECTING);
+      operation_starting(device);
       return ret;
     }
 
@@ -3198,7 +3209,7 @@ outputs_device_authorize(struct output_device *device, const char *pin, output_s
   callback_settle(device, id, fresh, ret > 0);
   if (ret > 0)
     {
-      outputs_device_phase_set(device, OUTPUT_PHASE_CONNECTING);
+      operation_starting(device);
       return ret;
     }
 
