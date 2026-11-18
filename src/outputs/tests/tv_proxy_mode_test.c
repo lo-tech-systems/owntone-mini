@@ -240,19 +240,19 @@ enable_without_a_group_clears_the_exclusion(void)
 }
 
 static void
-pair_memory_needs_every_member_on_the_issued_group(void)
+pair_memory_needs_a_member_on_the_issued_group(void)
 {
   struct stereo_leader_memory m;
 
-  case_begin("pair_memory_needs_every_member_on_the_issued_group");
+  case_begin("pair_memory_needs_a_member_on_the_issued_group");
 
   // Both members on the group we issued, the last leader present
   m = (struct stereo_leader_memory){ false, true, 2, 2 };
   CHECK(stereo_leader_memory_applies(m));
 
-  // One of the two on it: another sender's group or a stale advertisement
+  // One of the two on it: the pair moving onto our group or back off it
   m = (struct stereo_leader_memory){ false, true, 2, 1 };
-  CHECK(!stereo_leader_memory_applies(m));
+  CHECK(stereo_leader_memory_applies(m));
 
   // Neither on it
   m = (struct stereo_leader_memory){ false, true, 2, 0 };
@@ -317,7 +317,7 @@ main(int argc, char **argv)
   enable_refuses_a_change_while_selected();
   enable_refuses_speakers_only_without_a_group();
   enable_without_a_group_clears_the_exclusion();
-  pair_memory_needs_every_member_on_the_issued_group();
+  pair_memory_needs_a_member_on_the_issued_group();
   pair_memory_never_overrides_a_known_leader();
   pair_memory_needs_the_last_leader_present();
 

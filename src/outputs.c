@@ -626,8 +626,9 @@ output_group_refresh(void)
 
   // A stereo pair we play to as a multi-select sender advertises the group
   // our sessions gave it, with neither member as its leader, and would lose
-  // its row. While both members advertise the group UUID we issued to the
-  // member that last led the pair, that member stays the leader. The member
+  // its row. While a member advertises the group UUID we issued to the member
+  // that last led the pair, that member stays the leader: the members change
+  // group one at a time, joining a session and leaving it. The member
   // ids are canonical devices, which carry issued_gid; the group fields are on
   // their AirPlay 2 candidates. Not after a restart until a member leads the
   // pair by its own advertisement again
@@ -673,7 +674,7 @@ output_group_refresh(void)
       if (group->leader_known && remembered)
         {
           if (!group->last_logged_remembered)
-            DPRINTF(E_INFO, L_PLAYER, "Stereo group '%s': both members advertise our group, keeping '%s' as its leader\n",
+            DPRINTF(E_INFO, L_PLAYER, "Stereo group '%s': advertising our group, keeping '%s' as its leader\n",
                     group->name ? group->name : group->id, remembered->name);
           group->last_logged_remembered = true;
         }

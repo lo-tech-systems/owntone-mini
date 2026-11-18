@@ -148,9 +148,10 @@
   position its screen and Home show stands still while it is held
 - fix: a HomePod stereo pair keeps its row while we play to it. The members
   of a pair share one group UUID, the pair keeps the member that led it last
-  while both advertise our group, and the session describes the sender as a
-  multi-select sender, without which Home did not always offer its controls
-  for our playback
+  while either advertises our group, so it no longer drops out for a moment
+  as its members join or leave a session, and the session describes the
+  sender as a multi-select sender, without which Home did not always offer
+  its controls for our playback
 - new: `PUT /api/outputs/{id}` takes `muted`, and each output row carries it.
   A muted output, and every speaker of its group, is sent 0 and keeps its
   level in `volume`, the level it returns to. The mute needs no session (a

@@ -102,8 +102,10 @@ tv_proxy_enable_resolve(bool leads_group, int include_tv, bool selected, bool ex
 }
 
 // Whether a stereo pair with no leader of its own keeps the member that led it
-// last: only while every member advertises the group our session issued to
-// that member, which is the case our own multi-select sessions cause
+// last: while any member advertises the group our session issued to that
+// member, which is the case our own multi-select sessions cause. The members
+// move onto that group, and back off it, one at a time, and in between neither
+// advertises itself as the leader
 struct stereo_leader_memory
 {
   bool leader_known;        // a member leads the pair by its own advertisement
@@ -115,7 +117,7 @@ struct stereo_leader_memory
 static inline bool
 stereo_leader_memory_applies(struct stereo_leader_memory m)
 {
-  return !m.leader_known && m.remembered_present && m.members > 0 && m.members_on_issued == m.members;
+  return !m.leader_known && m.remembered_present && m.members > 0 && m.members_on_issued > 0;
 }
 
 #endif /* !__OUTPUTS_GROUP_FLAGS_H__ */
