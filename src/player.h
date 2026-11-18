@@ -114,9 +114,10 @@ player_speaker_get_byindex(struct player_speaker_info *spk, uint32_t index);
 
 // include_tv: 1 or 0 to enable the group of an Apple TV with or without the
 // Apple TV, -1 to leave the option as it is. Returns -4 if the option would
-// change while the device is selected.
+// change while the device is selected. volume: the level (0 to 100) the
+// speakers start at, -1 for none.
 int
-player_speaker_enable(uint64_t id, int include_tv);
+player_speaker_enable(uint64_t id, int include_tv, int volume);
 
 int
 player_speaker_disable(uint64_t id);

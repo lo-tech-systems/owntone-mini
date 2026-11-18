@@ -662,6 +662,7 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
   bool selected;
   int include_tv;
   int volume;
+  int start_volume;
   int offset_ms;
   const char *pin;
   const char *format;
@@ -696,7 +697,16 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
       if (jparse_contains_key(request, "include_tv", json_type_boolean))
 	include_tv = jparse_bool_from_obj(request, "include_tv") ? 1 : 0;
 
-      ret = selected ? player_speaker_enable(output_id, include_tv) : player_speaker_disable(output_id);
+      // A volume sent with the enable is the level the speakers start at
+      start_volume = -1;
+      if (selected && jparse_contains_key(request, "volume", json_type_int))
+	{
+	  start_volume = jparse_int_from_obj(request, "volume");
+	  if (start_volume < 0 || start_volume > 100)
+	    goto error; // refused before anything is started
+	}
+
+      ret = selected ? player_speaker_enable(output_id, include_tv, start_volume) : player_speaker_disable(output_id);
       if (ret == -3)
 	{
 	  jparse_free(request);

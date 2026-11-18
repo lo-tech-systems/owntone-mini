@@ -146,7 +146,7 @@ array_len(json_object *obj, const char *key)
 
 /* ------------------------------ Server messages --------------------------- */
 
-#define ALL_CAPS (EVCHAN_CAP_CHANGED | EVCHAN_CAP_RECEIVER_COMMAND | EVCHAN_CAP_DEVICE_VOLUME | EVCHAN_CAP_INCLUDE_TV)
+#define ALL_CAPS (EVCHAN_CAP_CHANGED | EVCHAN_CAP_RECEIVER_COMMAND | EVCHAN_CAP_DEVICE_VOLUME | EVCHAN_CAP_INCLUDE_TV | EVCHAN_CAP_START_VOLUME)
 
 static void
 hello_has_protocol_and_all_capabilities(void)
@@ -161,11 +161,12 @@ hello_has_protocol_and_all_capabilities(void)
   CHECK(str_is(obj, "version", "1.6.0"));
   CHECK(str_is(obj, "boot", "3f9a1c2e77b04d15"));
   CHECK(int_is(obj, "uptime_ms", 1843));
-  CHECK(array_len(obj, "capabilities") == 4);
+  CHECK(array_len(obj, "capabilities") == 5);
   CHECK(array_has(obj, "capabilities", "changed"));
   CHECK(array_has(obj, "capabilities", "receiver_command"));
   CHECK(array_has(obj, "capabilities", "device_volume"));
   CHECK(array_has(obj, "capabilities", "include_tv"));
+  CHECK(array_has(obj, "capabilities", "start_volume"));
   CHECK(int_is(obj, "ping_interval_ms", 10000));
   CHECK(int_is(obj, "idle_close_ms", 30000));
   CHECK(int_is(obj, "max_line", 4096));

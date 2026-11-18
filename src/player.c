@@ -3381,6 +3381,7 @@ struct speaker_enable_param
 {
   uint64_t id;
   int include_tv;
+  int volume;     // level to start at, or -1 for none
 };
 
 static enum command_state
@@ -3419,9 +3420,16 @@ speaker_enable(void *arg, int *retval)
                 outputs_device_display_name(device), enable.flag ? "without" : "with");
     }
 
-  max_volume = (player_state != PLAY_STOPPED) ? outputs_volume_get() : -1;
+  // An explicit level is not capped to the master volume
+  max_volume = (param->volume < 0 && player_state != PLAY_STOPPED) ? outputs_volume_get() : -1;
 
   speaker_group_select(device, max_volume);
+
+  // Register the level on the device and every member of its group before the
+  // start, so that the first volume the speakers are sent is this one. Nothing
+  // is sent here: the start does that.
+  if (param->volume >= 0)
+    speaker_group_volume_apply(device, param->volume, -1, NULL);
 
   *retval = speaker_group_start(device, device_activate_cb, PLAYER_ONLY_PROBE);
 
@@ -4066,13 +4074,14 @@ player_speaker_get_byindex(struct player_speaker_info *spk, uint32_t index)
 }
 
 int
-player_speaker_enable(uint64_t id, int include_tv)
+player_speaker_enable(uint64_t id, int include_tv, int volume)
 {
   struct speaker_enable_param param;
   int ret;
 
   param.id = id;
   param.include_tv = include_tv;
+  param.volume = volume;
 
   ret = commands_exec_sync(cmdbase, speaker_enable, speaker_generic_bh, &param);
 

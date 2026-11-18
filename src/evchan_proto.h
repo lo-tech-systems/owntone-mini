@@ -44,6 +44,7 @@ enum evchan_proto_cap
   EVCHAN_CAP_RECEIVER_COMMAND = (1 << 1),
   EVCHAN_CAP_DEVICE_VOLUME    = (1 << 2),
   EVCHAN_CAP_INCLUDE_TV       = (1 << 3),
+  EVCHAN_CAP_START_VOLUME     = (1 << 4),
 };
 
 enum evchan_proto_event_kind
