@@ -3155,6 +3155,16 @@ speaker_get_byindex(void *arg, int *retval)
   return COMMAND_END;
 }
 
+// A speaker command that fails at once has already changed the selection but
+// has no session callback to announce it, so announce it here. -4 is a refusal
+// that changed nothing.
+static void
+speaker_cmd_failed_notify(int retval)
+{
+  if (retval < 0 && retval != -4)
+    status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
+}
+
 static enum command_state
 speaker_set(void *arg, int *retval)
 {
@@ -3205,6 +3215,8 @@ speaker_set(void *arg, int *retval)
   if (*retval > 0)
     return COMMAND_PENDING; // async
 
+  speaker_cmd_failed_notify(*retval);
+
   return COMMAND_END;
 }
 
@@ -3235,6 +3247,8 @@ speaker_enable(void *arg, int *retval)
   if (*retval > 0)
     return COMMAND_PENDING; // async
 
+  speaker_cmd_failed_notify(*retval);
+
   return COMMAND_END;
 }
 
@@ -3258,6 +3272,8 @@ speaker_disable(void *arg, int *retval)
 
   if (*retval > 0)
     return COMMAND_PENDING; // async
+
+  speaker_cmd_failed_notify(*retval);
 
   return COMMAND_END;
 }
