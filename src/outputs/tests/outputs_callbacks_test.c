@@ -76,7 +76,7 @@ add(uint64_t device_id, output_status_cb cb, uint32_t gen, bool op_slot, enum ou
 {
   int conflict;
 
-  return outputs_callbacks_add(reg, N, cb, NULL, device_id, gen, op_slot, how, &conflict);
+  return outputs_callbacks_add(reg, N, cb, device_id, gen, op_slot, how, &conflict);
 }
 
 static void
@@ -160,7 +160,7 @@ test_second_operation(void)
 
   reset();
   first = add(DEV_A, cb_start, 3, true, &how);
-  second = outputs_callbacks_add(reg, N, cb_stop, NULL, DEV_A, 4, true, &how, &conflict);
+  second = outputs_callbacks_add(reg, N, cb_stop, DEV_A, 4, true, &how, &conflict);
   expect("second operation: reported", how == OUTPUTS_CALLBACK_SECOND_OP);
   expect("second operation: names the first", conflict == first);
   expect("second operation: a slot of its own", second >= 0 && second != first);

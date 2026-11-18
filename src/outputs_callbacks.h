@@ -32,8 +32,6 @@
 struct outputs_callback_register
 {
   output_status_cb cb;
-  // Never dereferenced: the device may be gone when the report comes
-  struct output_device *device;
 
   // We have received the callback with the result from the backend
   bool ready;
@@ -72,7 +70,7 @@ enum outputs_callback_add_case
 // slot, or -1 when none is free. *conflict is the slot of the operation still
 // in flight for OUTPUTS_CALLBACK_SECOND_OP, else -1
 static inline int
-outputs_callbacks_add(struct outputs_callback_register *reg, int n, output_status_cb cb, struct output_device *device,
+outputs_callbacks_add(struct outputs_callback_register *reg, int n, output_status_cb cb,
 		      uint64_t device_id, uint32_t gen, bool op_slot, enum outputs_callback_add_case *how, int *conflict)
 {
   int free_id = -1;
@@ -95,7 +93,6 @@ outputs_callbacks_add(struct outputs_callback_register *reg, int n, output_statu
       if (reg[i].gen == gen && reg[i].op_slot == op_slot)
 	{
 	  reg[i].cb = cb;
-	  reg[i].device = device;
 	  *how = OUTPUTS_CALLBACK_IN_PLACE;
 	  return i;
 	}
@@ -114,7 +111,6 @@ outputs_callbacks_add(struct outputs_callback_register *reg, int n, output_statu
 
   memset(&reg[free_id], 0, sizeof(reg[free_id]));
   reg[free_id].cb = cb;
-  reg[free_id].device = device;
   reg[free_id].reg_device_id = device_id;
   reg[free_id].gen = gen;
   reg[free_id].op_slot = op_slot;

@@ -150,6 +150,9 @@ static void (*outputs_flush_done)(void);
 
 // Told of every phase change, see outputs_device_phase_set()
 static void (*outputs_phase_announce)(struct output_device *device);
+
+// Where the report of a delayed stop goes, see outputs_stop_cb_set()
+static output_status_cb outputs_stop_report;
 static struct event *outputs_deferredev;
 static struct timeval outputs_stop_timeout = { OUTPUTS_STOP_TIMEOUT, 0 };
 
@@ -1322,20 +1325,6 @@ candidate_store(struct output_device *canonical, struct output_device *new_cand)
   *slot = new_cand;
 }
 
-static output_status_cb
-callback_get(struct output_device *device)
-{
-  int callback_id;
-
-  for (callback_id = 0; callback_id < ARRAY_SIZE(outputs_cb_register); callback_id++)
-    {
-      if (outputs_cb_register[callback_id].device == device)
-	return outputs_cb_register[callback_id].cb;
-    }
-
-  return NULL;
-}
-
 bool
 outputs_device_phase_set(struct output_device *device, enum output_phase phase)
 {
@@ -1355,6 +1344,12 @@ void
 outputs_phase_cb_set(void (*cb)(struct output_device *device))
 {
   outputs_phase_announce = cb;
+}
+
+void
+outputs_stop_cb_set(output_status_cb cb)
+{
+  outputs_stop_report = cb;
 }
 
 // Whether a report of the device waits in a slot to be dispatched
@@ -1467,7 +1462,7 @@ callback_add(struct output_device *device, output_status_cb cb, bool op_slot, bo
   if (!cb)
     return -1;
 
-  callback_id = outputs_callbacks_add(outputs_cb_register, ARRAY_SIZE(outputs_cb_register), cb, device, device->id, device->op_gen, op_slot, &how, &conflict);
+  callback_id = outputs_callbacks_add(outputs_cb_register, ARRAY_SIZE(outputs_cb_register), cb, device->id, device->op_gen, op_slot, &how, &conflict);
   switch (how)
     {
       case OUTPUTS_CALLBACK_FULL:
@@ -1594,13 +1589,14 @@ deferred_cb(int fd, short what, void *arg)
     }
 }
 
+// The delayed stop is a stop like any other: its report reaches the callback
+// the player gave for it, whatever else was registered for the device
 static void
 stop_timer_cb(int fd, short what, void *arg)
 {
   struct output_device *device = arg;
-  output_status_cb cb = callback_get(device);
 
-  outputs_device_stop(device, cb);
+  outputs_device_stop(device, outputs_stop_report);
 }
 
 static void

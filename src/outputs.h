@@ -526,6 +526,11 @@ outputs_device_phase_set(struct output_device *device, enum output_phase phase);
 void
 outputs_phase_cb_set(void (*cb)(struct output_device *device));
 
+// The callback the report of a delayed stop (outputs_device_stop_delayed)
+// reaches when the stop is made
+void
+outputs_stop_cb_set(output_status_cb cb);
+
 /* ----------------------- Called by backend modules ------------------------ */
 
 int

@@ -5311,6 +5311,7 @@ player_init(void)
   ret = outputs_init();
   outputs_flush_done_cb_set(flush_done_cb);
   outputs_phase_cb_set(phase_announce_cb);
+  outputs_stop_cb_set(device_streaming_cb);
   if (ret < 0)
     {
       DPRINTF(E_FATAL, L_PLAYER, "Output initiation failed\n");
