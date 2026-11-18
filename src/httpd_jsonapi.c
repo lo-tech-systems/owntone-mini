@@ -690,6 +690,30 @@ jsonapi_reply_outputs_get_byid(struct httpd_request *hreq)
   return HTTP_OK;
 }
 
+// The "mode" field of PUT /api/outputs/[output_id]. Unknown mode strings are a
+// bad request; unsupported-but-valid modes are handled inside
+// player_speaker_mode_set (warn + no-op). airplay2_surround_stereo/_upmix are
+// accepted here for any device. They select a 5.1 AAC buffered stream, but
+// only for a standalone Apple TV; on any other device the output falls through
+// to the realtime path rather than erroring, so the API does not reject them.
+static int
+output_mode_put(json_object *request, uint64_t output_id)
+{
+  const char *mode_str = jparse_str_from_obj(request, "mode");
+
+  if (!mode_str ||
+      (strcmp(mode_str, "auto") != 0 &&
+       strcmp(mode_str, "raop") != 0 &&
+       strcmp(mode_str, "airplay2") != 0 &&
+       strcmp(mode_str, "airplay2_buffered") != 0 &&
+       strcmp(mode_str, "airplay2_buffered_24") != 0 &&
+       strcmp(mode_str, "airplay2_surround_stereo") != 0 &&
+       strcmp(mode_str, "airplay2_surround_upmix") != 0))
+    return -1;
+
+  return player_speaker_mode_set(output_id, output_mode_from_string(mode_str));
+}
+
 /*
  * PUT /api/outputs/[output_id]
  */
@@ -698,7 +722,9 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
 {
   uint64_t output_id;
   json_object *request = NULL;
+  bool has_selected;
   bool selected;
+  bool mode_after_disable;
   int include_tv;
   int volume;
   int start_volume;
@@ -729,9 +755,24 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
 	goto error;
     }
 
-  if (jparse_contains_key(request, "selected", json_type_boolean))
+  has_selected = jparse_contains_key(request, "selected", json_type_boolean);
+  selected = has_selected && jparse_bool_from_obj(request, "selected");
+
+  // The mode goes before an enable, so the speaker starts in the backend asked
+  // for instead of starting in its old one and being stopped and restarted in
+  // the new one a moment later (which also lost the level it was sent). It
+  // goes after a disable, so the preference is recorded on the stopped speaker
+  // rather than restarting it just before the stop.
+  mode_after_disable = has_selected && !selected;
+  if (!mode_after_disable && jparse_contains_key(request, "mode", json_type_string))
     {
-      selected = jparse_bool_from_obj(request, "selected");
+      ret = output_mode_put(request, output_id);
+      if (ret < 0)
+        goto error;
+    }
+
+  if (has_selected)
+    {
       include_tv = -1;
       if (jparse_contains_key(request, "include_tv", json_type_boolean))
 	include_tv = jparse_bool_from_obj(request, "include_tv") ? 1 : 0;
@@ -775,6 +816,13 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
 	goto error;
     }
 
+  if (mode_after_disable && jparse_contains_key(request, "mode", json_type_string))
+    {
+      ret = output_mode_put(request, output_id);
+      if (ret < 0)
+        goto error;
+    }
+
   if (jparse_contains_key(request, "volume", json_type_int))
     {
       volume = jparse_int_from_obj(request, "volume");
@@ -812,33 +860,6 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
       ret = format ? player_speaker_format_set(output_id, media_format_from_string(format)) : 0;
       if (ret < 0)
 	goto error;
-    }
-
-  if (jparse_contains_key(request, "mode", json_type_string))
-    {
-      const char *mode_str = jparse_str_from_obj(request, "mode");
-      enum output_mode mode;
-
-      // Unknown mode strings are a bad request; unsupported-but-valid modes
-      // are handled inside player_speaker_mode_set (warn + no-op).
-      // airplay2_surround_stereo/_upmix are accepted here for any device.
-      // They select a 5.1 AAC buffered stream, but only for a standalone
-      // Apple TV; on any other device the output falls through to the
-      // realtime path rather than erroring, so the API does not reject them.
-      if (!mode_str ||
-          (strcmp(mode_str, "auto") != 0 &&
-           strcmp(mode_str, "raop") != 0 &&
-           strcmp(mode_str, "airplay2") != 0 &&
-           strcmp(mode_str, "airplay2_buffered") != 0 &&
-           strcmp(mode_str, "airplay2_buffered_24") != 0 &&
-           strcmp(mode_str, "airplay2_surround_stereo") != 0 &&
-           strcmp(mode_str, "airplay2_surround_upmix") != 0))
-        goto error;
-
-      mode = output_mode_from_string(mode_str);
-      ret = player_speaker_mode_set(output_id, mode);
-      if (ret < 0)
-        goto error;
     }
 
   jparse_free(request);

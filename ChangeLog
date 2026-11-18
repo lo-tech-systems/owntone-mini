@@ -89,6 +89,12 @@
   and its session failed
 - fix: a speaker that reports its volume as `-0.000000` (full volume, signed
   zero) was logged as an invalid volume and its level was not recorded
+- fix: `PUT /api/outputs/{id}` applies `mode` before `selected: true`, so a
+  speaker enabled with a mode starts in that backend instead of starting in
+  its previous one and being stopped and restarted a moment later, which
+  could leave it on the wrong timing and without metadata, and at a level
+  other than the one sent. With `selected: false` the mode is applied after
+  the stop, without a restart
 
 ## Version 1.5.0 - 2026-10-14
 
