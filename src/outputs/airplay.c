@@ -3701,6 +3701,7 @@ payload_make_flush_buffered(struct evrtsp_request *req, struct airplay_session *
     return -1;
 
   evbuffer_add(req->output_buffer, data, len);
+  free(data);
 
   return 0;
 }
@@ -3736,6 +3737,7 @@ payload_make_command_supported_commands(struct evrtsp_request *req, struct airpl
     return -1;
 
   evbuffer_add(req->output_buffer, data, len);
+  free(data);
 
   return 0;
 }
@@ -3802,6 +3804,7 @@ payload_make_command_supported_commands_full(struct evrtsp_request *req, struct 
     return -1;
 
   evbuffer_add(req->output_buffer, data, len);
+  free(data);
 
   return 0;
 }
@@ -3829,6 +3832,7 @@ payload_make_audio_mode(struct evrtsp_request *req, struct airplay_session *sess
     return -1;
 
   evbuffer_add(req->output_buffer, data, len);
+  free(data);
 
   return 0;
 }
@@ -4017,6 +4021,7 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
     return -1;
 
   evbuffer_add(req->output_buffer, data, len);
+  free(data);
 
   // What the receiver's PTP peer had sent us when this anchor left
   session->anchor_sent_stats_valid = (ptpd_peer_stats_get(session->ptpd_slave_id, &session->anchor_sent_stats) == 0);
@@ -4058,6 +4063,7 @@ payload_make_teardown(struct evrtsp_request *req, struct airplay_session *sessio
     return -1;
 
   evbuffer_add(req->output_buffer, data, len);
+  free(data);
 
   return 0;
 }
@@ -4619,6 +4625,7 @@ payload_make_setup_stream(struct evrtsp_request *req, struct airplay_session *se
     return -1;
 
   evbuffer_add(req->output_buffer, data, len);
+  free(data);
 
   return 0;
 }
@@ -4876,6 +4883,7 @@ payload_make_setpeers(struct evrtsp_request *req, struct airplay_session *sessio
     return -1;
 
   evbuffer_add(req->output_buffer, data, len);
+  free(data);
 
   DPRINTF(E_INFO, L_AIRPLAY, "Sending SETPEERS to '%s' (%s)\n", session->devname,
           session->setpeersx_skipped_why ? session->setpeersx_skipped_why : "SETPEERSX not sent");
@@ -4959,6 +4967,7 @@ payload_make_setup_session_ntp(struct evrtsp_request *req, struct airplay_sessio
     return -1;
 
   evbuffer_add(req->output_buffer, data, len);
+  free(data);
 
   return 0;
 }
@@ -5023,6 +5032,7 @@ payload_make_setup_session_ptp(struct evrtsp_request *req, struct airplay_sessio
     return -1;
 
   evbuffer_add(req->output_buffer, data, len);
+  free(data);
 
   return 0;
 }
