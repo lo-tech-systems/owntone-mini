@@ -1342,24 +1342,34 @@ pipe_path_validate(const char *path)
 
 // The pipe thread and its command base are unconditional (started in init(),
 // stopped in deinit()), so this only ever needs to update the watch list -
-// to an empty one when autostart is off or there is no path.
+// to an empty one when autostart is off or there is no path. Called on the
+// player thread, which must not wait for the pipe thread (that thread may be
+// waiting for the player), so the update is queued and not waited for; it
+// cannot fail once queued. The command frees its argument and takes the list.
 static int
 pipe_runtime_watch_update(const char *path, int autostart)
 {
-  union pipe_arg cmdarg;
+  union pipe_arg *cmdarg;
   struct pipe *new_pipelist;
-  int ret;
 
   new_pipelist = (autostart && path) ? pipelist_create_path(path) : NULL;
   if (autostart && path && !new_pipelist)
     return -1;
 
-  cmdarg.pipelist = new_pipelist;
-  ret = commands_exec_sync(cmdbase, pipe_watch_update, NULL, &cmdarg);
-  if (ret < 0)
+  cmdarg = malloc(sizeof(union pipe_arg));
+  if (!cmdarg)
     {
       if (new_pipelist)
 	pipe_free(new_pipelist);
+      return -1;
+    }
+
+  cmdarg->pipelist = new_pipelist;
+  if (commands_exec_async(cmdbase, pipe_watch_update, cmdarg) < 0)
+    {
+      if (new_pipelist)
+	pipe_free(new_pipelist);
+      free(cmdarg);
       return -1;
     }
 
