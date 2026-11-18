@@ -2635,7 +2635,6 @@ static void
 device_volume_cb(struct output_device *device, enum output_device_state status)
 {
   device_report(device, status, REPORT_VOLUME);
-  commands_exec_end(cmdbase, 0);
 }
 
 static void
@@ -4319,19 +4318,19 @@ speaker_start_all(void *arg, int *retval)
 }
 
 
+// The volume commands register the level and send it to every device with
+// no operation in flight (a starting device takes it from its start's level
+// row, a stopping one keeps it for its next start). They answer at once: the
+// devices' answers reach the report handler, and no command waits for them.
+
 static enum command_state
 volume_set(void *arg, int *retval)
 {
   union player_arg *cmdarg = arg;
-  int volume;
 
-  volume = cmdarg->intval;
+  outputs_volume_set(cmdarg->intval, device_volume_cb);
 
-  *retval = outputs_volume_set(volume, device_volume_cb);
-
-  if (*retval > 0)
-    return COMMAND_PENDING; // async
-
+  *retval = 0;
   return COMMAND_END;
 }
 
@@ -4349,11 +4348,7 @@ volume_setrel_speaker(void *arg, int *retval)
       return COMMAND_END;
     }
 
-  *retval = speaker_group_volume_apply(device, -1, vol_param->volume, device_volume_cb);
-
-  if (*retval > 0)
-    return COMMAND_PENDING; // async
-
+  *retval = (speaker_group_volume_apply(device, -1, vol_param->volume, device_volume_cb) < 0) ? -1 : 0;
   return COMMAND_END;
 }
 
@@ -4371,11 +4366,7 @@ volume_setabs_speaker(void *arg, int *retval)
       return COMMAND_END;
     }
 
-  *retval = speaker_group_volume_apply(device, vol_param->volume, -1, device_volume_cb);
-
-  if (*retval > 0)
-    return COMMAND_PENDING; // async
-
+  *retval = (speaker_group_volume_apply(device, vol_param->volume, -1, device_volume_cb) < 0) ? -1 : 0;
   return COMMAND_END;
 }
 
@@ -4646,7 +4637,7 @@ speaker_report_classify(struct output_device *device, int level, bool asks)
 
 // One command for every level a device reports and every level it asks for.
 // Results: 0 recorded, 1 not the device's level (it is silent, or its level
-// was just put back), 2 a wake, -1 error; pending while an asked level is sent.
+// was just put back), 2 a wake, -1 error. No answer to an asked level is waited for.
 static enum command_state
 volume_setraw_speaker(void *arg, int *retval)
 {
@@ -4699,9 +4690,9 @@ volume_setraw_speaker(void *arg, int *retval)
   if (vol_param->asks)
     {
       // The device asks for the level: applied on its group and sent, as a
-      // level set through the API is
-      *retval = speaker_group_volume_apply(device, volume, -1, device_volume_cb);
-      return (*retval > 0) ? COMMAND_PENDING : COMMAND_END;
+      // level set through the API is, without waiting for the answers
+      *retval = (speaker_group_volume_apply(device, volume, -1, device_volume_cb) < 0) ? -1 : 0;
+      return COMMAND_END;
     }
 
   // A raw volume is the device reporting its own level (see the DACP
