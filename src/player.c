@@ -1992,30 +1992,27 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
 static void
 speaker_announce(struct output_device *device)
 {
-  struct player_speaker_info *info;
+  struct player_speaker_info info;
   struct evchan_output_state st;
   struct output_device *row;
 
   if (evchan_enabled())
     {
-      CHECK_NULL(L_PLAYER, info = malloc(sizeof(*info)));
-
       row = outputs_device_row(device);
-      device_to_speaker_info(info, row, 0);
+      device_to_speaker_info(&info, row, 0);
 
-      st.state = output_phase_name(info->phase);
-      st.reason = output_failure_name(info->last_failure);
+      st.state = output_phase_name(info.phase);
+      st.reason = output_failure_name(info.last_failure);
       st.member_state = output_phase_name(device->phase);
       st.member_reason = output_failure_name(device->last_failure);
-      st.selected = info->selected;
-      st.held = info->held;
-      st.holdable = info->holdable;
-      st.muted = info->muted;
-      st.volume = info->absvol;
-      st.pin_pending = info->pin_pending;
+      st.selected = info.selected;
+      st.held = info.held;
+      st.holdable = info.holdable;
+      st.muted = info.muted;
+      st.volume = info.absvol;
+      st.pin_pending = info.pin_pending;
 
-      evchan_event_output_state(row->id, device->id, info->name, &st);
-      free(info);
+      evchan_event_output_state(row->id, device->id, info.name, &st);
     }
 
   status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
