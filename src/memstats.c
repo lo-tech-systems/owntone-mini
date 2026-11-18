@@ -39,6 +39,8 @@
 #define MEMSTATS_INTERVAL_PLAYING 300
 #define MEMSTATS_INTERVAL_IDLE 3600
 
+// Written by every worker thread that logs a line (a tick and a requested line
+// can run on two of them at once), so it is read and written atomically
 static time_t memstats_last_logged;
 static bool memstats_stopped = true;
 
@@ -150,7 +152,7 @@ memstats_log_with(const char *reason, int sessions, int enc_in_use, int enc_budg
           mem_available_kb / 1024, swap_used_mib,
           reason ? " - " : "", reason ? reason : "");
 
-  memstats_last_logged = time(NULL);
+  __atomic_store_n(&memstats_last_logged, time(NULL), __ATOMIC_RELAXED);
 }
 
 struct memstats_request
@@ -202,7 +204,7 @@ memstats_tick_cb(void *arg)
   interval = playing ? MEMSTATS_INTERVAL_PLAYING : MEMSTATS_INTERVAL_IDLE;
 
   now = time(NULL);
-  if (now - memstats_last_logged >= interval)
+  if (now - __atomic_load_n(&memstats_last_logged, __ATOMIC_RELAXED) >= interval)
     {
       // Hand free heap pages held across per-track / per-session churn back to
       // the OS. On the worker thread so malloc_trim()'s arena walk never stalls
@@ -214,7 +216,7 @@ memstats_tick_cb(void *arg)
       // it only hands over copies of them and everything else is gathered here
       if (player_memstats_sample(&sessions, &enc_in_use, &enc_budget) == 0)
 	memstats_log_with(NULL, sessions, enc_in_use, enc_budget);
-      memstats_last_logged = now;
+      __atomic_store_n(&memstats_last_logged, now, __ATOMIC_RELAXED);
     }
 
   worker_execute(memstats_tick_cb, NULL, 0, MEMSTATS_TICK_SECONDS);
@@ -224,7 +226,7 @@ int
 memstats_init(void)
 {
   memstats_stopped = false;
-  memstats_last_logged = 0;
+  __atomic_store_n(&memstats_last_logged, 0, __ATOMIC_RELAXED);
 
   worker_execute(memstats_tick_cb, NULL, 0, MEMSTATS_TICK_SECONDS);
 
