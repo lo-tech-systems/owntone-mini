@@ -2090,21 +2090,12 @@ tv_proxy_leader_start(struct output_device *follower)
     DPRINTF(E_WARN, L_PLAYER, "TV proxy: could not start Apple TV '%s'\n", outputs_device_display_name(leader));
 }
 
-static void
-device_activate_cb(struct output_device *device, enum output_device_state status)
+// Applies a start or probe result to the device. Returns the command return
+// value the result stands for (0, -1, -2 or -3); retval is the value the
+// command holds so far
+static int
+device_activate_apply(struct output_device *device, enum output_device_state status, int retval)
 {
-  int retval;
-
-  retval = commands_exec_returnvalue(cmdbase);
-  if (!device)
-    {
-      DPRINTF(E_WARN, L_PLAYER, "Output device disappeared during activation!\n");
-
-      if (retval != -2)
-	retval = -1;
-      goto out;
-    }
-
   DPRINTF(E_DBG, L_PLAYER, "Callback from %s device %s to device_activate_cb (status %d)\n", device->type_name, device->name, status);
 
   if (status == OUTPUT_STATE_PASSWORD)
@@ -2115,8 +2106,7 @@ device_activate_cb(struct output_device *device, enum output_device_state status
       outputs_device_deselect(device);
       device->tv_proxy_followers_deferred = 0;
 
-      retval = -2;
-      goto out;
+      return -2;
     }
 
   if (status == OUTPUT_STATE_FAILED)
@@ -2127,10 +2117,10 @@ device_activate_cb(struct output_device *device, enum output_device_state status
       device->tv_proxy_followers_deferred = 0;
 
       if (device->last_failure == OUTPUT_FAILURE_CAPACITY)
-	retval = -3;
-      else if (retval != -2)
-	retval = -1;
-      goto out;
+	return -3;
+      if (retval != -2)
+	return -1;
+      return retval;
     }
 
   // Any status other than the two handled above is a step towards (or the
@@ -2151,8 +2141,39 @@ device_activate_cb(struct output_device *device, enum output_device_state status
   // there is no session any more
   outputs_device_cb_set(device, device_streaming_cb);
 
- out:
+  return retval;
+}
+
+static void
+device_activate_cb(struct output_device *device, enum output_device_state status)
+{
+  int retval;
+
+  retval = commands_exec_returnvalue(cmdbase);
+  if (!device)
+    {
+      DPRINTF(E_WARN, L_PLAYER, "Output device disappeared during activation!\n");
+
+      if (retval != -2)
+	retval = -1;
+    }
+  else
+    retval = device_activate_apply(device, status, retval);
+
   commands_exec_end(cmdbase, retval);
+}
+
+// Result of a start made while the player is already playing a pipe, with no
+// command waiting for it
+static void
+device_join_cb(struct output_device *device, enum output_device_state status)
+{
+  if (device)
+    device_activate_apply(device, status, 0);
+  else
+    DPRINTF(E_WARN, L_PLAYER, "Output device disappeared during activation!\n");
+
+  status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
 }
 
 /* ------------------------- Internal playback routines --------------------- */
@@ -2472,6 +2493,48 @@ playback_abort(void *arg, int *retval)
   return COMMAND_END;
 }
 
+// With nothing selected and nothing started, start the first speaker that may be
+// chosen automatically. Takes and returns the result of the start that preceded
+// it, which is the result of the last attempt made here if there is one.
+static int
+outputs_autoselect(output_status_cb cb, int ret)
+{
+  struct output_device *device;
+
+  for (device = outputs_list(); device; device = device->next)
+    {
+      if (device->selected || outputs_priority(device) == 0 || device->session)
+	continue;
+
+      ret = outputs_device_start(device, cb, false);
+      if (ret < 0)
+	continue;
+
+      DPRINTF(E_LOG, L_PLAYER, "Autoselected %s device '%s'\n", device->type_name, device->name);
+      outputs_device_select(device, -1);
+      break;
+    }
+
+  return ret;
+}
+
+// A live pipe plays from the moment it opens and drains at the live rate, with
+// or without speakers. The selected speakers are started here, with callbacks
+// that hold no command, and each joins the running stream as it comes up
+static void
+pb_outputs_join(void)
+{
+  int ret;
+
+  ret = outputs_start(device_join_cb, device_streaming_cb, false);
+  if (ret < 0)
+    DPRINTF(E_WARN, L_PLAYER, "All selected speakers failed to start\n");
+
+  // autoselect also applies in non-error cases (if no devices were selected)
+  if (speaker_autoselect && outputs_sessions_count() == 0 && ret <= 0)
+    outputs_autoselect(device_join_cb, ret);
+}
+
 static enum command_state
 playback_start_bh(void *arg, int *retval)
 {
@@ -2484,6 +2547,11 @@ playback_start_bh(void *arg, int *retval)
   // We also ask listeners to update speaker/volume state, since it is possible
   // some of the speakers we tried to start responded with failure
   status_update(PLAY_PLAYING, LISTENER_PLAYER | LISTENER_SPEAKER | LISTENER_VOLUME);
+
+  // A pipe did not wait for its speakers, so they are started now that the
+  // player is playing. A speaker that is already running is left alone.
+  if (pb_session.playing_now && pb_session.playing_now->data_kind == DATA_KIND_PIPE)
+    pb_outputs_join();
 
   // Complete any TV proxy group whose leader was probed before the player
   // reached PLAY_PLAYING; its followers were deferred until this point.
@@ -2502,7 +2570,6 @@ static enum command_state
 playback_start_item(void *arg, int *retval)
 {
   struct db_queue_item *queue_item = arg;
-  struct output_device *device;
   uint32_t seek_ms;
   int ret;
 
@@ -2548,6 +2615,14 @@ playback_start_item(void *arg, int *retval)
 	}
     }
 
+  // A live pipe does not wait for its speakers: it plays at once and they join
+  // from the bottom half
+  if (pb_session.playing_now && pb_session.playing_now->data_kind == DATA_KIND_PIPE)
+    {
+      *retval = 0;
+      return COMMAND_END;
+    }
+
   // Start sessions on selected devices. We shouldn't see any callbacks to
   // device_shutdown_cb, since the unselected devices shouldn't have sessions.
   *retval = outputs_start(device_activate_cb, device_shutdown_cb, false);
@@ -2559,21 +2634,7 @@ playback_start_item(void *arg, int *retval)
   // because that would mean we are initiating a session. Just to be safe, we
   // check anyway.
   if (speaker_autoselect && outputs_sessions_count() == 0 && *retval <= 0)
-    {
-      for (device = outputs_list(); device; device = device->next)
-	{
-	  if (device->selected || outputs_priority(device) == 0 || device->session)
-	    continue;
-
-	  *retval = outputs_device_start(device, device_activate_cb, false);
-	  if (*retval < 0)
-	    continue;
-
-	  DPRINTF(E_LOG, L_PLAYER, "Autoselected %s device '%s'\n", device->type_name, device->name);
-	  outputs_device_select(device, -1);
-	  break;
-	}
-    }
+    *retval = outputs_autoselect(device_activate_cb, *retval);
 
   // We're async if we need to wait for devices starting
   if (*retval > 0)
