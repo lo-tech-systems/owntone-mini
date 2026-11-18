@@ -685,6 +685,9 @@ struct airplay_session
   // A resume flush is out: the session stays held until it is answered, and a
   // second resume in the meantime would flush and re-anchor it twice
   bool resume_in_flight;
+  // The elapsed time told to the receiver while held (seconds), so a paused
+  // stream is not shown moving on; negative when not held
+  double held_elapsed_s;
   // The anchor of a buffered session, see airplay_anchor.h for the states and
   // the rules. Only anchor_event() writes these four fields and arms or
   // deletes the retry timer.
@@ -2520,6 +2523,7 @@ session_make(struct output_device *device, int callback_id)
   session->callback_id = callback_id;
 
   session->server_fd = -1;
+  session->held_elapsed_s = -1.0;
 
   session->password = device->password;
 
@@ -4513,6 +4517,17 @@ airplay_mrp_elapsed_s(struct output_metadata *metadata)
   return ((double)metadata->pos_ms + (double)diff_ms) / 1000.0;
 }
 
+// The elapsed time to tell a receiver: the frozen one while its session is
+// held, otherwise the live position
+static double
+session_mrp_elapsed_s(struct airplay_session *session, struct output_metadata *metadata)
+{
+  if (session->held && session->held_elapsed_s >= 0.0)
+    return session->held_elapsed_s;
+
+  return airplay_mrp_elapsed_s(metadata);
+}
+
 // Builds the "replace" updateMRNowPlayingInfo body: full metadata + artwork
 // (bytes ride EVERY replace push - the receiver does not cache artwork
 // across replaces) + timeline. Fetches the queue item directly rather than
@@ -4584,7 +4599,7 @@ payload_make_nowplaying(struct evrtsp_request *req, struct airplay_session *sess
 
   ret = airplay_mrp_nowplaying_make(req->output_buffer, session->mrp, queue_item->id,
       queue_item->title, queue_item->artist, queue_item->album,
-      duration_s, airplay_mrp_elapsed_s(metadata), !session->mrp->paused,
+      duration_s, session_mrp_elapsed_s(session, metadata), !session->mrp->paused,
       artwork, artwork_len, artwork_mime, false);
 
   free_queue_item(queue_item, 0);
@@ -4607,7 +4622,7 @@ payload_make_nowplaying_update(struct evrtsp_request *req, struct airplay_sessio
     return 1;
 
   return airplay_mrp_nowplaying_make(req->output_buffer, session->mrp, 0,
-      NULL, NULL, NULL, 0.0, airplay_mrp_elapsed_s(metadata), !session->mrp->paused,
+      NULL, NULL, NULL, 0.0, session_mrp_elapsed_s(session, metadata), !session->mrp->paused,
       NULL, 0, NULL, true);
 }
 
@@ -8546,6 +8561,10 @@ airplay_device_flush(struct output_device *device, int callback_id)
 static void
 hold_nowplaying_send(struct airplay_session *session, bool paused)
 {
+  // Taken here, at the start of the hold, so every push while held says the
+  // same; cleared at its end
+  session->held_elapsed_s = (paused && airplay_cur_metadata) ? airplay_mrp_elapsed_s(airplay_cur_metadata) : -1.0;
+
   if (!session->mrp || !airplay_cur_metadata)
     {
       DPRINTF(E_DBG, L_AIRPLAY, "No MediaRemote %s for '%s': no now-playing yet\n", paused ? "pause" : "resume", session->devname);
