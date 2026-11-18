@@ -181,6 +181,12 @@ airplay_anchor_holds_line(enum airplay_anchor_state state)
   return (state == ANCHOR_IN_FLIGHT || state == ANCHOR_CONFIRMED);
 }
 
+bool
+airplay_anchor_pause_due(const struct airplay_pause_in *in)
+{
+  return in->buffered && in->streaming && in->held && !in->suppressed && !in->stopping && in->anchor == ANCHOR_CONFIRMED;
+}
+
 // Unsigned arithmetic: the clock is read after the send time, on the same
 // thread, so the difference cannot be negative
 bool

@@ -113,6 +113,24 @@ airplay_anchor_start_hold(const struct airplay_anchor_hold_in *in, uint64_t min_
 bool
 airplay_anchor_holds_line(enum airplay_anchor_state state);
 
+// What the caller knows about a session, for deciding whether to tell its
+// receiver to pause in place
+struct airplay_pause_in
+{
+  bool buffered;            // a buffered session
+  bool streaming;           // in the streaming state
+  bool held;                // the supervisor holds it
+  bool suppressed;          // it carries no audio
+  bool stopping;            // a stop has begun
+  enum airplay_anchor_state anchor;
+};
+
+// True when the receiver should be told to pause in place: a held, streaming,
+// buffered session that carries audio, is not stopping and whose anchor has
+// been accepted. Nothing else about the anchor changes.
+bool
+airplay_anchor_pause_due(const struct airplay_pause_in *in);
+
 // True while an unanswered anchor sent at sent_ms may still hold the shared
 // write head.
 bool

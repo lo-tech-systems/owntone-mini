@@ -297,6 +297,107 @@ p_holds_line(void)
   case_end();
 }
 
+// Every combination of the five flags and the five anchor states, with the
+// expected value worked out on its own: only the one combination of held,
+// buffered, streaming, carrying audio, not stopping and accepted pauses
+static void
+p_pause_due_all(void)
+{
+  struct airplay_pause_in in;
+  unsigned bits;
+  int anchor;
+  int due_count = 0;
+  bool expected;
+  bool got;
+
+  case_begin("p_pause_due_all");
+
+  for (bits = 0; bits < 32; bits++)
+    for (anchor = ANCHOR_NONE; anchor <= ANCHOR_CONFIRMED; anchor++)
+      {
+	in.buffered = (bits & 1) != 0;
+	in.streaming = (bits & 2) != 0;
+	in.held = (bits & 4) != 0;
+	in.suppressed = (bits & 8) != 0;
+	in.stopping = (bits & 16) != 0;
+	in.anchor = anchor;
+
+	expected = (bits == (1 | 2 | 4)) && (anchor == ANCHOR_CONFIRMED);
+	got = airplay_anchor_pause_due(&in);
+	if (got != expected)
+	  printf("FAIL p_pause_due_all: flags 0x%02x anchor %s gave %d\n", bits, airplay_anchor_state_name(anchor), got);
+	CHECK(got == expected);
+	if (got)
+	  due_count++;
+      }
+
+  CHECK(due_count == 1);
+
+  case_end();
+}
+
+static void
+pause_in_base(struct airplay_pause_in *in)
+{
+  in->buffered = true;
+  in->streaming = true;
+  in->held = true;
+  in->suppressed = false;
+  in->stopping = false;
+  in->anchor = ANCHOR_CONFIRMED;
+}
+
+static void
+p_pause_due_named(void)
+{
+  struct airplay_pause_in in;
+
+  case_begin("p_pause_due_named");
+
+  // Held with its anchor accepted: paused now
+  pause_in_base(&in);
+  CHECK(airplay_anchor_pause_due(&in));
+
+  // Held while the anchor is out: not yet, the acceptance pauses it
+  pause_in_base(&in);
+  in.anchor = ANCHOR_IN_FLIGHT;
+  CHECK(!airplay_anchor_pause_due(&in));
+
+  // Not held
+  pause_in_base(&in);
+  in.held = false;
+  CHECK(!airplay_anchor_pause_due(&in));
+
+  // Carries no audio (an Apple TV leading its HomePods)
+  pause_in_base(&in);
+  in.suppressed = true;
+  CHECK(!airplay_anchor_pause_due(&in));
+
+  // Stopping
+  pause_in_base(&in);
+  in.stopping = true;
+  CHECK(!airplay_anchor_pause_due(&in));
+
+  // Connected, not streaming
+  pause_in_base(&in);
+  in.streaming = false;
+  CHECK(!airplay_anchor_pause_due(&in));
+
+  // Not buffered
+  pause_in_base(&in);
+  in.buffered = false;
+  CHECK(!airplay_anchor_pause_due(&in));
+
+  // A pending or retrying anchor
+  pause_in_base(&in);
+  in.anchor = ANCHOR_PENDING;
+  CHECK(!airplay_anchor_pause_due(&in));
+  in.anchor = ANCHOR_RETRY_WAIT;
+  CHECK(!airplay_anchor_pause_due(&in));
+
+  case_end();
+}
+
 static void
 p_within_hold_in_flight_inside(void)
 {
@@ -1040,6 +1141,8 @@ main(int argc, char **argv)
   t_sweep_all_cells();
 
   p_holds_line();
+  p_pause_due_all();
+  p_pause_due_named();
   p_within_hold_in_flight_inside();
   p_within_hold_in_flight_at_bound();
   p_within_hold_other_states();

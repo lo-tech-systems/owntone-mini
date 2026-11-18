@@ -369,6 +369,8 @@ enum airplay_seq_type
   AIRPLAY_SEQ_FLUSH_BUFFERED,
   AIRPLAY_SEQ_FLUSH_OFFSET,
   AIRPLAY_SEQ_FLUSH_RESUME,
+  // A rate 0 SETRATEANCHORTIME that pauses a held session in place
+  AIRPLAY_SEQ_PAUSE_ANCHOR,
   AIRPLAY_SEQ_CONTINUE, // Must be last element
 };
 
@@ -680,6 +682,9 @@ struct airplay_session
   // no frames are written to it, and a connected session is not promoted,
   // until the hold ends (see airplay_device_hold_set)
   bool held;
+  // A resume flush is out: the session stays held until it is answered, and a
+  // second resume in the meantime would flush and re-anchor it twice
+  bool resume_in_flight;
   // The anchor of a buffered session, see airplay_anchor.h for the states and
   // the rules. Only anchor_event() writes these four fields and arms or
   // deletes the retry timer.
@@ -3929,6 +3934,43 @@ anchor_offset_apply(uint64_t *secs, uint64_t *frac, int offset_ms)
     }
 }
 
+// Puts a SETRATEANCHORTIME body for the given network time, frame and rate on
+// the request.
+//
+// frac and the timeline ID can exceed INT64_MAX (the timeline ID always
+// does - libairptp's clock ids start 0xFFFF). plist_new_uint() would then
+// emit them as 16-byte bplist integers; these fields must be serialized as
+// 8-byte signed ints or some receivers reject the anchor. Force the 8-byte
+// encoding via the signed-int path; the receiver reads the bits back as
+// uint64.
+static int
+anchor_body_add(struct evrtsp_request *req, uint64_t secs, uint64_t frac, uint32_t rtptime, int rate)
+{
+  plist_t root;
+  uint8_t *data;
+  size_t len;
+  int ret;
+
+  root = plist_new_dict();
+  wplist_dict_add_uint(root, "networkTimeSecs", secs);
+  wplist_dict_add_int(root, "networkTimeFrac", (int64_t)frac);
+  wplist_dict_add_int(root, "networkTimeTimelineID", (int64_t)ptpd_clock_id_get());
+  wplist_dict_add_uint(root, "networkTimeFlags", 0);
+  wplist_dict_add_uint(root, "rtpTime", rtptime);
+  wplist_dict_add_uint(root, "rate", rate);
+
+  ret = wplist_to_bin(&data, &len, root);
+  plist_free(root);
+
+  if (ret < 0)
+    return -1;
+
+  evbuffer_add(req->output_buffer, data, len);
+  free(data);
+
+  return 0;
+}
+
 // The receiver's decode chain doesn't start until it gets a rate=1 anchor -
 // audio queued before that point is simply held, so it is fine to start
 // writing buffered packets right after SETUP without waiting for this to
@@ -3942,9 +3984,6 @@ static int
 payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *session, void *arg)
 {
   struct airplay_master_session *ams = session->master_session;
-  plist_t root;
-  uint8_t *data;
-  size_t len;
   uint64_t secs;
   uint64_t frac;
   uint64_t frac_before;
@@ -4054,36 +4093,17 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
   // transmitted to this receiver is shifted.
   anchor_offset_apply(&secs, &frac, session->offset_ms);
 
-  root = plist_new_dict();
-  wplist_dict_add_uint(root, "networkTimeSecs", secs);
-  // frac and the timeline ID can exceed INT64_MAX (the timeline ID always
-  // does - libairptp's clock ids start 0xFFFF). plist_new_uint() would then
-  // emit them as 16-byte bplist integers; these fields must be serialized as
-  // 8-byte signed ints or some receivers reject the anchor. Force the 8-byte
-  // encoding via the signed-int path; the receiver reads the bits back as
-  // uint64.
-  wplist_dict_add_int(root, "networkTimeFrac", (int64_t)frac);
-  wplist_dict_add_int(root, "networkTimeTimelineID", (int64_t)ptpd_clock_id_get());
-  wplist_dict_add_uint(root, "networkTimeFlags", 0);
-  // The anchor names exactly the first frame this session will be delivered
-  // (see anchor_rtptime above) - the strictest reading of the anchor-then-data
-  // ordering, and safe against receivers discarding audio received before the
-  // anchor or stalling on a missing anchor frame.
-  wplist_dict_add_uint(root, "rtpTime", anchor_rtptime);
-  wplist_dict_add_uint(root, "rate", 1);
-
   DPRINTF(E_DBG, L_AIRPLAY, "SETRATEANCHORTIME payload for '%s': networkTimeSecs=%" PRIu64 ", networkTimeFrac=%" PRIu64 ", networkTimeTimelineID=%" PRIu64 ", rtpTime=%u (%s), rate=1\n",
           session->devname, secs, frac, ptpd_clock_id_get(), anchor_rtptime,
           shared_head ? "shared write head" : anchor_rtptime == session->master_session->buffered_rtptime ? "write head" : "join point");
 
-  ret = wplist_to_bin(&data, &len, root);
-  plist_free(root);
-
+  // The anchor names exactly the first frame this session will be delivered
+  // (see anchor_rtptime above) - the strictest reading of the anchor-then-data
+  // ordering, and safe against receivers discarding audio received before the
+  // anchor or stalling on a missing anchor frame.
+  ret = anchor_body_add(req, secs, frac, anchor_rtptime, 1);
   if (ret < 0)
     return -1;
-
-  evbuffer_add(req->output_buffer, data, len);
-  free(data);
 
   // What the receiver's PTP peer had sent us when this anchor left
   session->anchor_sent_stats_valid = (ptpd_peer_stats_get(session->ptpd_slave_id, &session->anchor_sent_stats) == 0);
@@ -4091,6 +4111,56 @@ payload_make_send_anchor(struct evrtsp_request *req, struct airplay_session *ses
   // The request is written as soon as this returns
   anchor_event(session, ANCHOR_EV_SENT, ANCHOR_HOLD_NONE);
 
+  return 0;
+}
+
+// Pauses a held session in place: a rate 0 anchor at the frame the receiver
+// is playing now, from the shared mapping and shifted by the session's offset
+// in the same way as a rate 1 anchor. The receiver keeps its buffer; the
+// anchor state is left alone, and the hold ends with a flush and a new anchor
+static int
+payload_make_pause_anchor(struct evrtsp_request *req, struct airplay_session *session, void *arg)
+{
+  struct airplay_master_session *ams = session->master_session;
+  uint64_t now_secs;
+  uint64_t now_frac;
+  int64_t since_ns;
+  uint32_t rtptime;
+
+  if (!ams || !ams->buffered_anchor_mapped)
+    {
+      DPRINTF(E_DBG, L_AIRPLAY, "No pause in place for '%s': no shared timing\n", session->devname);
+      return 1; // Skipped, the sequence completes with nothing sent
+    }
+
+  if (ptpd_network_time_get(&now_secs, &now_frac) < 0)
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "Could not read network time for the pause of '%s'\n", session->devname);
+      return -1;
+    }
+
+  // How far the receiver is into the shared line now: the time since the
+  // mapping's point, less the session's offset, since the receiver plays each
+  // frame that much later
+  since_ns = ((int64_t)now_secs - (int64_t)ams->buffered_anchor_map_secs) * 1000000000LL
+             + (int64_t)(((now_frac >> 32) * 1000000000ULL) >> 32)
+             - (int64_t)(((ams->buffered_anchor_map_frac >> 32) * 1000000000ULL) >> 32)
+             - (int64_t)session->offset_ms * 1000000LL;
+
+  // Whole seconds and the rest apart, so a line that has run for days does
+  // not overflow; rtpTime wraps as the receiver expects
+  rtptime = ams->buffered_anchor_map_rtptime;
+  if (since_ns > 0)
+    rtptime += (uint32_t)((since_ns / 1000000000LL) * (int64_t)ams->buffered_sample_rate
+                          + (since_ns % 1000000000LL) * (int64_t)ams->buffered_sample_rate / 1000000000LL);
+
+  if (anchor_body_add(req, now_secs, now_frac, rtptime, 0) < 0)
+    return -1;
+
+  DPRINTF(E_INFO, L_AIRPLAY, "Pausing '%s' in place at rtpTime %u (%" PRIi64 " ms into the line)\n",
+          session->devname, rtptime, since_ns / 1000000);
+
+  session->ctrl_sent_ms = monotonic_ms();
   return 0;
 }
 
@@ -6064,18 +6134,75 @@ response_handler_flush_offset(struct evrtsp_request *req, struct airplay_session
   return AIRPLAY_SEQ_CONTINUE;
 }
 
+// Whether the receiver of this session should be told to pause in place now
+static bool
+session_pause_due(struct airplay_session *session)
+{
+  struct airplay_pause_in in = {
+    .buffered = session->buffered_mode,
+    .streaming = (session->state == AIRPLAY_STATE_STREAMING),
+    .held = session->held,
+    .suppressed = session->audio_suppressed,
+    .stopping = session->stopping,
+    .anchor = session->anchor_state,
+  };
+
+  return airplay_anchor_pause_due(&in);
+}
+
 // Ends a hold (see airplay_device_hold_set). The receiver paused itself, and
 // its own Play does not restart it: it has to be flushed and given a fresh
 // anchor, as for an offset change. The session stays held until this answer,
 // so no frame reaches it between the request and the flush taking effect; the
 // next write then promotes it, which re-anchors it and sends the MediaRemote
-// resume.
+// resume. If the session was held again while the flush was out, it stays
+// held and is not promoted.
 static enum airplay_seq_type
 response_handler_flush_resume(struct evrtsp_request *req, struct airplay_session *session)
 {
-  session->held = false;
+  struct output_device *device = outputs_device_get(session->device_id);
+
+  session->resume_in_flight = false;
+
+  // Held again while the flush was out: it stays held, flushed and silent,
+  // and the next end of the hold promotes it. A device that has gone reads
+  // as not held
+  session->held = device && device->held;
+  if (session->held)
+    DPRINTF(E_INFO, L_AIRPLAY, "'%s' was held again while resuming; it stays held\n", session->devname);
+
   session->state = AIRPLAY_STATE_CONNECTED;
   anchor_event(session, ANCHOR_EV_FLUSH, ANCHOR_HOLD_NONE);
+  return AIRPLAY_SEQ_CONTINUE;
+}
+
+// The answer to a pause in place. A refusal changes nothing else: the session
+// stays held and is sent no frames, so the receiver plays out what it has
+static enum airplay_seq_type
+response_handler_pause_anchor(struct evrtsp_request *req, struct airplay_session *session)
+{
+  plist_t response = NULL;
+  plist_t item;
+  int64_t inband_status = 0;
+  uint64_t took_ms;
+
+  if (evbuffer_get_length(req->input_buffer) > 0 && wplist_from_evbuf(&response, req->input_buffer) == 0)
+    {
+      item = (plist_get_node_type(response) == PLIST_DICT) ? plist_dict_get_item(response, "status") : NULL;
+      if (item)
+	plist_get_int_val(item, &inband_status);
+      plist_free(response);
+    }
+
+  took_ms = session->ctrl_sent_ms ? monotonic_ms() - session->ctrl_sent_ms : 0;
+  session->ctrl_sent_ms = 0;
+
+  if (req->response_code == RTSP_OK && inband_status == 0)
+    DPRINTF(E_INFO, L_AIRPLAY, "Paused '%s' in place after %" PRIu64 " ms\n", session->devname, took_ms);
+  else
+    DPRINTF(E_INFO, L_AIRPLAY, "'%s' did not pause in place (%d, in-band %" PRIi64 ") after %" PRIu64 " ms; it plays out its buffer\n",
+            session->devname, req->response_code, inband_status, took_ms);
+
   return AIRPLAY_SEQ_CONTINUE;
 }
 
@@ -6168,6 +6295,12 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
 
       DPRINTF(E_INFO, L_AIRPLAY, "SETRATEANCHORTIME accepted by '%s' after %" PRIu64 " ms\n", session->devname, answer_ms);
       DPRINTF(E_DBG, L_AIRPLAY, "SETRATEANCHORTIME accepted by '%s': %s\n", session->devname, stats_desc);
+
+      // A session held before its anchor was accepted is paused now, so it
+      // does not sit armed with an empty buffer
+      if (session_pause_due(session))
+	return AIRPLAY_SEQ_PAUSE_ANCHOR;
+
       return AIRPLAY_SEQ_CONTINUE;
     }
 
@@ -7111,6 +7244,8 @@ static struct airplay_seq_definition airplay_seq_definition[] =
   { AIRPLAY_SEQ_FLUSH_BUFFERED, session_status, session_failure },
   { AIRPLAY_SEQ_FLUSH_OFFSET, NULL, session_failure },
   { AIRPLAY_SEQ_FLUSH_RESUME, NULL, session_failure },
+  // An unanswered pause fails the session, as an unanswered anchor does
+  { AIRPLAY_SEQ_PAUSE_ANCHOR, NULL, session_failure },
 };
 
 // The size of the second array dimension MUST at least be the size of largest
@@ -7223,6 +7358,9 @@ static struct airplay_seq_request airplay_seq_request[][11] =
   },
   {
     { AIRPLAY_SEQ_FLUSH_RESUME, "FLUSHBUFFERED (resume)", EVRTSP_REQ_FLUSHBUFFERED, payload_make_flush_buffered, response_handler_flush_resume, "application/x-apple-binary-plist", NULL, false },
+  },
+  {
+    { AIRPLAY_SEQ_PAUSE_ANCHOR, "SETRATEANCHORTIME (pause)", EVRTSP_REQ_SETRATEANCHORTIME, payload_make_pause_anchor, response_handler_pause_anchor, "application/x-apple-binary-plist", NULL, true },
   },
 };
 
@@ -8452,6 +8590,15 @@ airplay_device_hold_set(struct output_device *device, bool held)
       session->held = true;
       DPRINTF(E_INFO, L_AIRPLAY, "Holding '%s': it paused itself\n", session->devname);
       hold_nowplaying_send(session, true);
+
+      // Every held member is paused in place, not only the one that paused
+      // itself: the player holds each member of the row. A session whose
+      // anchor is still out is paused when it is accepted
+      if (session_pause_due(session))
+	sequence_start(AIRPLAY_SEQ_PAUSE_ANCHOR, session, NULL, "hold");
+      else
+	DPRINTF(E_DBG, L_AIRPLAY, "No pause in place for '%s' yet (state %d, anchor %s)\n",
+		session->devname, session->state, airplay_anchor_state_name(session->anchor_state));
       return 0;
     }
 
@@ -8469,7 +8616,16 @@ airplay_device_hold_set(struct output_device *device, bool held)
       return 0;
     }
 
+  if (session->resume_in_flight)
+    {
+      DPRINTF(E_DBG, L_AIRPLAY, "'%s' is already resuming\n", session->devname);
+      return 0;
+    }
+
+  session->resume_in_flight = true;
+
   // Stays held until the flush is answered
+  DPRINTF(E_INFO, L_AIRPLAY, "Resuming '%s' with a flush and a new anchor\n", session->devname);
   sequence_start(AIRPLAY_SEQ_FLUSH_RESUME, session, NULL, "resume");
   return 0;
 }
