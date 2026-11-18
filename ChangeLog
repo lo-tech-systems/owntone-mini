@@ -54,6 +54,14 @@
 - fix: enabling a speaker that fails at once, such as one inside its grace
   period after disappearing from the network, and a speaker that learns a
   buffered mode, now update clients of the outputs list
+- new: the level set on a speaker with its own knob, buttons or app is
+  followed for speakers that report it only over UPnP, such as the Edifier
+  MS50A and Arylic amplifiers. The daemon finds the speaker's UPnP renderer,
+  subscribes to its volume events and records each level on the output, also
+  reporting it on the event channel as `device_volume` with verb
+  `upnp.volume`. Settings `upnp_volume_follow` (default on) and
+  `upnp_event_port` (default 3690), and per speaker `upnp_follow`. Each row of
+  `GET /api/outputs` has `volume_follow`
 
 ## Version 1.5.0 - 2026-10-14
 

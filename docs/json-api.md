@@ -182,6 +182,7 @@ curl -X PUT "http://localhost:3689/api/metadata" \
 | `supported_modes` | array | Concrete protocol modes available for this output; a subset of `["raop", "airplay2", "airplay2_buffered", "airplay2_buffered_24", "airplay2_surround_stereo", "airplay2_surround_upmix"]`. Reflects capability learned from the device itself, so it can grow after the output is first discovered. Never includes `"auto"`, which is always accepted. Empty if no protocol is known yet |
 | `session` | object | What the output is playing on, see [Session](#session) |
 | `has_homepods` | boolean | `true` only for an Apple TV that currently leads a group of HomePods which are present, which is exactly when it can be enabled with `include_tv: false` (see [Update an output](#update-an-output)). `false` for every other output |
+| `volume_follow` | string | Whether the level the speaker sets itself (its knob, buttons or app) is followed through its UPnP renderer: `"upnp"` (followed), `"searching"` (the first search for a renderer is under way), `"none"` (no renderer found, the speaker is left out, or following is off) or `"unknown_scale"` (a renderer was found but its volume scale does not fit, so its reports are not taken). See [upnp_volume_follow](configuration.md#upnp_volume_follow) |
 
 #### Session
 
@@ -576,6 +577,8 @@ in the path. An unknown setting gives HTTP `404 Not Found`.
 | `/api/settings/player/pipe_bits_per_sample` | integer | Pipe input bit depth, `16` or `32`; restart required |
 | `/api/settings/player/resample_quality` | string | Output resampler quality for format-mismatched paths, `high` or `standard` (default `standard`); unknown values fall back to `standard`; takes effect on the next playback session, no restart required |
 | `/api/settings/player/device_volume_echo` | string | What to do with a level a speaker reports itself: `off` (record only), `reporter` (default, also send it back to that speaker) or `group` (send it to the speaker and its group); other values are refused; applied immediately, no restart required |
+| `/api/settings/player/upnp_volume_follow` | boolean | Follow the level a speaker sets itself through its UPnP renderer (default `true`); applied immediately, no restart required |
+| `/api/settings/player/upnp_event_port` | integer | Port on which UPnP renderers send volume events, valid range `1024` to `65535` (default `3690`); restart required |
 
 ### Get a setting
 

@@ -78,6 +78,8 @@ that is noted.
 | `tv_proxy_leader_audio_suppress` | boolean | `true` | `true`, `false` | See [tv_proxy_leader_audio_suppress](#tv_proxy_leader_audio_suppress). | Yes (`player`) |
 | `device_removal_grace_period` | integer | `180` | 0 to 3600 (seconds) | How long a speaker that has disappeared from the network is kept before it is removed. A value outside the range in the file is replaced by 180 with a warning. | Yes (`player`) |
 | `device_volume_echo` | string | `"reporter"` | `off`, `reporter`, `group` | What happens to a level a speaker reports itself, for example from its own buttons. `off` records it only. `reporter` also sends it back to that speaker once its reports have stopped for 150 ms, for receivers that wait for the sender to apply the level. `group` sends it to the speaker and every member of its group. Applied at once. Not written to the file by default. | Yes (`player`) |
+| `upnp_volume_follow` | boolean | `true` | `true`, `false` | See [upnp_volume_follow](#upnp_volume_follow). | Yes (`player`) |
+| `upnp_event_port` | integer | `3690` | 1024 to 65535 | TCP port on which UPnP renderers send the volume events of speakers that are followed. A speaker's renderer must be able to reach it. If the port cannot be opened, following is off until a restart, with a warning in the log. Restart required. | Yes (`player`) |
 | `speaker_autoselect` | boolean | `false` | `true`, `false` | If playback is started with no speaker selected, start on every available speaker. Not written to the file by default. | No |
 | `clear_queue_on_stop_disable` | boolean | `false` | `true`, `false` | Stopping playback normally clears the queue. Set `true` to keep the queue. Not written to the file by default. | No |
 | `high_resolution_clock` | boolean | `true` | `true`, `false` | Set `false` on a system whose timer resolution is too coarse for the player tick, which makes the player use a longer tick interval. Not written to the file by default. | No |
@@ -161,6 +163,33 @@ insert a resample stage and are unaffected either way. An unrecognised value is
 treated as `standard`. A change through the API takes effect on the next
 playback session.
 
+### upnp_volume_follow
+
+Some AirPlay speakers, such as the Edifier MS50A and Arylic amplifiers, which
+are built on a Linkplay module, do not report a change made with their own
+knob, buttons or app over AirPlay, so the level shown would stay where it was.
+Their UPnP RenderingControl service does report it. With this setting on, the
+daemon looks for such a service on each AirPlay speaker with an SSDP search,
+subscribes to the one that answers from the speaker's own address, and records
+the levels it reports on the speaker and its group, without sending them back.
+Each recorded level is also sent on the [event channel](event-channel.md) as a
+`device_volume` event with the verb `upnp.volume`.
+
+A renderer's volume scale can differ from the daemon's by a small offset. The
+daemon learns it from the renderer's answer to the next level it sends, and
+saves it as the speaker's `upnp_volume_offset`. For two seconds after a level
+is sent, whatever the renderer reports is taken as that answer, so a turn of
+the knob in that time is missed (the next turn is not). If an answer does not
+fit the daemon's scale plus a small offset, the speaker's reports are not
+taken, and its row shows `volume_follow: "unknown_scale"` (see the
+[JSON API](json-api.md#output-object)).
+
+The search, the subscriptions and the events are on the local network: SSDP on
+UDP port 1900 (multicast), and HTTP to the renderer and to `upnp_event_port`
+on this host. Turning the setting off unsubscribes from every renderer at
+once. A speaker can be left out with its `upnp_follow` setting (see
+[Per-device settings](#per-device-settings)).
+
 ## Access control
 
 Four settings decide who can reach the HTTP JSON API and how.
@@ -223,6 +252,8 @@ have the right JSON type to be read, otherwise the default applies.
 | `reconnect` | boolean | Not set (automatic) | `true`, `false` | Try to reconnect automatically if the speaker drops the connection. Left unset, reconnect is on for Apple TV and HomePod devices and off for others. `null` counts as unset. |
 | `auth_key` | string | Not set | Written by the daemon | Pairing key for a speaker that uses AirPlay 2 pairing, saved so that it survives a restart. Do not edit by hand. Deleting it makes the speaker pair again. |
 | `buffered_modes` | integer | `0` | Written by the daemon | Bit mask of the buffered AirPlay 2 formats the speaker has been seen to support, saved so that it survives a restart. Do not edit by hand. |
+| `upnp_follow` | boolean | `true` | `true`, `false` | Set `false` to stop the daemon looking for and following a UPnP renderer on this speaker (see [upnp_volume_follow](#upnp_volume_follow)). Read whenever the speaker list changes, and when `upnp_volume_follow` is changed through the API. |
+| `upnp_volume_offset` | integer | Not set (0) | Written by the daemon | Difference between the speaker's UPnP volume scale and the daemon's, learned from the renderer's answers to levels sent. Deleting it makes the daemon learn it again. |
 
 The daemon creates the `airplay_devices` entry for a speaker, and the
-`auth_key` and `buffered_modes` keys in it, when it learns them.
+`auth_key`, `buffered_modes` and `upnp_volume_offset` keys in it, when it learns them.

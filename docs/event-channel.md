@@ -75,7 +75,7 @@ put an event in order with the hello.
 | `kind` | Extra fields | Meaning |
 |--------|--------------|---------|
 | `receiver_command` | `verb` (the receiver's own word, unchanged: for example `paus`, `play`, `nitm`, `pitm`), `protocol` (`"airplay2_events"`) | A speaker or Apple TV sent a command on its events connection. The daemon does not pause, resume or deselect anything because of it. The receiver still gets its normal reply. |
-| `device_volume` | `verb` (`dmcp.device-volume`, `dmcp.volume`, `volumeup` or `volumedown`), `value` (the raw value for `dmcp.device-volume`, a percentage as a decimal string for the others) | A receiver set its volume through the control interface. The volume has already been applied when the event is sent. |
+| `device_volume` | `verb` (`dmcp.device-volume`, `dmcp.volume`, `volumeup`, `volumedown` or `upnp.volume`), `value` (the raw value for `dmcp.device-volume`, a percentage as a decimal string for the others) | A receiver set its volume through the control interface, or, for `upnp.volume`, a speaker's UPnP renderer reported a level set on the speaker itself (see [upnp_volume_follow](configuration.md#upnp_volume_follow)). The volume has already been recorded when the event is sent. |
 
 `speaker.id` is the id of the output the event is reported under, as a string,
 or `"0"` when a `dmcp.volume` applies to every speaker. For a device the daemon knows it is
