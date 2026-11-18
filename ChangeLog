@@ -129,7 +129,10 @@
 - change: the now-playing channel (track details and whether it is playing)
   goes to every receiver that advertises it, not only to Apple TVs. A receiver
   with a screen that is not an Apple TV showed the stream as paused.
-  `nowplaying_disable` still turns it off for a device
+  `nowplaying_disable` still turns it off for a device. Such a receiver's
+  session also says the sender takes its commands (`senderSupportsRelay`,
+  `isMultiSelectAirPlay`), without which iOS (Home, Control Center) did not
+  show our playback on a HomePod
 
 ## Version 1.5.0 - 2026-10-14
 

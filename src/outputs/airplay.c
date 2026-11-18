@@ -4889,13 +4889,25 @@ payload_make_setpeers(struct evrtsp_request *req, struct airplay_session *sessio
 // receiver; the others are sent with it as an iPhone does, with the iPhone's
 // values. sourceVersion is the AirPlay version from our User-Agent, when it
 // has one. Only for a speaker with remote_commands set.
+//
+// A receiver that gets the now-playing channel gets senderSupportsRelay and
+// isMultiSelectAirPlay alone: without them iOS (Home, Control Center) does
+// not find our playback on a HomePod, although the HomePod takes the
+// now-playing messages.
 static void
 setup_sender_keys_add(plist_t root, struct airplay_session *session)
 {
   const char *ua_prefix = "AirPlay/";
 
   if (!session->remote_commands)
-    return;
+    {
+      if (session->mrp)
+	{
+	  wplist_dict_add_bool(root, "senderSupportsRelay", true);
+	  wplist_dict_add_bool(root, "isMultiSelectAirPlay", true);
+	}
+      return;
+    }
 
   wplist_dict_add_bool(root, "senderSupportsRelay", true);
   wplist_dict_add_bool(root, "isMultiSelectAirPlay", true);
@@ -4907,6 +4919,16 @@ setup_sender_keys_add(plist_t root, struct airplay_session *session)
 
   if (airplay_user_agent && strncmp(airplay_user_agent, ua_prefix, strlen(ua_prefix)) == 0)
     wplist_dict_add_string(root, "sourceVersion", airplay_user_agent + strlen(ua_prefix));
+}
+
+// For the SETUP debug lines: which sender keys setup_sender_keys_add() added
+static const char *
+setup_sender_keys_desc(struct airplay_session *session)
+{
+  if (session->remote_commands)
+    return "all";
+
+  return session->mrp ? "relay only" : "none";
 }
 
 static int
@@ -4930,7 +4952,7 @@ payload_make_setup_session_ntp(struct evrtsp_request *req, struct airplay_sessio
   DPRINTF(E_DBG, L_AIRPLAY,
           "SETUP(session/NTP) payload for '%s': deviceID=%s, sessionUUID=%s, timingPort=%u, timingProtocol=NTP, sender keys %s\n",
           session->devname, device_id_colon, session->session_uuid, session->timing_svc->port,
-          session->remote_commands ? "added" : "not added");
+          setup_sender_keys_desc(session));
 
   ret = wplist_to_bin(&data, &len, root);
   plist_free(root);
@@ -4994,7 +5016,7 @@ payload_make_setup_session_ptp(struct evrtsp_request *req, struct airplay_sessio
           "SETUP(session/PTP) payload for '%s': deviceID=%s, sessionUUID=%s, timingProtocol=PTP, macAddress=%s, groupUUID=%s, groupContainsGroupLeader=%u, sender keys %s\n",
           session->devname, device_id_colon, session->session_uuid,
           session->local_mac_address, session->group_uuid, (unsigned)session->group_contains_leader,
-          session->remote_commands ? "added" : "not added");
+          setup_sender_keys_desc(session));
 
   ret = wplist_to_bin(&data, &len, root);
   plist_free(root);
