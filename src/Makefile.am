@@ -73,7 +73,7 @@ owntone_SOURCES = main.c \
 	ptpd.c ptpd.h \
 	outputs/plist_wrap.h
 
-check_PROGRAMS = airplay_anchor_test evchan_proto_test tv_proxy_mode_test speakers_summary_test upnp_parse_test
+check_PROGRAMS = airplay_anchor_test evchan_proto_test tv_proxy_mode_test speakers_summary_test upnp_parse_test upnp_sub_test
 TESTS = $(check_PROGRAMS)
 airplay_anchor_test_SOURCES = outputs/tests/airplay_anchor_test.c outputs/airplay_anchor.c outputs/airplay_anchor.h
 evchan_proto_test_SOURCES = outputs/tests/evchan_proto_test.c evchan_proto.c evchan_proto.h
@@ -81,5 +81,6 @@ evchan_proto_test_LDADD = $(OWNTONE_LIBS)
 tv_proxy_mode_test_SOURCES = outputs/tests/tv_proxy_mode_test.c outputs_group_flags.h
 speakers_summary_test_SOURCES = outputs/tests/speakers_summary_test.c speakers_summary.h
 upnp_parse_test_SOURCES = outputs/tests/upnp_parse_test.c upnp_parse.c upnp_parse.h
+upnp_sub_test_SOURCES = outputs/tests/upnp_sub_test.c upnp_sub.c upnp_sub.h
 
 SUBDIRS = libairptp
