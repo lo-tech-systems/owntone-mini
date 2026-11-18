@@ -17,6 +17,8 @@
   "device_removal_grace_period": 180,
   "airplay_timing_port": 0,
   "airplay_control_port": 0,
+  "upnp_volume_follow": true,
+  "upnp_event_port": 3690,
   "event_socket": "/run/owntone-mini/events.sock",
   "event_socket_allowed_users": [
     "autostream"

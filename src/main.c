@@ -70,6 +70,7 @@
 #include "player.h"
 #include "worker.h"
 #include "evchan.h"
+#include "upnp_follow.h"
 #include "ptpd.h"
 #include "memstats.h"
 
@@ -633,6 +634,11 @@ main(int argc, char **argv)
   if (ret != 0)
     DPRINTF(E_WARN, L_MAIN, "Event channel failed to start, continuing without it\n");
 
+  // Registered for speaker changes before the player starts, as the notifier is
+  ret = upnp_follow_init();
+  if (ret != 0)
+    DPRINTF(E_WARN, L_MAIN, "UPnP volume following failed to start, continuing without it\n");
+
   /* Spawn player thread */
   ret = player_init();
   if (ret != 0)
@@ -646,6 +652,7 @@ main(int argc, char **argv)
   // Before the HTTP server, so that the socket is bound by the time
   // /api/config can report the capability
   evchan_start();
+  upnp_follow_start();
 
   /* Spawn HTTPd thread */
   ret = httpd_init();
@@ -746,6 +753,9 @@ main(int argc, char **argv)
 
  sig_event_fail:
  signalfd_fail:
+  // Renderers are unsubscribed while the player, which it calls, still runs
+  upnp_follow_shutdown();
+
   DPRINTF(E_LOG, L_MAIN, "HTTPd deinit\n");
   httpd_deinit();
 
@@ -760,6 +770,9 @@ main(int argc, char **argv)
  player_fail:
   DPRINTF(E_LOG, L_MAIN, "Worker deinit\n");
   worker_deinit();
+
+  // After the player thread, which calls its listener, has been joined
+  upnp_follow_deinit();
 
   // After every thread that posts to it has been joined
   evchan_deinit();

@@ -166,6 +166,10 @@ config_defaults_build(void)
   json_object_object_add(defaults, "device_removal_grace_period", json_object_new_int(180));
   json_object_object_add(defaults, "airplay_timing_port", json_object_new_int(0));
   json_object_object_add(defaults, "airplay_control_port", json_object_new_int(0));
+  // Following the level a speaker sets itself through its UPnP renderer, and
+  // the port the renderers' events arrive on (read at start)
+  json_object_object_add(defaults, "upnp_volume_follow", json_object_new_boolean(true));
+  json_object_object_add(defaults, "upnp_event_port", json_object_new_int(3690));
   // The notifier socket, and the users besides root and the daemon's own
   // that may connect to it. An empty path turns the notifier off. Read once at
   // start, so neither is API-settable.
@@ -196,6 +200,8 @@ static const char *api_settable_keys[] = {
   "resample_quality",
   "user_agent",
   "device_volume_echo",
+  "upnp_volume_follow",
+  "upnp_event_port",
   NULL
 };
 
@@ -207,7 +213,8 @@ config_key_requires_restart(const char *key)
        || strcmp(key, "uncompressed_alac") == 0
        || strcmp(key, "pipe_sample_rate") == 0
        || strcmp(key, "pipe_bits_per_sample") == 0
-       || strcmp(key, "user_agent") == 0);
+       || strcmp(key, "user_agent") == 0
+       || strcmp(key, "upnp_event_port") == 0);
 }
 
 bool
@@ -996,6 +1003,9 @@ config_set_int(const char *key, int value)
     return -1;
 
   if (strcmp(key, "buffered_encoder_budget") == 0 && (value < 0 || value > 64))
+    return -1;
+
+  if (strcmp(key, "upnp_event_port") == 0 && (value < 1024 || value > 65535))
     return -1;
 
   // Mirrors the accepted sets pipe.c enforces at init (pipe.c ~1467/1474);

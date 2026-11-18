@@ -49,6 +49,7 @@
 #include "misc_json.h"
 #include "player.h"
 #include "evchan.h"
+#include "upnp_follow.h"
 #include "outputs.h"
 #include "input.h"
 
@@ -199,6 +200,8 @@ static const struct setting_entry settings_table[] = {
   { "player", "pipe_bits_per_sample",        SETTING_TYPE_INT,  "pipe_bits_per_sample"        },
   { "player", "resample_quality",            SETTING_TYPE_STR,  "resample_quality"            },
   { "player", "device_volume_echo",          SETTING_TYPE_STR,  "device_volume_echo"          },
+  { "player", "upnp_volume_follow",          SETTING_TYPE_BOOL, "upnp_volume_follow"          },
+  { "player", "upnp_event_port",             SETTING_TYPE_INT,  "upnp_event_port"             },
 };
 
 static const struct setting_entry *
@@ -389,6 +392,9 @@ jsonapi_reply_settings_option_put(struct httpd_request *hreq)
   if (strcmp(entry->config_key, "device_removal_grace_period") == 0)
     player_set_device_removal_grace_secs(intval);
 
+  if (strcmp(entry->config_key, "upnp_volume_follow") == 0)
+    upnp_follow_settings_changed();
+
   // The logger threshold is read once at startup, so a persisted change must
   // also be applied to the running logger to take effect without a restart.
   if (strcmp(entry->config_key, "loglevel") == 0)
@@ -557,6 +563,18 @@ speaker_session_to_json(struct player_speaker_info *spk)
   return session;
 }
 
+static const char *
+volume_follow_to_string(enum output_volume_follow follow)
+{
+  switch (follow)
+    {
+      case OUTPUT_VOLUME_FOLLOW_SEARCHING:     return "searching";
+      case OUTPUT_VOLUME_FOLLOW_UPNP:          return "upnp";
+      case OUTPUT_VOLUME_FOLLOW_UNKNOWN_SCALE: return "unknown_scale";
+      default:                                 return "none";
+    }
+}
+
 static json_object *
 speaker_to_json(struct player_speaker_info *spk)
 {
@@ -617,6 +635,7 @@ speaker_to_json(struct player_speaker_info *spk)
   json_object_object_add(output, "supported_modes", supported_modes);
   json_object_object_add(output, "session", speaker_session_to_json(spk));
   json_object_object_add(output, "has_homepods", json_object_new_boolean(spk->has_homepods));
+  json_object_object_add(output, "volume_follow", json_object_new_string(volume_follow_to_string(spk->volume_follow)));
 
   return output;
 }
