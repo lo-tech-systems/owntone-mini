@@ -823,6 +823,11 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
 	  jparse_free(request);
 	  return jsonapi_reply_error(hreq, HTTP_CONFLICT, "group_not_present");
 	}
+      if (ret == -6)
+	{
+	  jparse_free(request);
+	  return jsonapi_reply_error(hreq, HTTP_CONFLICT, "busy");
+	}
       if (ret < 0)
 	goto error;
     }
@@ -894,6 +899,11 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
       if (pin && strlen(pin) > OUTPUTS_PIN_MAX)
 	goto error;
       ret = pin ? player_speaker_authorize(output_id, pin) : 0;
+      if (ret == -6)
+	{
+	  jparse_free(request);
+	  return jsonapi_reply_error(hreq, HTTP_CONFLICT, "busy");
+	}
       if (ret < 0)
 	goto error;
 

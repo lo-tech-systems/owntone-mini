@@ -348,13 +348,13 @@ test_request_table(void)
   check_request("PIN given",
     IN(.phase = P(PASSWORD), .pin_pending = true), OUTPUT_REQ_AUTHORIZE,
     WANT(.phase = P(CONNECTING), .mid_phase = P(PASSWORD), .next_op = O(AUTHORIZE), .announce = true));
-  check_request("PIN given in a start's retry gap: ignored",
+  check_request("PIN given in a start's retry gap: refused as busy",
     IN(.phase = P(CONNECTING), .op = O(START), .selected = true, .playing = true), OUTPUT_REQ_AUTHORIZE,
     WANT(.phase = P(CONNECTING), .mid_phase = P(CONNECTING)));
-  check_request("PIN given while an authorise is out: ignored",
+  check_request("PIN given while an authorise is out: refused as busy",
     IN(.phase = P(CONNECTING), .op = O(AUTHORIZE), .pin_pending = true), OUTPUT_REQ_AUTHORIZE,
     WANT(.phase = P(CONNECTING), .mid_phase = P(CONNECTING)));
-  check_request("PIN given to a connected device: ignored",
+  check_request("PIN given to a connected device: refused as busy",
     IN(.phase = P(CONNECTED), .has_session = true), OUTPUT_REQ_AUTHORIZE,
     WANT(.phase = P(CONNECTED), .mid_phase = P(CONNECTED)));
   check_request("automatic select of a device waiting for a PIN: ignored",

@@ -4387,11 +4387,13 @@ speaker_mode_set(void *arg, int *retval)
 
 // Begins an authorise with the PIN. then_select: the request also asked for
 // the device to be started, at volume (-1 for none), once the PIN has paired
-// it, or with a new PIN start when the receiver refuses this one. A PIN that
-// arrives while the device has a session or an operation in flight is
-// dropped; whatever is in flight reports as usual
-static void
-authorize_begin(struct output_device *device, const char *pin, bool then_select, int volume)
+// it, or with a new PIN start when the receiver refuses this one; enable,
+// when given, is the include_tv option that start takes. A PIN that arrives
+// while the device has a session or an operation in flight is refused with -6
+// and changes nothing; whatever is in flight reports as usual
+static int
+authorize_begin(struct output_device *device, const char *pin, bool then_select, int volume,
+                const struct tv_proxy_enable *enable)
 {
   struct output_phase_input in;
   struct output_phase_result res;
@@ -4401,10 +4403,13 @@ authorize_begin(struct output_device *device, const char *pin, bool then_select,
   output_phase_on_request(&in, OUTPUT_REQ_AUTHORIZE, &res);
   if (res.next_op != OUTPUT_OP_AUTHORIZE)
     {
-      DPRINTF(E_INFO, L_PLAYER, "PIN for '%s' not used: it has a session or an operation in flight (%s)\n",
+      DPRINTF(E_INFO, L_PLAYER, "PIN for '%s' refused: it has a session or an operation in flight (%s)\n",
 	      device->name, op_name(device->op));
-      return;
+      return -6;
     }
+
+  if (enable && enable->set_flag)
+    device->tv_proxy_speakers_only = enable->flag;
 
   flags_apply(device, &res);
 
@@ -4418,6 +4423,8 @@ authorize_begin(struct output_device *device, const char *pin, bool then_select,
     operation_failed_at_once(device, OUTPUT_OP_AUTHORIZE);
   else if (ret == 0)
     device->then_select = 0;
+
+  return 0;
 }
 
 static enum command_state
@@ -4432,9 +4439,7 @@ speaker_authorize(void *arg, int *retval)
   if (!device)
     return COMMAND_END;
 
-  authorize_begin(device, param->pin, false, -1);
-
-  *retval = 0;
+  *retval = authorize_begin(device, param->pin, false, -1, NULL);
   return COMMAND_END;
 }
 
@@ -4469,12 +4474,7 @@ speaker_authorize_then_select(void *arg, int *retval)
       return COMMAND_END;
     }
 
-  if (enable.set_flag)
-    device->tv_proxy_speakers_only = enable.flag;
-
-  authorize_begin(device, param->pin, true, param->volume);
-
-  *retval = 0;
+  *retval = authorize_begin(device, param->pin, true, param->volume, &enable);
   return COMMAND_END;
 }
 

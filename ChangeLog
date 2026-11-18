@@ -207,7 +207,9 @@
 - new: `pin` with `selected: true` in `PUT /api/outputs/{id}` pairs the
   speaker and then starts it, at the `volume` given, in one request; a PIN
   the receiver refuses is followed by a new PIN on its screen, and a pairing
-  that times out starts nothing. A PIN longer than 15 characters is refused
+  that times out starts nothing. A PIN longer than 15 characters is refused.
+  A PIN sent while the speaker has a session or a start, stop or pairing in
+  flight is refused with `409` and `{"error": "busy"}`
 - change: a speaker whose session failed is brought back by a timer on the
   player instead of a worker job, and not while it waits for a PIN
 - fix: a level answer that failed while nothing played could leave the

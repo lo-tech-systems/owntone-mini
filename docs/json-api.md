@@ -46,7 +46,7 @@ endpoint can return are listed in its section.
 | 401 | Credentials needed (see above) |
 | 403 | Address not trusted and no `admin_password` set |
 | 404 | Unknown setting |
-| 409 | An output's `include_tv` option cannot be changed while it is selected (`{"error": "reselect_required"}`), or `include_tv: false` was sent for an Apple TV that does not lead a group of HomePods at the moment (`{"error": "group_not_present"}`) |
+| 409 | An output's `include_tv` option cannot be changed while it is selected (`{"error": "reselect_required"}`), `include_tv: false` was sent for an Apple TV that does not lead a group of HomePods at the moment (`{"error": "group_not_present"}`), or a PIN was sent while the output has a session or an operation in flight (`{"error": "busy"}`) |
 | 500 | The server could not carry out the request |
 | 503 | Not sent by the output endpoints: a buffered output refused for want of encoder capacity is reported as its session state |
 
@@ -348,7 +348,10 @@ refuses the PIN the start is made anyway, which puts a new PIN on its screen.
 A pairing that times out starts nothing, since the PIN on screen may be the one
 being typed; the next enable shows a new PIN. Disabling the output during the
 pairing takes the start away. A PIN that arrives while the output has a
-session, or while a start or stop is in flight, is not used.
+session, or while a start, a stop or a pairing is in flight, is not used: the
+request gets HTTP `409 Conflict` with body `{"error": "busy"}`, nothing is
+started or paired, and the client can send the PIN again once the output
+reads `"password"`.
 
 A buffered AirPlay 2 receiver (an Apple TV, a HomePod) pauses itself when its
 own pause is pressed, and its own play does not restart it. It keeps reading

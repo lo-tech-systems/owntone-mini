@@ -165,6 +165,10 @@ player_speaker_enable(uint64_t id, int include_tv, int volume);
 int
 player_speaker_disable(uint64_t id);
 
+// Pairs a speaker with the PIN on its screen. Returns 0 when accepted (the
+// outcome follows as the speaker's state), -1 for an unknown speaker, -6 when
+// the speaker has a session or a start, stop or pairing in flight (the PIN is
+// not used and nothing changes).
 int
 player_speaker_authorize(uint64_t id, const char *pin);
 
@@ -173,7 +177,8 @@ player_speaker_authorize(uint64_t id, const char *pin);
 // enable with include_tv would start it; a PIN the receiver refuses is
 // followed by a new PIN start. Returns 0 when accepted (the outcome follows as
 // the speaker's state), -1 for an unknown speaker, -4 or -5 as an enable
-// refuses include_tv. The PIN is not kept after the call.
+// refuses include_tv, -6 as player_speaker_authorize() refuses a busy
+// speaker. The PIN is not kept after the call.
 int
 player_speaker_authorize_then_select(uint64_t id, const char *pin, int include_tv, int volume);
 
