@@ -554,32 +554,12 @@ struct outputs_param
   int output_volume;
 };
 
-static const char *
-output_state_to_string(enum output_device_state state)
-{
-  switch (state)
-    {
-      case OUTPUT_STATE_STARTUP:
-        return "startup";
-      case OUTPUT_STATE_CONNECTED:
-        return "connected";
-      case OUTPUT_STATE_STREAMING:
-        return "streaming";
-      case OUTPUT_STATE_FAILED:
-        return "failed";
-      case OUTPUT_STATE_PASSWORD:
-        return "password";
-      default:
-        return "stopped";
-    }
-}
-
 static json_object *
 speaker_session_to_json(struct player_speaker_info *spk)
 {
   json_object *session = json_object_new_object();
 
-  json_object_object_add(session, "state", json_object_new_string(output_state_to_string(spk->state)));
+  json_object_object_add(session, "state", json_object_new_string(output_phase_name(spk->phase)));
   json_object_object_add(session, "failure", json_object_new_string(output_failure_name(spk->last_failure)));
   json_object_object_add(session, "held", json_object_new_boolean(spk->held));
   json_object_object_add(session, "holdable", json_object_new_boolean(spk->holdable));

@@ -45,8 +45,8 @@ struct player_speaker_info {
   bool prevent_playback;
   bool busy;
 
-  // Session state of this device and why its last start failed
-  enum output_device_state state;
+  // The phase clients see for the row and why it failed, if it did
+  enum output_phase phase;
   enum output_failure_reason last_failure;
 
   // The speakers the row stands for paused themselves and are held, and

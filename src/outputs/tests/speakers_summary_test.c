@@ -72,7 +72,7 @@ case_end(void)
 static void
 nothing_seen_is_stopped(void)
 {
-  struct speakers_seen s = { false, false, false, false };
+  struct speakers_seen s = { 0 };
 
   case_begin("nothing_seen_is_stopped");
   CHECK(speakers_summary_resolve(s) == SPEAKERS_SUMMARY_STOPPED);
@@ -82,10 +82,10 @@ nothing_seen_is_stopped(void)
 static void
 each_state_alone_maps_to_itself(void)
 {
-  struct speakers_seen starting = { false, true, false, false };
-  struct speakers_seen password = { false, false, true, false };
-  struct speakers_seen failed = { false, false, false, true };
-  struct speakers_seen streaming = { true, false, false, false };
+  struct speakers_seen starting = { .starting = true };
+  struct speakers_seen password = { .password = true };
+  struct speakers_seen failed = { .failed = true };
+  struct speakers_seen streaming = { .streaming = true };
 
   case_begin("each_state_alone_maps_to_itself");
   CHECK(speakers_summary_resolve(starting) == SPEAKERS_SUMMARY_STARTING);
@@ -98,7 +98,7 @@ each_state_alone_maps_to_itself(void)
 static void
 streaming_wins_over_everything(void)
 {
-  struct speakers_seen s = { true, true, true, true };
+  struct speakers_seen s = { .streaming = true, .starting = true, .stopping = true, .password = true, .failed = true };
 
   case_begin("streaming_wins_over_everything");
   CHECK(speakers_summary_resolve(s) == SPEAKERS_SUMMARY_STREAMING);
@@ -108,7 +108,7 @@ streaming_wins_over_everything(void)
 static void
 starting_wins_over_password_and_failed(void)
 {
-  struct speakers_seen s = { false, true, true, true };
+  struct speakers_seen s = { .starting = true, .stopping = true, .password = true, .failed = true };
 
   case_begin("starting_wins_over_password_and_failed");
   CHECK(speakers_summary_resolve(s) == SPEAKERS_SUMMARY_STARTING);
@@ -118,10 +118,30 @@ starting_wins_over_password_and_failed(void)
 static void
 password_wins_over_failed(void)
 {
-  struct speakers_seen s = { false, false, true, true };
+  struct speakers_seen s = { .password = true, .failed = true };
 
   case_begin("password_wins_over_failed");
   CHECK(speakers_summary_resolve(s) == SPEAKERS_SUMMARY_PASSWORD);
+  case_end();
+}
+
+// A member being stopped: the group reads stopping, unless another member is
+// still starting (a group with one member restarting reads connecting)
+static void
+stopping_ranks_below_starting(void)
+{
+  struct speakers_seen alone = { .stopping = true };
+  struct speakers_seen with_starting = { .starting = true, .stopping = true };
+  struct speakers_seen with_password = { .stopping = true, .password = true };
+  struct speakers_seen with_failed = { .stopping = true, .failed = true };
+  struct speakers_seen with_streaming = { .streaming = true, .stopping = true };
+
+  case_begin("stopping_ranks_below_starting");
+  CHECK(speakers_summary_resolve(alone) == SPEAKERS_SUMMARY_STOPPING);
+  CHECK(speakers_summary_resolve(with_starting) == SPEAKERS_SUMMARY_STARTING);
+  CHECK(speakers_summary_resolve(with_password) == SPEAKERS_SUMMARY_STOPPING);
+  CHECK(speakers_summary_resolve(with_failed) == SPEAKERS_SUMMARY_STOPPING);
+  CHECK(speakers_summary_resolve(with_streaming) == SPEAKERS_SUMMARY_STREAMING);
   case_end();
 }
 
@@ -135,6 +155,7 @@ main(int argc, char **argv)
   streaming_wins_over_everything();
   starting_wins_over_password_and_failed();
   password_wins_over_failed();
+  stopping_ranks_below_starting();
 
   printf("%d cases, %d failed\n", cases_run, cases_failed);
 

@@ -122,7 +122,7 @@ Example:
   playing as soon as the pipe is open, and the selected speakers join it as
   each one connects, so a speaker that is switched off cannot hold up the
   others, the player's state or other requests. Each speaker's row steps
-  through `startup`, `connected` and `streaming`, or `failed`, and each step
+  through `connecting`, `connected` and `streaming`, or `failed`, and each step
   is announced with `changed`.
 - Enabling one output with `PUT /api/outputs/{id}` still waits for the
   speaker's answer, and other requests to the player wait behind it. A start

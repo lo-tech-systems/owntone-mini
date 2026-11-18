@@ -1916,6 +1916,13 @@ device_flush_cb(struct output_device *device, enum output_device_state status)
   outputs_device_stop_delayed(device, device_streaming_cb);
 }
 
+// A device's phase changed: clients are told, as for any report
+static void
+phase_announce_cb(struct output_device *device)
+{
+  status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
+}
+
 // The last device a playback flush waited for has reported
 static void
 flush_done_cb(void)
@@ -2923,16 +2930,16 @@ playback_flush(void *arg, int *retval)
 }
 
 // Replaces the session facts of an Apple TV's row with those of the HomePods it
-// leads, reduced to one state: streaming if any streams, else starting if any
-// is starting or connected, else password, else failed, else stopped. A PIN is
-// pending if any of them waits for one. A password or failed state carries the
-// reason of the first of them in that state.
+// leads, reduced to one phase: streaming if any streams, else connecting if any
+// is connecting or connected, else stopping, else password, else failed, else
+// stopped. A PIN is pending if any of them waits for one. A password or failed
+// phase carries the reason of the first of them in that phase.
 static void
 homepods_session_of(struct player_speaker_info *spk, struct output_device *device)
 {
   struct output_device *cur;
   const char *group_id;
-  struct speakers_seen seen = { false, false, false, false };
+  struct speakers_seen seen = { 0 };
   bool pin_pending = false;
   enum output_failure_reason password_reason = OUTPUT_FAILURE_NONE;
   enum output_failure_reason failed_reason = OUTPUT_FAILURE_NONE;
@@ -2950,26 +2957,29 @@ homepods_session_of(struct player_speaker_info *spk, struct output_device *devic
 
       if (cur->pin_pending)
         pin_pending = true;
-      switch (cur->state)
+      switch (cur->phase)
         {
-          case OUTPUT_STATE_STREAMING:
+          case OUTPUT_PHASE_STREAMING:
             seen.streaming = true;
             break;
-          case OUTPUT_STATE_STARTUP:
-          case OUTPUT_STATE_CONNECTED:
+          case OUTPUT_PHASE_CONNECTING:
+          case OUTPUT_PHASE_CONNECTED:
             seen.starting = true;
             break;
-          case OUTPUT_STATE_PASSWORD:
+          case OUTPUT_PHASE_STOPPING:
+            seen.stopping = true;
+            break;
+          case OUTPUT_PHASE_PASSWORD:
             seen.password = true;
             if (password_reason == OUTPUT_FAILURE_NONE)
               password_reason = cur->last_failure;
             break;
-          case OUTPUT_STATE_FAILED:
+          case OUTPUT_PHASE_FAILED:
             seen.failed = true;
             if (failed_reason == OUTPUT_FAILURE_NONE)
               failed_reason = cur->last_failure;
             break;
-          default:
+          case OUTPUT_PHASE_STOPPED:
             break;
         }
     }
@@ -2979,21 +2989,24 @@ homepods_session_of(struct player_speaker_info *spk, struct output_device *devic
   switch (speakers_summary_resolve(seen))
     {
       case SPEAKERS_SUMMARY_STREAMING:
-        spk->state = OUTPUT_STATE_STREAMING;
+        spk->phase = OUTPUT_PHASE_STREAMING;
         break;
       case SPEAKERS_SUMMARY_STARTING:
-        spk->state = OUTPUT_STATE_STARTUP;
+        spk->phase = OUTPUT_PHASE_CONNECTING;
+        break;
+      case SPEAKERS_SUMMARY_STOPPING:
+        spk->phase = OUTPUT_PHASE_STOPPING;
         break;
       case SPEAKERS_SUMMARY_PASSWORD:
-        spk->state = OUTPUT_STATE_PASSWORD;
+        spk->phase = OUTPUT_PHASE_PASSWORD;
         spk->last_failure = password_reason;
         break;
       case SPEAKERS_SUMMARY_FAILED:
-        spk->state = OUTPUT_STATE_FAILED;
+        spk->phase = OUTPUT_PHASE_FAILED;
         spk->last_failure = failed_reason;
         break;
-      default:
-        spk->state = OUTPUT_STATE_STOPPED;
+      case SPEAKERS_SUMMARY_STOPPED:
+        spk->phase = OUTPUT_PHASE_STOPPED;
         break;
     }
 
@@ -3124,7 +3137,7 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
   spk->prevent_playback = device->prevent_playback;
   spk->busy = device->busy;
 
-  spk->state = device->state;
+  spk->phase = device->phase;
   spk->last_failure = device->last_failure;
   spk->held = speaker_group_held(device);
   spk->holdable = speaker_group_holdable(device);
@@ -5297,6 +5310,7 @@ player_init(void)
 
   ret = outputs_init();
   outputs_flush_done_cb_set(flush_done_cb);
+  outputs_phase_cb_set(phase_announce_cb);
   if (ret < 0)
     {
       DPRINTF(E_FATAL, L_PLAYER, "Output initiation failed\n");

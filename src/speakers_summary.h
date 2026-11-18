@@ -28,6 +28,7 @@ struct speakers_seen
   bool starting;
   bool password;
   bool failed;
+  bool stopping;
 };
 
 enum speakers_summary
@@ -37,10 +38,12 @@ enum speakers_summary
   SPEAKERS_SUMMARY_PASSWORD,
   SPEAKERS_SUMMARY_FAILED,
   SPEAKERS_SUMMARY_STREAMING,
+  SPEAKERS_SUMMARY_STOPPING,
 };
 
 // One state for the group: streaming if any streams, else starting, else
-// password, else failed, else stopped
+// stopping, else password, else failed, else stopped. Stopping ranks below
+// starting, so a group with one member restarting reads starting
 static inline enum speakers_summary
 speakers_summary_resolve(struct speakers_seen seen)
 {
@@ -48,6 +51,8 @@ speakers_summary_resolve(struct speakers_seen seen)
     return SPEAKERS_SUMMARY_STREAMING;
   if (seen.starting)
     return SPEAKERS_SUMMARY_STARTING;
+  if (seen.stopping)
+    return SPEAKERS_SUMMARY_STOPPING;
   if (seen.password)
     return SPEAKERS_SUMMARY_PASSWORD;
   if (seen.failed)

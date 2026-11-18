@@ -191,7 +191,7 @@ The state of what the row plays. For an output on its own that is its own connec
 
 | Key | Type | Value |
 | --- | ---- | ----- |
-| `state` | string | `"stopped"` (no connection), `"startup"` (connecting), `"connected"` (connected, audio not flowing yet), `"streaming"`, `"failed"`, or `"password"` (the device wants a PIN or password) |
+| `state` | string | `"stopped"` (no connection), `"connecting"` (a start, a probe or a PIN pairing is under way), `"connected"` (connected, audio not flowing yet; a buffered AirPlay 2 speaker stays here until it has accepted its start time), `"streaming"`, `"stopping"` (a stop is waiting for the receiver to end its session), `"failed"`, or `"password"` (the device wants a PIN or password). `"startup"` is no longer sent |
 | `failure` | string | Why the state is `"failed"` or `"password"`; `"none"` in every other state. `"pin_required"` (the PIN start was sent, so the PIN is on the receiver's screen), `"pin_invalid"` (pair setup with the PIN given was refused), `"refused"` (the receiver answered no to something other than authentication, including a PIN start it refused outright), `"unreachable"` (no connection, or no answer before the receiver had answered anything), `"timeout"` (no answer after it had answered, or pair setup took too long), `"no_clock"` (buffered playback could not be started because the receiver never used our clock), `"capacity"` (the buffered-encode budget was used up). A PIN given with `pin` whose pair setup times out is `"password"` with `"timeout"`: the receiver never judged the PIN, the start is not repeated, and the next start shows a new PIN. Clients treat any other value as `"refused"` on a `"failed"` row and `"pin_required"` on a `"password"` row |
 | `held` | boolean | `true` while the output is held with `hold` (see [Update an output](#update-an-output)): it paused itself and is paused in place (a buffered AirPlay 2 session) or sent 0 (any other). For a group it is `true` when every speaker of the group that has a session is held. Cleared when the hold ends or the session ends |
 | `holdable` | boolean | `true` if `hold` would be accepted now: the output, or a speaker of its group that plays audio, has a connected or streaming AirPlay 2 or AirPlay 1 session that is not being stopped |
@@ -199,12 +199,12 @@ The state of what the row plays. For an output on its own that is its own connec
 An output that is selected is not necessarily streaming: `selected` says what
 was asked for, `session.state` what the device is doing. When playback starts
 from the pipe, the player plays at once, with or without speakers, and each
-selected speaker steps through `"startup"`, `"connected"` and `"streaming"`, or
+selected speaker steps through `"connecting"`, `"connected"` and `"streaming"`, or
 ends at `"failed"`, as it joins. `GET /api/player` reports `play` about the
 start buffer (2.3 seconds) after the pipe opens, not when a speaker has
 started. For HomePods played
 without their Apple TV, `session.state` is `"streaming"` if any HomePod streams,
-otherwise `"startup"` if any is starting or connected, otherwise `"password"`,
+otherwise `"connecting"` if any is connecting or connected, otherwise `"stopping"`, `"password"`,
 `"failed"` or `"stopped"` in that order of precedence.
 
 A pair is listed as one output; its second speaker is hidden. A group of

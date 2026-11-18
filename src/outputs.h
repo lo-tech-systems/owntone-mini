@@ -184,7 +184,11 @@ struct output_device
 
   // What clients see and the operation in flight, see output_phase.h. Only
   // outputs_device_phase_set() writes phase; op and op_gen are written where
-  // an operation begins and by the player's report handler
+  // an operation begins and by the player's report handler. While the phase
+  // is STOPPING a stop has been handed to the backend and has not reported:
+  // nothing else is registered for the device until it has, since a second
+  // stop, a level, a flush or a new callback would take the stop's place and
+  // its report would be lost
   enum output_phase phase;
   enum output_op op;
   uint32_t op_gen;          // Bumped when an operation begins, stamped into its callback slot
@@ -223,11 +227,6 @@ struct output_device
   // session keeps the backend it started on); the switch is made when the
   // session is removed.
   unsigned backend_switch_pending:1;
-  // A stop has been handed to the backend and has not reported yet. Nothing
-  // else is registered for the device until it has: a second stop, a level,
-  // a flush or a new callback would take the stop's place and its report
-  // would be lost
-  unsigned stop_pending:1;
   // Set on the AirPlay 2 candidate of a stereo pair member made the pair's
   // leader because it led the pair last and both members now advertise a
   // group one of our sessions issued; undone at the start of every group
@@ -517,6 +516,15 @@ outputs_monotonic_ms(void);
 // audio of outputs that are already playing.
 void
 outputs_step_time_log(int domain, const char *what, const char *name, uint64_t start_ms);
+
+// The only writer of device->phase. Logs a change at debug and announces it
+// through the callback given to outputs_phase_cb_set(), once per change.
+// Returns true when the phase changed
+bool
+outputs_device_phase_set(struct output_device *device, enum output_phase phase);
+
+void
+outputs_phase_cb_set(void (*cb)(struct output_device *device));
 
 /* ----------------------- Called by backend modules ------------------------ */
 
