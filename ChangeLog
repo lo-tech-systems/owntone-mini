@@ -95,6 +95,11 @@
   could leave it on the wrong timing and without metadata, and at a level
   other than the one sent. With `selected: false` the mode is applied after
   the stop, without a restart
+- fix: a reply from a speaker that arrived while its session was being
+  stopped (for example to a volume request sent just before) was reported
+  as the end of the stop, while the session was still alive. What followed
+  the stop, such as a switch of backend, then ran on a live session. The
+  stop now reports only once the session is closed
 
 ## Version 1.5.0 - 2026-10-14
 

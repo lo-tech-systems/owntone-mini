@@ -1509,6 +1509,18 @@ session_status(struct airplay_session *session)
 {
   enum output_device_state state;
 
+  // A stop that is waiting to run, or a TEARDOWN that is out, makes its own
+  // report once the session is closed. A reply that lands in the meantime,
+  // such as to a late volume or flush request, must not make that report
+  // early with the session still alive, so its callback is kept. A failure
+  // has no connected state and still reports
+  if ((session->state & AIRPLAY_STATE_F_CONNECTED)
+      && (session->state == AIRPLAY_STATE_TEARDOWN || event_pending(session->stopev, EV_TIMEOUT, NULL)))
+    {
+      DPRINTF(E_DBG, L_AIRPLAY, "Not reporting '%s' while its session is stopped\n", session->devname);
+      return;
+    }
+
   switch (session->state)
     {
       case AIRPLAY_STATE_AUTH:
@@ -1528,10 +1540,6 @@ session_status(struct airplay_session *session)
 	break;
       case AIRPLAY_STATE_STREAMING:
 	state = OUTPUT_STATE_STREAMING;
-	break;
-      case AIRPLAY_STATE_TEARDOWN:
-	DPRINTF(E_LOG, L_AIRPLAY, "Bug! session_status() called with transitional state (TEARDOWN)\n");
-	state = OUTPUT_STATE_STOPPED;
 	break;
       default:
 	DPRINTF(E_LOG, L_AIRPLAY, "Bug! Unhandled state in session_status(): %d\n", session->state);

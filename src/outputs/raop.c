@@ -1838,9 +1838,11 @@ raop_status(struct raop_session *rs)
 	state = OUTPUT_STATE_STREAMING;
 	break;
       case RAOP_STATE_TEARDOWN:
-	DPRINTF(E_LOG, L_RAOP, "Bug! raop_status() called with transitional state (TEARDOWN)\n");
-	state = OUTPUT_STATE_STOPPED;
-	break;
+	// A reply that lands while the TEARDOWN is out, such as to a late
+	// volume or flush request, says nothing the player should hear. The
+	// stop reports once the TEARDOWN is answered, so its callback is kept
+	DPRINTF(E_DBG, L_RAOP, "Not reporting '%s' while its session is torn down\n", rs->devname);
+	return;
       default:
 	DPRINTF(E_LOG, L_RAOP, "Bug! Unhandled state in raop_status(): %d\n", rs->state);
 	state = OUTPUT_STATE_FAILED;
@@ -2806,7 +2808,8 @@ raop_set_volume_one(struct output_device *device, int callback_id)
   struct raop_session *rs = device->session;
   int ret;
 
-  if (!rs || !(rs->state & RAOP_STATE_F_CONNECTED))
+  // A level sent to a session being torn down is lost with it
+  if (!rs || !(rs->state & RAOP_STATE_F_CONNECTED) || rs->state == RAOP_STATE_TEARDOWN)
     return 0;
 
   ret = raop_set_volume_internal(rs, device->volume, raop_cb_set_volume);
@@ -2861,7 +2864,10 @@ raop_cb_flush(struct evrtsp_request *req, void *arg)
   if (ret < 0)
     goto error;
 
-  rs->state = RAOP_STATE_CONNECTED;
+  // A flush answered after the TEARDOWN went out must not reopen the session
+  // to the write path
+  if (rs->state != RAOP_STATE_TEARDOWN)
+    rs->state = RAOP_STATE_CONNECTED;
 
   /* Let our user know */
   raop_status(rs);
