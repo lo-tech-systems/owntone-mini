@@ -199,6 +199,11 @@ struct output_device
   // session keeps the backend it started on); the switch is made when the
   // session is removed.
   unsigned backend_switch_pending:1;
+  // A stop has been handed to the backend and has not reported yet. Nothing
+  // else is registered for the device until it has: a second stop, a level,
+  // a flush or a new callback would take the stop's place and its report
+  // would be lost
+  unsigned stop_pending:1;
 
   // Credentials if relevant
   const char *password;

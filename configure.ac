@@ -239,6 +239,13 @@ AM_CONDITIONAL([COND_AVAHI], [[test "x$with_avahi" = "xyes"]])
 dnl Prefer AirPlay 2
 OWNTONE_ARG_DISABLE([preference for AirPlay 2 for devices that support both 1 and 2], [preferairplay2], [PREFER_AIRPLAY2])
 
+dnl Test hooks for stress testing, never in a release build
+AC_ARG_ENABLE([storm-debug],
+	[AS_HELP_STRING([--enable-storm-debug], [build in test hooks for stress testing (default=no)])],
+	[], [enable_storm_debug=no])
+AS_IF([[test "x$enable_storm_debug" = "xyes"]],
+	[AC_DEFINE([STORM_DEBUG], 1, [Define to 1 to build in test hooks for stress testing])])
+
 dnl Creating and defining users and groups
 AC_PATH_PROG([GETENT], [[getent]], [], [$PATH$PATH_SEPARATOR/usr/sbin])
 AC_PATH_PROG([USERADD], [[useradd]], [], [$PATH$PATH_SEPARATOR/usr/sbin])

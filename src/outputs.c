@@ -2116,6 +2116,7 @@ outputs_device_session_remove(uint64_t device_id, void *session)
     {
       device->session = NULL;
       device->held = false;
+      device->stop_pending = 0;
 
       // A backend switch that was asked for while the session ran is made now
       // that the session is gone, so the next start uses the new candidate's
@@ -2477,7 +2478,16 @@ outputs_device_stop(struct output_device *device, output_status_cb cb)
   if (!device->session)
     return 0; // Device is already stopped, nothing to do
 
+  // The stop already handed to the backend reports for the device
+  if (device->stop_pending)
+    {
+      DPRINTF(E_DBG, L_PLAYER, "'%s' is already stopping\n", device->name);
+      return 0;
+    }
+
   ret = outputs[device->type]->device_stop(device, callback_add(device, cb));
+  if (ret > 0)
+    device->stop_pending = 1;
 
   return device_state_update(device, ret);
 }
@@ -2490,6 +2500,9 @@ outputs_device_stop_delayed(struct output_device *device, output_status_cb cb)
 
   if (!device->session)
     return 0; // Device is already stopped, nothing to do
+
+  if (device->stop_pending)
+    return 0; // A stop is already running
 
   outputs[device->type]->device_cb_set(device, callback_add(device, cb));
 
@@ -2508,6 +2521,9 @@ outputs_device_flush(struct output_device *device, output_status_cb cb)
 
   if (!device->session)
     return 0; // Nothing to flush
+
+  if (device->stop_pending)
+    return 0; // Stopping, a flush would take the stop's report
 
   ret = outputs[device->type]->device_flush(device, callback_add(device, cb));
 
@@ -2535,6 +2551,11 @@ outputs_device_volume_set(struct output_device *device, output_status_cb cb)
 
   if (!device->session)
     return 0; // Device isn't active
+
+  // Stopping: the level stays in device->volume for the next start, and a
+  // registration now would take the stop's report
+  if (device->stop_pending)
+    return 0;
 
   ret = outputs[device->type]->device_volume_set(device, callback_add(device, cb));
   if (ret > 0)
@@ -2580,7 +2601,7 @@ outputs_device_hold_set(struct output_device *device, bool held)
 bool
 outputs_device_holdable(struct output_device *device)
 {
-  if (outputs[device->type]->disabled || !outputs[device->type]->device_holdable || !device->session)
+  if (outputs[device->type]->disabled || !outputs[device->type]->device_holdable || !device->session || device->stop_pending)
     return false;
 
   return outputs[device->type]->device_holdable(device);
@@ -2632,6 +2653,9 @@ outputs_device_cb_set(struct output_device *device, output_status_cb cb)
 
   if (!device->session)
     return;
+
+  if (device->stop_pending)
+    return; // The stop's report must reach the stop's callback
 
   outputs[device->type]->device_cb_set(device, callback_add(device, cb));
 }

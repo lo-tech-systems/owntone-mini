@@ -261,6 +261,10 @@
 // https://github.com/owntone/owntone-server/issues/734#issuecomment-622959334
 #define AIRPLAY_KEEP_ALIVE_INTERVAL   25
 
+// How long a stop waits for the answer to its TEARDOWN before the session is
+// closed anyway
+#define AIRPLAY_TEARDOWN_WAIT_MS      1500
+
 // Building and queueing one request on the player thread takes this long (in
 // milliseconds) or more before it is logged at info rather than debug level
 #define AIRPLAY_REQUEST_BUILD_SLOW_MS 5
@@ -570,6 +574,20 @@ struct airplay_session
   struct event *deferredev;
   struct event *stopev;
 
+  // The contexts of the requests queued on the control connection, so a
+  // session freed with requests still queued frees their contexts too (the
+  // connection drops them without calling back)
+  struct airplay_seq_ctx *seq_ctxs;
+
+  // The player has asked this session to stop. Set once, never cleared:
+  // every way the session can end from here reports STOPPED, and answers to
+  // requests other than the TEARDOWN are not acted on
+  bool stopping;
+
+  // When the TEARDOWN or a pause in place was sent (monotonic ms), for the
+  // answer time in the log; 0 when none is out
+  uint64_t ctrl_sent_ms;
+
   int reqs_in_flight;
   int cseq;
 
@@ -815,6 +833,11 @@ struct airplay_seq_ctx
   struct airplay_session *session;
   void *payload_make_arg;
   const char *log_caller;
+  // On session->seq_ctxs exactly while evrtsp holds this context's request.
+  // It leaves the list when evrtsp hands the request back (answer or
+  // failure), before any callback that may free the session runs, so a
+  // context is freed exactly once
+  struct airplay_seq_ctx *next;
 };
 
 
@@ -1897,6 +1920,8 @@ master_session_make(struct media_quality *quality, bool use_ptp, enum airplay_bu
 static void
 session_free(struct airplay_session *session)
 {
+  struct airplay_seq_ctx *seq_ctx;
+
   if (!session)
     return;
 
@@ -1907,6 +1932,15 @@ session_free(struct airplay_session *session)
     {
       evrtsp_connection_set_closecb(session->ctrl, NULL, NULL);
       evrtsp_connection_free(session->ctrl);
+    }
+
+  // The connection has dropped its queued requests without calling back, so
+  // their contexts are freed here. A parked context has no request queued and
+  // is not on this list
+  while ((seq_ctx = session->seq_ctxs))
+    {
+      session->seq_ctxs = seq_ctx->next;
+      free(seq_ctx);
     }
 
   if (session->deferredev)
@@ -1985,8 +2019,11 @@ session_cleanup(struct airplay_session *session)
 static void
 session_failure(struct airplay_session *session)
 {
-  /* Session failed, let our user know */
-  if (session->state != AIRPLAY_STATE_AUTH)
+  // Session failed, let our user know. A session the player was stopping
+  // reports the stop it asked for, however it ended
+  if (session->stopping)
+    session->state = AIRPLAY_STATE_STOPPED;
+  else if (session->state != AIRPLAY_STATE_AUTH)
     session->state = AIRPLAY_STATE_FAILED;
 
   session_status(session);
@@ -2008,7 +2045,9 @@ deferred_session_failure(struct airplay_session *session)
 {
   struct timeval tv;
 
-  if (session->state != AIRPLAY_STATE_AUTH)
+  if (session->stopping)
+    session->state = AIRPLAY_STATE_STOPPED;
+  else if (session->state != AIRPLAY_STATE_AUTH)
     session->state = AIRPLAY_STATE_FAILED;
 
   evutil_timerclear(&tv);
@@ -2133,16 +2172,39 @@ session_success(struct airplay_session *session)
   session_cleanup(session);
 }
 
-// Local teardown for a normal stop. An AirPlay 2 session (buffered or realtime)
-// is ended by closing the connection rather than issuing an RTSP TEARDOWN (the
-// RAOP/AirPlay 1 mechanism), so we report stopped and drop the session - which
-// closes the RTSP connection - rather than running AIRPLAY_SEQ_STOP. Deferred to
-// avoid re-entrancy from device_stop, mirroring deferred_session_failure().
+// A stop asked for by the player, run from the session's stop timer so the
+// backend never calls back inside airplay_device_stop(). A connected or
+// streaming session is ended on the receiver with a TEARDOWN, which lets a
+// HomePod hand its controls back at once, and is closed when the TEARDOWN is
+// answered or when AIRPLAY_TEARDOWN_WAIT_MS has passed, whichever is first:
+// the same timer fires a second time for the latter. A session that is still
+// starting has nothing to end on the receiver and is closed at once.
 static void
 deferred_session_stop_cb(int fd, short what, void *arg)
 {
   struct airplay_session *session = arg;
+  struct timeval tv = { AIRPLAY_TEARDOWN_WAIT_MS / 1000, (AIRPLAY_TEARDOWN_WAIT_MS % 1000) * 1000 };
 
+  // Second firing: the TEARDOWN below was not answered in time
+  if (session->state == AIRPLAY_STATE_TEARDOWN)
+    {
+      DPRINTF(E_WARN, L_AIRPLAY, "No answer to TEARDOWN from '%s' in %d ms, closing\n", session->devname, AIRPLAY_TEARDOWN_WAIT_MS);
+      session->state = AIRPLAY_STATE_STOPPED;
+      session_success(session);
+      return;
+    }
+
+  // The wait is armed first: a request that fails at once frees the session,
+  // and this event with it
+  if (session->state == AIRPLAY_STATE_CONNECTED || session->state == AIRPLAY_STATE_STREAMING)
+    {
+      DPRINTF(E_INFO, L_AIRPLAY, "Stopping '%s' with a TEARDOWN\n", session->devname);
+      evtimer_add(session->stopev, &tv);
+      sequence_start(AIRPLAY_SEQ_STOP, session, NULL, "stop");
+      return;
+    }
+
+  // Still starting: nothing to end on the receiver
   DPRINTF(E_DBG, L_AIRPLAY, "Closing session (deferred stop, no TEARDOWN) on device '%s'\n", session->devname);
   session->state = AIRPLAY_STATE_STOPPED;
   session_success(session);
@@ -4046,6 +4108,7 @@ payload_make_teardown(struct evrtsp_request *req, struct airplay_session *sessio
   // Normally we update status when we get the response, but teardown is an
   // exception because we want to stop writing to the device immediately
   session->state = AIRPLAY_STATE_TEARDOWN;
+  session->ctrl_sent_ms = monotonic_ms();
 
   // stream = plist_new_dict();
   // wplist_dict_add_uint(stream, "streamID", 0); // Do we have a stream ID?
@@ -6143,6 +6206,11 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
 static enum airplay_seq_type
 response_handler_teardown(struct evrtsp_request *req, struct airplay_session *session)
 {
+  // Reached whatever the answer says: a refused TEARDOWN still ends the
+  // session
+  DPRINTF(E_INFO, L_AIRPLAY, "TEARDOWN answered by '%s' (%d) after %" PRIu64 " ms\n", session->devname,
+          req->response_code, session->ctrl_sent_ms ? monotonic_ms() - session->ctrl_sent_ms : 0);
+  session->ctrl_sent_ms = 0;
   session->state = AIRPLAY_STATE_STOPPED;
   return AIRPLAY_SEQ_CONTINUE;
 }
@@ -6990,12 +7058,14 @@ response_handler_pair_verify2(struct evrtsp_request *req, struct airplay_session
  * Request queueing HOWTO
  *
  * Sending:
- * - increment session->reqs_in_flight
+ * - increment session->reqs_in_flight and put the context on
+ *   session->seq_ctxs
  * - set evrtsp connection closecb to NULL
  *
  * Request callback:
  * - decrement session->reqs_in_flight first thing, even if the callback is
  *   called for error handling (req == NULL or HTTP error code)
+ * - take the context off session->seq_ctxs at the same time
  * - if session->reqs_in_flight == 0, setup evrtsp connection closecb
  *
  * When a request fails, the whole AirPlay session is declared failed and
@@ -7157,6 +7227,45 @@ static struct airplay_seq_request airplay_seq_request[][11] =
 };
 
 
+// Takes a context off the session's list of queued requests. The list is as
+// long as the number of requests in flight, a handful at most
+static void
+seq_ctx_unlink(struct airplay_session *session, struct airplay_seq_ctx *seq_ctx)
+{
+  struct airplay_seq_ctx **p;
+
+  for (p = &session->seq_ctxs; *p; p = &(*p)->next)
+    {
+      if (*p == seq_ctx)
+	{
+	  *p = seq_ctx->next;
+	  seq_ctx->next = NULL;
+	  return;
+	}
+    }
+}
+
+#ifdef STORM_DEBUG
+// Test builds only: OWNTONE_STORM_DROP_TEARDOWN_ANSWERS=1 in the environment
+// at start makes every TEARDOWN go unanswered as far as a session can tell
+static bool
+storm_drop_teardown_answers(void)
+{
+  static int drop = -1;
+  const char *val;
+
+  if (drop < 0)
+    {
+      val = getenv("OWNTONE_STORM_DROP_TEARDOWN_ANSWERS");
+      drop = (val && strcmp(val, "1") == 0);
+      if (drop)
+	DPRINTF(E_LOG, L_AIRPLAY, "Storm debug: TEARDOWN answers will be dropped\n");
+    }
+
+  return drop;
+}
+#endif
+
 static void
 sequence_continue_cb(struct evrtsp_request *req, void *arg)
 {
@@ -7166,8 +7275,32 @@ sequence_continue_cb(struct evrtsp_request *req, void *arg)
   enum airplay_seq_type seq_type;
 
   session->reqs_in_flight--;
+  seq_ctx_unlink(session, seq_ctx);
   if (!session->reqs_in_flight)
     evrtsp_connection_set_closecb(session->ctrl, rtsp_close_cb, session);
+
+#ifdef STORM_DEBUG
+  // Test builds only: the TEARDOWN's answer is thrown away unseen, so a stop
+  // takes the path of a receiver that never answers
+  if (req && cur_request->rtsp_type == EVRTSP_REQ_TEARDOWN && storm_drop_teardown_answers())
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "Storm debug: answer to %s from '%s' dropped\n", cur_request->name, session->devname);
+      free(seq_ctx);
+      return;
+    }
+#endif
+
+  // Once a stop has begun nothing but the TEARDOWN's answer is acted on,
+  // whatever it says: a flush answer would make the session connected again,
+  // and a refusal would end the session before the TEARDOWN is written. No
+  // answer at all still ends the session, which then reports stopped
+  if (req && session->stopping && (session->state & AIRPLAY_STATE_F_CONNECTED)
+      && cur_request->rtsp_type != EVRTSP_REQ_TEARDOWN)
+    {
+      DPRINTF(E_DBG, L_AIRPLAY, "Answer to %s from '%s' not acted on, the session is stopping\n", cur_request->name, session->devname);
+      free(seq_ctx);
+      return;
+    }
 
   if (!req)
     {
@@ -7338,6 +7471,8 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
   evrtsp_connection_set_closecb(session->ctrl, NULL, NULL);
 
   session->reqs_in_flight++;
+  seq_ctx->next = session->seq_ctxs;
+  session->seq_ctxs = seq_ctx;
 
   return;
 
@@ -8225,10 +8360,16 @@ airplay_device_stop(struct output_device *device, int callback_id)
 
   session->callback_id = callback_id;
 
-  // End an AirPlay 2 session by closing the connection rather than sending an
-  // RTSP TEARDOWN (SEQ_STOP). RAOP/AirPlay 1 teardown lives in its own backend
-  // and is unaffected. Deferred to avoid re-entrancy. The event belongs to the
-  // session, so a session freed before it runs takes the event with it.
+  // A second stop takes over the report but must not cut the TEARDOWN's
+  // wait short
+  if (session->stopping)
+    return 1;
+
+  session->stopping = true;
+
+  // Deferred, so the backend never calls back inside this call (see
+  // deferred_session_stop_cb). The event belongs to the session and is freed
+  // with it
   evutil_timerclear(&tv);
   evtimer_add(session->stopev, &tv);
 
@@ -8285,13 +8426,13 @@ hold_nowplaying_send(struct airplay_session *session, bool paused)
 // promoted by the next write. A TV proxy leader with its audio suppressed
 // carries no audio, so only its MediaRemote state changes. Returns 0, or -1
 // when the session cannot be held (not buffered, or not connected or
-// streaming).
+// streaming, or stopping).
 static bool
 airplay_device_holdable(struct output_device *device)
 {
   struct airplay_session *session = device->session;
 
-  return session && session->buffered_mode &&
+  return session && session->buffered_mode && !session->stopping &&
          (session->state == AIRPLAY_STATE_CONNECTED || session->state == AIRPLAY_STATE_STREAMING);
 }
 

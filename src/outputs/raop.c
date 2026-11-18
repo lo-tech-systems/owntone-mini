@@ -117,6 +117,10 @@
 // apply.
 #define RAOP_START_TIMEOUT_SEC     4
 
+// A stopped speaker that does not answer its TEARDOWN is closed after this many
+// seconds
+#define RAOP_TEARDOWN_TIMEOUT_SEC  2
+
 enum raop_devtype {
   RAOP_DEV_APEX1_80211G,
   RAOP_DEV_APEX2_80211N,
@@ -218,6 +222,10 @@ struct raop_session
   bool supports_auth_setup;
 
   bool only_probe;
+
+  // The player has asked this session to stop. Set once, never cleared:
+  // every way the session can end from here reports STOPPED
+  bool stopping;
 
   struct event *deferredev;
 
@@ -2037,8 +2045,11 @@ session_cleanup(struct raop_session *rs)
 static void
 session_failure(struct raop_session *rs)
 {
-  /* Session failed, let our user know */
-  if (rs->state != RAOP_STATE_PASSWORD)
+  // Session failed, let our user know. A session the player was stopping
+  // reports the stop it asked for, however it ended
+  if (rs->stopping)
+    rs->state = RAOP_STATE_STOPPED;
+  else if (rs->state != RAOP_STATE_PASSWORD)
     rs->state = RAOP_STATE_FAILED;
 
   raop_status(rs);
@@ -2051,7 +2062,10 @@ deferred_session_failure(struct raop_session *rs)
 {
   struct timeval tv;
 
-  rs->state = RAOP_STATE_FAILED;
+  // A stopping session keeps TEARDOWN, so raop_status() stays quiet until
+  // session_failure() reports it stopped
+  if (!rs->stopping)
+    rs->state = RAOP_STATE_FAILED;
 
   evutil_timerclear(&tv);
   evtimer_add(rs->deferredev, &tv);
@@ -4868,6 +4882,17 @@ raop_device_stop(struct output_device *device, int callback_id)
   struct raop_session *rs = device->session;
 
   rs->callback_id = callback_id;
+
+  // A second stop takes over the report; one TEARDOWN is enough
+  if (rs->stopping)
+    return 1;
+
+  rs->stopping = true;
+
+  // Applies from the next request on the connection, the TEARDOWN below when
+  // nothing else is in flight
+  if (rs->ctrl)
+    evrtsp_connection_set_timeout(rs->ctrl, RAOP_TEARDOWN_TIMEOUT_SEC);
 
   session_teardown(rs, "device_stop");
 
