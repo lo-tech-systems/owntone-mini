@@ -2694,8 +2694,11 @@ raop_volume_to_pct(struct output_device *device, const char *volstr)
     }
 
   // RAOP volume: -144.0 is off, -30.0 - 0 scaled by max_volume maps to 0 - 100
+  // Rounded to the nearest step, so the level converts back to what the device
+  // reported, and never below 1: 0 is sent as -144.0 (off), and anything above
+  // -30.0 is a level the device still plays at
   volume = (100.0 * (raop_volume / 30.0 + 1.0) * RAOP_CONFIG_MAX_VOLUME / (float)device->max_volume);
-  return MAX(0, MIN(100, (int)volume));
+  return MAX(1, MIN(100, (int)(volume + 0.5)));
 }
 
 static int
