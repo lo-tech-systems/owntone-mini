@@ -288,6 +288,31 @@ body_find(uint8_t **body, size_t *body_len, uint8_t *in, size_t in_len)
   return -1;
 }
 
+// The four letter verb for a sendMediaRemoteCommand that carries its command
+// as a number in modernMediaRemoteCommand instead of a string in value, or
+// NULL if there is no such number. The numbers have the meanings receivers
+// are reported to use; one with no verb here comes back as "cmd<number>", so
+// it is reported as unhandled. The caller owns the result.
+static char *
+modern_command_verb(plist_t request)
+{
+  static const char *verbs[] = { "play", "paus", "plps", "stop", "nitm", "pitm" };
+  plist_t item;
+  uint64_t command;
+  char buf[32];
+
+  item = plist_dict_get_item(request, "modernMediaRemoteCommand");
+  if (!item || plist_get_node_type(item) != PLIST_UINT)
+    return NULL;
+
+  plist_get_uint_val(item, &command);
+  if (command < ARRAY_SIZE(verbs))
+    return strdup(verbs[command]);
+
+  snprintf(buf, sizeof(buf), "cmd%" PRIu64, command);
+  return strdup(buf);
+}
+
 static int
 rtsp_parse(char **verb, uint8_t *in, size_t in_len)
 {
@@ -327,9 +352,19 @@ rtsp_parse(char **verb, uint8_t *in, size_t in_len)
       plist_get_string_val(item, &value);
     }
 
+  // Some receivers send the command as a number instead of a four letter value
+  if (!value)
+    value = modern_command_verb(request);
+
   if (!type || !value)
     {
-      DPRINTF(E_DBG, L_AIRPLAY, "AirPlay event has no type/value: type=%s, value=%s\n", type, value);
+      // Logged in full and at a level that stays visible: an event in a form
+      // we cannot read is otherwise lost without a trace
+      char *xml = wplist_to_xml(request);
+
+      DPRINTF(E_LOG, L_AIRPLAY, "AirPlay event in a form we cannot read (type=%s), full event follows:\n%s\n",
+              type ? type : "(none)", xml ? xml : "(could not render event plist)");
+      free(xml);
       goto error;
     }
   else if (strcmp(type, "sendMediaRemoteCommand") != 0)

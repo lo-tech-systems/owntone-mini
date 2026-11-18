@@ -427,6 +427,8 @@ struct airplay_extra
   bool use_ptp;
   bool gcgl;
   bool igl;
+  // The speaker's remote_commands setting, see session->remote_commands
+  bool remote_commands;
 };
 
 struct airplay_master_session
@@ -544,6 +546,14 @@ struct airplay_session
   // session_free(). NULL for every receiver that isn't an Apple TV
   // advertising MetadataFeatures_3 - all MRP send paths must guard on this.
   struct airplay_mrp *mrp;
+
+  // Set for a speaker whose own transport buttons (for example Pause) should
+  // be reported back to us. Such a speaker only sends them to a sender that
+  // describes itself the way an iPhone does, so the session SETUP carries the
+  // iPhone's sender keys (setup_sender_keys_add()) and the MediaRemote command
+  // table is sent as in buffered mode. Off unless the speaker's
+  // remote_commands setting is true.
+  bool remote_commands;
 
   bool req_has_auth;
   bool supports_auth_setup;
@@ -2386,6 +2396,7 @@ session_make(struct output_device *device, int callback_id)
   session->wanted_metadata = extra->wanted_metadata;
   session->supports_encryption = extra->supports_encryption;
   session->devtype = extra->devtype;
+  session->remote_commands = extra->remote_commands;
 
   // MRP state is only needed for receivers the wanted_metadata gate above
   // (feature bit 50 + devtype + config) actually turned on for.
@@ -3625,8 +3636,9 @@ payload_make_flush_buffered(struct evrtsp_request *req, struct airplay_session *
 
 // Buffered receivers expect the MediaRemote command table and audio-mode POST
 // before rendering: an empty updateMRSupportedCommands and a POST /audioMode
-// {audioMode: "default"} bracket SETUP(stream). Buffered mode only - skipped
-// otherwise.
+// {audioMode: "default"} bracket SETUP(stream). The command table also goes to
+// a speaker with remote_commands set, which only reports its own buttons to a
+// sender that has published one. Skipped otherwise.
 static int
 payload_make_command_supported_commands(struct evrtsp_request *req, struct airplay_session *session, void *arg)
 {
@@ -3636,7 +3648,7 @@ payload_make_command_supported_commands(struct evrtsp_request *req, struct airpl
   size_t len;
   int ret;
 
-  if (!session->buffered_mode)
+  if (!session->buffered_mode && !session->remote_commands)
     return 1; // Skip this request in the sequence
 
   params = plist_new_dict();
@@ -3662,7 +3674,8 @@ payload_make_command_supported_commands(struct evrtsp_request *req, struct airpl
 // plists: {kCommandInfoCommandKey: <MRMediaRemoteCommand id>,
 // kCommandInfoEnabledKey: true}. A MediaRemote-centric receiver may gate
 // rendering on the sender publishing a usable command table. The per-command
-// options are omitted, which is still a valid CommandInfo. Buffered mode only.
+// options are omitted, which is still a valid CommandInfo. Sent when the empty
+// table above is.
 static int
 payload_make_command_supported_commands_full(struct evrtsp_request *req, struct airplay_session *session, void *arg)
 {
@@ -3682,7 +3695,7 @@ payload_make_command_supported_commands_full(struct evrtsp_request *req, struct 
   int i;
   int ret;
 
-  if (!session->buffered_mode)
+  if (!session->buffered_mode && !session->remote_commands)
     return 1; // Skip this request in the sequence
 
   commands = plist_new_array();
@@ -4633,6 +4646,31 @@ payload_make_setpeers(struct evrtsp_request *req, struct airplay_session *sessio
   return 0;
 }
 
+// The keys an iPhone adds to its session SETUP to describe itself as a sender.
+// senderSupportsRelay is the one that says the sender takes commands from the
+// receiver; the others are sent with it as an iPhone does, with the iPhone's
+// values. sourceVersion is the AirPlay version from our User-Agent, when it
+// has one. Only for a speaker with remote_commands set.
+static void
+setup_sender_keys_add(plist_t root, struct airplay_session *session)
+{
+  const char *ua_prefix = "AirPlay/";
+
+  if (!session->remote_commands)
+    return;
+
+  wplist_dict_add_bool(root, "senderSupportsRelay", true);
+  wplist_dict_add_bool(root, "isMultiSelectAirPlay", true);
+  wplist_dict_add_bool(root, "statsCollectionEnabled", false);
+  wplist_dict_add_string(root, "model", "iPhone14,2");
+  wplist_dict_add_string(root, "osName", "iPhone OS");
+  wplist_dict_add_string(root, "osVersion", "26.5");
+  wplist_dict_add_string(root, "osBuildVersion", "23F77");
+
+  if (airplay_user_agent && strncmp(airplay_user_agent, ua_prefix, strlen(ua_prefix)) == 0)
+    wplist_dict_add_string(root, "sourceVersion", airplay_user_agent + strlen(ua_prefix));
+}
+
 static int
 payload_make_setup_session_ntp(struct evrtsp_request *req, struct airplay_session *session, void *arg)
 {
@@ -4649,10 +4687,12 @@ payload_make_setup_session_ntp(struct evrtsp_request *req, struct airplay_sessio
   wplist_dict_add_string(root, "sessionUUID", session->session_uuid);
   wplist_dict_add_uint(root, "timingPort", session->timing_svc->port);
   wplist_dict_add_string(root, "timingProtocol", "NTP"); // If set to "None" then an ATV4 will not respond to stream SETUP request
+  setup_sender_keys_add(root, session);
 
   DPRINTF(E_DBG, L_AIRPLAY,
-          "SETUP(session/NTP) payload for '%s': deviceID=%s, sessionUUID=%s, timingPort=%u, timingProtocol=NTP\n",
-          session->devname, device_id_colon, session->session_uuid, session->timing_svc->port);
+          "SETUP(session/NTP) payload for '%s': deviceID=%s, sessionUUID=%s, timingPort=%u, timingProtocol=NTP, sender keys %s\n",
+          session->devname, device_id_colon, session->session_uuid, session->timing_svc->port,
+          session->remote_commands ? "added" : "not added");
 
   ret = wplist_to_bin(&data, &len, root);
   plist_free(root);
@@ -4710,10 +4750,13 @@ payload_make_setup_session_ptp(struct evrtsp_request *req, struct airplay_sessio
   plist_dict_set_item(root, "timingPeerInfo", timingpeerinfo);
   plist_dict_set_item(root, "timingPeerList", timingpeerlist);
 
+  setup_sender_keys_add(root, session);
+
   DPRINTF(E_DBG, L_AIRPLAY,
-          "SETUP(session/PTP) payload for '%s': deviceID=%s, sessionUUID=%s, timingProtocol=PTP, macAddress=%s, groupUUID=%s, groupContainsGroupLeader=%u\n",
+          "SETUP(session/PTP) payload for '%s': deviceID=%s, sessionUUID=%s, timingProtocol=PTP, macAddress=%s, groupUUID=%s, groupContainsGroupLeader=%u, sender keys %s\n",
           session->devname, device_id_colon, session->session_uuid,
-          session->local_mac_address, session->group_uuid, (unsigned)session->group_contains_leader);
+          session->local_mac_address, session->group_uuid, (unsigned)session->group_contains_leader,
+          session->remote_commands ? "added" : "not added");
 
   ret = wplist_to_bin(&data, &len, root);
   plist_free(root);
@@ -6679,12 +6722,14 @@ static struct airplay_seq_request airplay_seq_request[][10] =
     { AIRPLAY_SEQ_START_PLAYBACK, "SETUP (session)", EVRTSP_REQ_SETUP, payload_make_setup_session, response_handler_setup_session, "application/x-apple-binary-plist", NULL, true },
     { AIRPLAY_SEQ_START_PLAYBACK, "RECORD", EVRTSP_REQ_RECORD, payload_make_record, response_handler_record, NULL, NULL, false },
     { AIRPLAY_SEQ_START_PLAYBACK, "SETPEERS", EVRTSP_REQ_SETPEERS, payload_make_setpeers, NULL, "/peer-list-changed", NULL, false },
-    // Buffered mode only (payload_make skips them otherwise): the MediaRemote
-    // command table and audio-mode POST bracket SETUP(stream), see
-    // payload_make_command_supported_commands
-    { AIRPLAY_SEQ_START_PLAYBACK, "POST /command", EVRTSP_REQ_POST, payload_make_command_supported_commands, NULL, "application/x-apple-binary-plist", "/command", false },
+    // Buffered mode, or a speaker with remote_commands (payload_make skips them
+    // otherwise): the MediaRemote command table and audio-mode POST bracket
+    // SETUP(stream), see payload_make_command_supported_commands. A speaker
+    // that refuses the command table can still play, so a refusal does not
+    // end the start.
+    { AIRPLAY_SEQ_START_PLAYBACK, "POST /command", EVRTSP_REQ_POST, payload_make_command_supported_commands, NULL, "application/x-apple-binary-plist", "/command", true },
     // The empty command table is followed by the full one
-    { AIRPLAY_SEQ_START_PLAYBACK, "POST /command (full)", EVRTSP_REQ_POST, payload_make_command_supported_commands_full, NULL, "application/x-apple-binary-plist", "/command", false },
+    { AIRPLAY_SEQ_START_PLAYBACK, "POST /command (full)", EVRTSP_REQ_POST, payload_make_command_supported_commands_full, NULL, "application/x-apple-binary-plist", "/command", true },
     { AIRPLAY_SEQ_START_PLAYBACK, "SETUP (stream)", EVRTSP_REQ_SETUP, payload_make_setup_stream, response_handler_setup_stream, "application/x-apple-binary-plist", NULL, false },
     { AIRPLAY_SEQ_START_PLAYBACK, "POST /audioMode", EVRTSP_REQ_POST, payload_make_audio_mode, NULL, "application/x-apple-binary-plist", "/audioMode", false },
     // Some devices (e.g. Sonos Symfonisk) don't register the volume if it isn't last
@@ -7677,6 +7722,8 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
   if (wants_nowplaying_features && airplay_is_appletv_device(extra->devtype)
       && !(devcfg && cfg_getbool(devcfg, "nowplaying_disable")))
     extra->wanted_metadata |= AIRPLAY_MD_WANTS_NOWPLAYING;
+
+  extra->remote_commands = devcfg && cfg_getbool(devcfg, "remote_commands");
 
   extra->gid = safe_strdup(keyval_get(txt, "gid"));
   extra->gpn = safe_strdup(keyval_get(txt, "gpn"));

@@ -65,6 +65,14 @@
 - change: the service no longer sets `MemoryMax` or `MemorySwapMax`. They were
   sized for the full server, and the memory controller that enforces them is
   off by default on Raspberry Pi kernels, so they never applied
+- new: per speaker `remote_commands` (default off), for an AirPlay 2 speaker
+  whose own buttons should be reported: its sessions are set up with an
+  iPhone's sender description and the list of commands the sender accepts,
+  which such a speaker waits for before sending its buttons. A speaker that
+  refuses the list of commands still plays
+- new: a receiver command sent as a number (`modernMediaRemoteCommand`) is
+  read as well as the four letter form, and an AirPlay event that cannot be
+  read is logged in full at the normal level
 
 ## Version 1.5.0 - 2026-10-14
 
