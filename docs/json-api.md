@@ -575,6 +575,7 @@ in the path. An unknown setting gives HTTP `404 Not Found`.
 | `/api/settings/player/pipe_sample_rate` | integer | Pipe input sample rate, one of `44100`, `48000`, `88200`, `96000`; restart required |
 | `/api/settings/player/pipe_bits_per_sample` | integer | Pipe input bit depth, `16` or `32`; restart required |
 | `/api/settings/player/resample_quality` | string | Output resampler quality for format-mismatched paths, `high` or `standard` (default `standard`); unknown values fall back to `standard`; takes effect on the next playback session, no restart required |
+| `/api/settings/player/device_volume_echo` | string | What to do with a level a speaker reports itself: `off` (record only), `reporter` (default, also send it back to that speaker) or `group` (send it to the speaker and its group); other values are refused; applied immediately, no restart required |
 
 ### Get a setting
 

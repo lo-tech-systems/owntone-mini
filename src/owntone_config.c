@@ -195,6 +195,7 @@ static const char *api_settable_keys[] = {
   "pipe_bits_per_sample",
   "resample_quality",
   "user_agent",
+  "device_volume_echo",
   NULL
 };
 

@@ -135,6 +135,13 @@
 #define PLAYER_DEVICE_REMOVAL_GRACE_DEFAULT 180
 #define PLAYER_DEVICE_REMOVAL_GRACE_MAX     3600
 
+// A level a speaker reports itself is sent back to it once its reports have
+// stopped for this long, for receivers that wait for the sender to apply the
+// level. A report of the level last sent to the speaker, within the window,
+// is the speaker confirming that send and is not sent back again.
+#define PLAYER_VOLUME_ECHO_DELAY_MS 150
+#define PLAYER_VOLUME_ECHO_WINDOW_MS 2000
+
 // Number of empty-output GC checks before requesting mDNS rediscovery.
 #define ZERO_OUTPUT_RESCAN_CHECKS 3
 
@@ -3171,6 +3178,7 @@ speaker_group_volume_apply(struct output_device *device, int absvol, int relvol,
       outputs_device_volume_register(cur, target, -1);
       if (!cb)
         {
+          DPRINTF(E_INFO, L_PLAYER, "Volume echo: recorded %d on group member '%s'\n", target, cur->name);
           successes++;
           continue;
         }
@@ -3783,6 +3791,224 @@ volume_setabs_speaker(void *arg, int *retval)
   return COMMAND_END;
 }
 
+/* ---------------- Sending a speaker's reported level back ----------------- */
+
+// Some receivers only report the level their own buttons ask for and wait for
+// the sender to apply it, while HomePods change themselves. Which speakers
+// need the level sent back, and what the others do when it is, is not yet
+// known, so the "device_volume_echo" setting chooses: "off" records the level
+// only, "reporter" also sends it back to the reporting speaker, and "group"
+// sends it to the reporting speaker and every member of its group.
+
+enum volume_echo_mode
+{
+  VOLUME_ECHO_OFF,
+  VOLUME_ECHO_REPORTER,
+  VOLUME_ECHO_GROUP,
+};
+
+static const char *volume_echo_mode_names[] = { "off", "reporter", "group" };
+
+static uint64_t
+monotonic_ms(void)
+{
+  struct timespec ts;
+
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+// Read on every report, so a change through the settings API applies at once
+static enum volume_echo_mode
+volume_echo_mode_get(void)
+{
+  const char *value = config_get_str("device_volume_echo", "reporter");
+  size_t i;
+
+  for (i = 0; i < ARRAY_SIZE(volume_echo_mode_names); i++)
+    {
+      if (strcmp(value, volume_echo_mode_names[i]) == 0)
+        return (enum volume_echo_mode)i;
+    }
+
+  DPRINTF(E_WARN, L_PLAYER, "Unknown device_volume_echo '%s', using 'reporter'\n", value);
+  return VOLUME_ECHO_REPORTER;
+}
+
+static const char *
+volume_echo_role(struct output_device *device)
+{
+  if (outputs_device_is_tv_proxy_leader(device))
+    return "TV proxy leader";
+  if (outputs_device_is_tv_proxy_follower(device))
+    return "TV proxy follower";
+  if (outputs_device_group_id(device))
+    return "group member";
+
+  return "ungrouped";
+}
+
+// Completion of a level sent back to a speaker. The send is not part of a
+// command, so unlike device_volume_cb() this ends none; a failure goes to the
+// streaming callback, which would have had it had the send not been made.
+static void
+device_volume_echo_cb(struct output_device *device, enum output_device_state status)
+{
+  if (!device || status == OUTPUT_STATE_FAILED || status == OUTPUT_STATE_STOPPED)
+    {
+      DPRINTF(E_INFO, L_PLAYER, "Volume echo: send to '%s' ended with state %d\n", device ? device->name : "(gone)", status);
+      device_streaming_cb(device, status);
+      return;
+    }
+
+  DPRINTF(E_INFO, L_PLAYER, "Volume echo: '%s' accepted %d after %" PRIu64 " ms\n",
+          device->name, device->volume_sent, monotonic_ms() - device->volume_sent_ms);
+
+  outputs_device_cb_set(device, device_streaming_cb);
+}
+
+static void
+volume_echo_send_one(struct output_device *device, const char *why)
+{
+  int ret;
+
+  ret = outputs_device_volume_set(device, device_volume_echo_cb);
+
+  DPRINTF(E_INFO, L_PLAYER, "Volume echo: sending %d to %s '%s' (%s): %s\n",
+          device->volume, why, device->name, volume_echo_role(device),
+          (ret > 0) ? "sent" : (ret == 0) ? "no session, not sent" : "failed");
+}
+
+// Queued from the timer as a command, so it never runs while another command
+// is waiting on a speaker: a send would replace that command's callback and
+// leave its caller blocked
+static enum command_state
+volume_echo_send(void *arg, int *retval)
+{
+  uint64_t *id = arg;
+  struct output_device *device;
+  struct output_device *cur;
+  enum volume_echo_mode mode;
+  const char *group_id;
+  const char *cur_gid;
+
+  *retval = 0;
+
+  device = outputs_device_get(*id);
+  if (!device)
+    {
+      DPRINTF(E_INFO, L_PLAYER, "Volume echo: speaker %" PRIu64 " has gone, nothing sent\n", *id);
+      return COMMAND_END;
+    }
+
+  mode = volume_echo_mode_get();
+  if (mode == VOLUME_ECHO_OFF)
+    {
+      DPRINTF(E_INFO, L_PLAYER, "Volume echo: mode is off, nothing sent to '%s'\n", device->name);
+      return COMMAND_END;
+    }
+
+  volume_echo_send_one(device, "reporter");
+
+  group_id = outputs_device_group_id(device);
+  if (mode != VOLUME_ECHO_GROUP || !group_id)
+    return COMMAND_END;
+
+  for (cur = outputs_list(); cur; cur = cur->next)
+    {
+      if (cur == device)
+        continue;
+
+      cur_gid = outputs_device_group_id(cur);
+      if (!cur_gid || strcmp(cur_gid, group_id) != 0)
+        continue;
+
+      volume_echo_send_one(cur, "group member");
+    }
+
+  return COMMAND_END;
+}
+
+static void
+volume_echo_timer_cb(int fd, short what, void *arg)
+{
+  struct output_device *device = arg;
+  uint64_t *id;
+
+  DPRINTF(E_INFO, L_PLAYER, "Volume echo: no report from '%s' for %d ms, queueing the send of %d\n",
+          device->name, PLAYER_VOLUME_ECHO_DELAY_MS, device->volume);
+
+  CHECK_NULL(L_PLAYER, id = malloc(sizeof(*id)));
+  *id = device->id;
+
+  // On success the command frees id
+  if (commands_exec_async(cmdbase, volume_echo_send, id) < 0)
+    {
+      DPRINTF(E_LOG, L_PLAYER, "Volume echo: could not queue the send to '%s'\n", device->name);
+      free(id);
+    }
+}
+
+// Decides, for a level the speaker has just reported, whether to send it back
+// once the reports stop. The timer lives on the device, so it is freed with it.
+static void
+volume_echo_schedule(struct output_device *device, const char *volstr, int volume)
+{
+  struct timeval delay = { 0, PLAYER_VOLUME_ECHO_DELAY_MS * 1000 };
+  enum volume_echo_mode mode;
+  uint64_t since_sent = 0;
+  bool restarted;
+
+  mode = volume_echo_mode_get();
+
+  if (device->volume_sent_ms)
+    since_sent = monotonic_ms() - device->volume_sent_ms;
+
+  if (device->volume_sent_ms)
+    DPRINTF(E_INFO, L_PLAYER, "Volume echo: '%s' (%s, group %s) reports %s = %d, %" PRIu64 " ms after %d was last sent to it, mode %s\n",
+            device->name, volume_echo_role(device), outputs_device_group_id(device) ? outputs_device_group_id(device) : "none",
+            volstr, volume, since_sent, device->volume_sent, volume_echo_mode_names[mode]);
+  else
+    DPRINTF(E_INFO, L_PLAYER, "Volume echo: '%s' (%s, group %s) reports %s = %d, nothing sent to it yet, mode %s\n",
+            device->name, volume_echo_role(device), outputs_device_group_id(device) ? outputs_device_group_id(device) : "none",
+            volstr, volume, volume_echo_mode_names[mode]);
+
+  if (mode == VOLUME_ECHO_OFF)
+    {
+      if (device->volume_echo_timer)
+        evtimer_del(device->volume_echo_timer);
+      return;
+    }
+
+  if (device->volume_sent_ms && since_sent < PLAYER_VOLUME_ECHO_WINDOW_MS && volume == device->volume_sent)
+    {
+      DPRINTF(E_INFO, L_PLAYER, "Volume echo: '%s' is confirming the level sent to it, not sending it back\n", device->name);
+      if (device->volume_echo_timer)
+        evtimer_del(device->volume_echo_timer);
+      return;
+    }
+
+  // 0 is sent as -144 (off), so a muted speaker is left alone rather than
+  // being told again, and the lowest level, which reports at -30, is not
+  // turned into a mute
+  if (volume == 0)
+    {
+      DPRINTF(E_INFO, L_PLAYER, "Volume echo: '%s' reports 0, not sending it back\n", device->name);
+      if (device->volume_echo_timer)
+        evtimer_del(device->volume_echo_timer);
+      return;
+    }
+
+  if (!device->volume_echo_timer)
+    CHECK_NULL(L_PLAYER, device->volume_echo_timer = evtimer_new(evbase_player, volume_echo_timer_cb, device));
+
+  restarted = evtimer_pending(device->volume_echo_timer, NULL);
+  evtimer_add(device->volume_echo_timer, &delay);
+
+  DPRINTF(E_INFO, L_PLAYER, "Volume echo: '%s' send-back %s, due in %d ms\n",
+          device->name, restarted ? "restarted" : "armed", PLAYER_VOLUME_ECHO_DELAY_MS);
+}
+
 static enum command_state
 volume_setraw_speaker(void *arg, int *retval)
 {
@@ -3807,7 +4033,9 @@ volume_setraw_speaker(void *arg, int *retval)
     }
 
   // A raw volume is the device reporting its own level (see the DACP
-  // endpoint), so record it on the whole group rather than sending it back.
+  // endpoint). It is recorded on the whole group at once, so clients see it
+  // straight away, and may be sent back once the reports stop.
+  volume_echo_schedule(device, vol_param->volstr, volume);
   speaker_group_volume_apply(device, volume, -1, NULL);
 
   *retval = 0;

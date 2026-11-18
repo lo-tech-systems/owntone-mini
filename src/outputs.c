@@ -70,6 +70,15 @@ monotonic_secs(void)
   return ts.tv_sec;
 }
 
+static uint64_t
+monotonic_ms(void)
+{
+  struct timespec ts;
+
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
 /* From player.c */
 extern struct event_base *evbase_player;
 
@@ -2498,6 +2507,11 @@ outputs_device_volume_set(struct output_device *device, output_status_cb cb)
     return 0; // Device isn't active
 
   ret = outputs[device->type]->device_volume_set(device, callback_add(device, cb));
+  if (ret > 0)
+    {
+      device->volume_sent = device->volume;
+      device->volume_sent_ms = monotonic_ms();
+    }
 
   return ret; // We don't change device state just because of a failed volume change
 }
@@ -2598,6 +2612,8 @@ outputs_device_free(struct output_device *device)
 
   if (device->stop_timer)
     event_free(device->stop_timer);
+  if (device->volume_echo_timer)
+    event_free(device->volume_echo_timer);
 
   free(device->name);
   free(device->display_name);

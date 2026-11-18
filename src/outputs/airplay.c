@@ -3988,7 +3988,7 @@ payload_make_set_volume(struct evrtsp_request *req, struct airplay_session *sess
   /* We use -%d and -(int)raop_volume so -0.3 won't become 0.3 */
   snprintf(volstr, sizeof(volstr), "-%d.%06d", -(int)raop_volume, -(int)(1000000.0 * (raop_volume - (int)raop_volume)));
 
-  DPRINTF(E_DBG, L_AIRPLAY, "Sending volume %s to '%s'\n", volstr, session->devname);
+  DPRINTF(E_INFO, L_AIRPLAY, "Sending volume %s (%d) to '%s'\n", volstr, session->volume, session->devname);
 
   ret = evbuffer_add_printf(req->output_buffer, "volume: %s\r\n", volstr);
   if (ret < 0)

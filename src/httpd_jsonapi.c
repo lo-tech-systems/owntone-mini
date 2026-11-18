@@ -198,6 +198,7 @@ static const struct setting_entry settings_table[] = {
   { "player", "pipe_sample_rate",            SETTING_TYPE_INT,  "pipe_sample_rate"            },
   { "player", "pipe_bits_per_sample",        SETTING_TYPE_INT,  "pipe_bits_per_sample"        },
   { "player", "resample_quality",            SETTING_TYPE_STR,  "resample_quality"            },
+  { "player", "device_volume_echo",          SETTING_TYPE_STR,  "device_volume_echo"          },
 };
 
 static const struct setting_entry *
@@ -253,6 +254,9 @@ jsonapi_reply_settings_option_get(struct httpd_request *hreq)
     // raop.c actually send, so the API never reports a blank when a real
     // default is in force.
     json_object_object_add(jreply, "value", json_object_new_string(config_get_str("user_agent", PACKAGE_NAME "/" PACKAGE_VERSION)));
+  else if (strcmp(entry->config_key, "device_volume_echo") == 0)
+    // Not written to the file by default, so report the mode the player uses
+    json_object_object_add(jreply, "value", json_object_new_string(config_get_str("device_volume_echo", "reporter")));
   else
     json_object_object_add(jreply, "value", json_object_new_string(config_get_str(entry->config_key, "")));
 
@@ -343,6 +347,16 @@ jsonapi_reply_settings_option_put(struct httpd_request *hreq)
           if (ret < 0)
             {
               snprintf(errmsg, sizeof(errmsg), "Invalid user_agent: must be at most 255 bytes with no control characters");
+              DPRINTF(E_LOG, L_WEB, "%s\n", errmsg);
+              jparse_free(request);
+              return jsonapi_reply_error(hreq, HTTP_BADREQUEST, errmsg);
+            }
+        }
+      else if (strcmp(entry->config_key, "device_volume_echo") == 0)
+        {
+          if (strcmp(value, "off") != 0 && strcmp(value, "reporter") != 0 && strcmp(value, "group") != 0)
+            {
+              snprintf(errmsg, sizeof(errmsg), "Invalid device_volume_echo: must be 'off', 'reporter' or 'group'");
               DPRINTF(E_LOG, L_WEB, "%s\n", errmsg);
               jparse_free(request);
               return jsonapi_reply_error(hreq, HTTP_BADREQUEST, errmsg);

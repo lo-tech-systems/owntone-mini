@@ -243,6 +243,14 @@ struct output_device
 
   struct event *stop_timer;
 
+  // The last level sent to the device and when (monotonic ms, 0 if never), so
+  // a level the device then reports can be told apart from one it set itself,
+  // and the player's timer that sends a reported level back (see the DACP
+  // endpoint). Both are on the canonical device only.
+  int volume_sent;
+  uint64_t volume_sent_ms;
+  struct event *volume_echo_timer;
+
   // Wall-clock time of the last successful mDNS advertisement for this
   // candidate. Set by candidate_store(); 0 if never set (legacy devices).
   time_t last_seen;
