@@ -455,6 +455,12 @@ airplay_mrp_nowplaying_make(struct evbuffer *evbuf, struct airplay_mrp *mrp, uin
 	}
     }
 
+  // The values a receiver extrapolates its clock from, for working out why a
+  // receiver's elapsed time does not move
+  DPRINTF(E_DBG, L_AIRPLAY, "NowPlayingInfo timeline: elapsed %.1f s, rate %.1f, duration %s, %s\n",
+          elapsed_s, playing ? 1.0 : 0.0, (!timeline_only && duration_s > 0.0) ? "sent" : "not sent",
+          (timeline_only || mrp->merge_update) ? "update" : "replace");
+
   outer_params = plist_new_dict();
   wplist_dict_add_string(outer_params, "type", "npi-text");
   wplist_dict_add_string(outer_params, "mergePolicy",
