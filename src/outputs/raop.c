@@ -227,6 +227,14 @@ struct raop_session
   // every way the session can end from here reports STOPPED
   bool stopping;
 
+  // What a failure is reported as (see raop_answer_note): whether the
+  // receiver has answered anything, and whether the last request went
+  // unanswered. pin_attempt marks a session that pairs with a PIN the user
+  // gave
+  bool answered;
+  bool unanswered;
+  bool pin_attempt;
+
   struct event *deferredev;
 
   int reqs_in_flight;
@@ -1816,6 +1824,45 @@ raop_send_req_pin_start(struct raop_session *rs, evrtsp_req_cb cb, const char *l
 
 /* ------------------------------ Session handling -------------------------- */
 
+// Counts an answer, or the lack of one, to a request of the session. A
+// failure reported after a request went unanswered is a timeout when the
+// receiver had answered before, and unreachable when it never had; after an
+// answer it was refused
+static void
+raop_answer_note(struct raop_session *rs, struct evrtsp_request *req)
+{
+  rs->reqs_in_flight--;
+
+  rs->unanswered = !req;
+  if (req)
+    rs->answered = true;
+}
+
+// Writes the reason that goes with the state being reported to the device:
+// FAILED and PASSWORD carry one, every other state clears it
+static void
+raop_reason_write(struct raop_session *rs, enum output_device_state state)
+{
+  struct output_device *device;
+  enum output_failure_reason recorded = OUTPUT_FAILURE_NONE;
+
+  device = outputs_device_get(rs->device_id);
+  if (!device)
+    return;
+
+  if (state != OUTPUT_STATE_FAILED && state != OUTPUT_STATE_PASSWORD)
+    {
+      device->last_failure = OUTPUT_FAILURE_NONE;
+      return;
+    }
+
+  // The receiver did not judge a PIN it never answered about either
+  if (rs->unanswered)
+    recorded = rs->answered ? OUTPUT_FAILURE_TIMEOUT : OUTPUT_FAILURE_UNREACHABLE;
+
+  device->last_failure = output_failure_reported(recorded, state == OUTPUT_STATE_PASSWORD, rs->pin_attempt);
+}
+
 // Maps our internal state to the generic output state and then makes a callback
 // to the player to tell that state
 static void
@@ -1853,6 +1900,10 @@ raop_status(struct raop_session *rs)
 	DPRINTF(E_LOG, L_RAOP, "Bug! Unhandled state in raop_status(): %d\n", rs->state);
 	state = OUTPUT_STATE_FAILED;
     }
+
+  // Only a report the player hears changes the device's reason
+  if (rs->callback_id >= 0)
+    raop_reason_write(rs, state);
 
   outputs_cb(rs->callback_id, rs->device_id, state);
   rs->callback_id = -1;
@@ -2084,7 +2135,7 @@ session_teardown_cb(struct evrtsp_request *req, void *arg)
 {
   struct raop_session *rs = arg;
 
-  rs->reqs_in_flight--;
+  raop_answer_note(rs, req);
 
   if (!req)
     DPRINTF(E_LOG, L_RAOP, "TEARDOWN request failed in session shutdown\n");
@@ -2414,7 +2465,7 @@ raop_cb_metadata(struct evrtsp_request *req, void *arg)
   struct raop_session *rs = arg;
   int ret;
 
-  rs->reqs_in_flight--;
+  raop_answer_note(rs, req);
 
   if (!req)
     goto error;
@@ -2778,7 +2829,7 @@ raop_cb_set_volume(struct evrtsp_request *req, void *arg)
   struct raop_session *rs = arg;
   int ret;
 
-  rs->reqs_in_flight--;
+  raop_answer_note(rs, req);
 
   if (!req)
     goto error;
@@ -2867,7 +2918,7 @@ raop_cb_flush(struct evrtsp_request *req, void *arg)
   struct raop_session *rs = arg;
   int ret;
 
-  rs->reqs_in_flight--;
+  raop_answer_note(rs, req);
 
   if (!req)
     goto error;
@@ -3509,7 +3560,7 @@ raop_cb_pin_start(struct evrtsp_request *req, void *arg)
   struct raop_session *rs = arg;
   int ret;
 
-  rs->reqs_in_flight--;
+  raop_answer_note(rs, req);
 
   if (!req)
     goto error;
@@ -3539,7 +3590,7 @@ raop_cb_startup_volume(struct evrtsp_request *req, void *arg)
   int sndbuf;
   int ret;
 
-  rs->reqs_in_flight--;
+  raop_answer_note(rs, req);
 
   if (!req)
     {
@@ -3602,7 +3653,7 @@ raop_cb_startup_record(struct evrtsp_request *req, void *arg)
   const char *param;
   int ret;
 
-  rs->reqs_in_flight--;
+  raop_answer_note(rs, req);
 
   if (!req)
     {
@@ -3651,7 +3702,7 @@ raop_cb_startup_setup(struct evrtsp_request *req, void *arg)
   int tmp;
   int ret;
 
-  rs->reqs_in_flight--;
+  raop_answer_note(rs, req);
 
   if (!req)
     {
@@ -3805,7 +3856,7 @@ raop_cb_startup_announce(struct evrtsp_request *req, void *arg)
   struct raop_session *rs = arg;
   int ret;
 
-  rs->reqs_in_flight--;
+  raop_answer_note(rs, req);
 
   if (!req)
     {
@@ -3846,7 +3897,7 @@ raop_cb_startup_auth_setup(struct evrtsp_request *req, void *arg)
   struct raop_session *rs = arg;
   int ret;
 
-  rs->reqs_in_flight--;
+  raop_answer_note(rs, req);
 
   if (!req)
     {
@@ -3876,7 +3927,7 @@ raop_cb_startup_options(struct evrtsp_request *req, void *arg)
   const char *param;
   int ret;
 
-  rs->reqs_in_flight--;
+  raop_answer_note(rs, req);
 
   if (!req || !req->response_code)
     {
@@ -3991,7 +4042,7 @@ raop_pair_response_process(int step, struct evrtsp_request *req, struct raop_ses
   size_t len;
   int ret;
 
-  rs->reqs_in_flight--;
+  raop_answer_note(rs, req);
 
   if (!req)
     {
@@ -4381,6 +4432,8 @@ raop_device_authorize(struct output_device *device, const char *pin, int callbac
   rs = session_make(device, callback_id, true);
   if (!rs)
     return -1;
+
+  rs->pin_attempt = true;
 
   ret = raop_pair_setup(rs, pin);
   if (ret < 0)

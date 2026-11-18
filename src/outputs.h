@@ -9,6 +9,7 @@
 #include <event2/event.h>
 #include <event2/buffer.h>
 #include "misc.h"
+#include "output_failure.h"
 
 /* Outputs is a generic interface between the player and a media output method,
  * like for instance AirPlay (raop) or ALSA. The purpose of the interface is to
@@ -101,14 +102,6 @@ enum output_device_state
   OUTPUT_STATE_PASSWORD  = -2,
 };
 
-// Why the last activation failed; set by the backend before signalling
-// OUTPUT_STATE_FAILED, cleared on successful start.
-enum output_failure_reason
-{
-  OUTPUT_FAILURE_NONE     = 0,
-  OUTPUT_FAILURE_CAPACITY = 1,
-};
-
 // How a session whose device paused itself is held
 enum output_hold_kind
 {
@@ -184,7 +177,8 @@ struct output_device
   // field must only be set in outputs.c (not in the backends/player).
   enum output_device_state state;
 
-  // Reason for the last OUTPUT_STATE_FAILED, if any; NONE otherwise.
+  // Why the last report was OUTPUT_STATE_FAILED or OUTPUT_STATE_PASSWORD, see
+  // output_failure.h; NONE after any other report. Written by the backends.
   enum output_failure_reason last_failure;
 
   // Misc device flags

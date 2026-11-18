@@ -2903,8 +2903,8 @@ playback_flush(void *arg, int *retval)
 // Replaces the session facts of an Apple TV's row with those of the HomePods it
 // leads, reduced to one state: streaming if any streams, else starting if any
 // is starting or connected, else password, else failed, else stopped. A PIN is
-// pending if any of them waits for one, and a capacity failure of any of them
-// is reported.
+// pending if any of them waits for one. A password or failed state carries the
+// reason of the first of them in that state.
 static void
 homepods_session_of(struct player_speaker_info *spk, struct output_device *device)
 {
@@ -2912,7 +2912,8 @@ homepods_session_of(struct player_speaker_info *spk, struct output_device *devic
   const char *group_id;
   struct speakers_seen seen = { false, false, false, false };
   bool pin_pending = false;
-  bool capacity = false;
+  enum output_failure_reason password_reason = OUTPUT_FAILURE_NONE;
+  enum output_failure_reason failed_reason = OUTPUT_FAILURE_NONE;
 
   group_id = outputs_device_group_id(device);
   if (!group_id)
@@ -2927,9 +2928,6 @@ homepods_session_of(struct player_speaker_info *spk, struct output_device *devic
 
       if (cur->pin_pending)
         pin_pending = true;
-      if (cur->last_failure == OUTPUT_FAILURE_CAPACITY)
-        capacity = true;
-
       switch (cur->state)
         {
           case OUTPUT_STATE_STREAMING:
@@ -2941,14 +2939,20 @@ homepods_session_of(struct player_speaker_info *spk, struct output_device *devic
             break;
           case OUTPUT_STATE_PASSWORD:
             seen.password = true;
+            if (password_reason == OUTPUT_FAILURE_NONE)
+              password_reason = cur->last_failure;
             break;
           case OUTPUT_STATE_FAILED:
             seen.failed = true;
+            if (failed_reason == OUTPUT_FAILURE_NONE)
+              failed_reason = cur->last_failure;
             break;
           default:
             break;
         }
     }
+
+  spk->last_failure = OUTPUT_FAILURE_NONE;
 
   switch (speakers_summary_resolve(seen))
     {
@@ -2960,9 +2964,11 @@ homepods_session_of(struct player_speaker_info *spk, struct output_device *devic
         break;
       case SPEAKERS_SUMMARY_PASSWORD:
         spk->state = OUTPUT_STATE_PASSWORD;
+        spk->last_failure = password_reason;
         break;
       case SPEAKERS_SUMMARY_FAILED:
         spk->state = OUTPUT_STATE_FAILED;
+        spk->last_failure = failed_reason;
         break;
       default:
         spk->state = OUTPUT_STATE_STOPPED;
@@ -2970,7 +2976,6 @@ homepods_session_of(struct player_speaker_info *spk, struct output_device *devic
     }
 
   spk->pin_pending = pin_pending;
-  spk->last_failure = capacity ? OUTPUT_FAILURE_CAPACITY : OUTPUT_FAILURE_NONE;
 }
 
 // Whether the speakers a row stands for are held: every member of its group

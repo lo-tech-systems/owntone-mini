@@ -442,6 +442,8 @@ struct airplay_extra
   // Advertises SupportsSetPeersExtendedMessage (features bit 52), see
   // setpeersx_wanted()
   bool supports_setpeersx;
+  // The receiver is Shairport Sync (its TXT model), see anchor_no_clock()
+  bool shairport;
 };
 
 struct airplay_master_session
@@ -619,6 +621,15 @@ struct airplay_session
   // Set once a response has been received over the encrypted control
   // channel, meaning the pairing keys have been proven for this connection.
   bool encrypted_ok;
+
+  // Why the session failed, as far as a failure site could tell; the first
+  // reason recorded is kept (see session_fail_reason). answered is set once
+  // the receiver has answered any request on this session, so a request that
+  // then goes unanswered is a timeout rather than an unreachable receiver.
+  // pin_attempt marks a session that pairs with a PIN the user gave
+  enum output_failure_reason fail_reason;
+  bool answered;
+  bool pin_attempt;
 
   // Set for a capability probe (GET /info only, session torn down right
   // after). Distinguishes a probe from a real activation in the shared
@@ -1569,6 +1580,32 @@ rtsp_cipher(struct evbuffer *outbuf, struct evbuffer *inbuf, void *arg, int encr
 
 /* ------------------------------ Session handling -------------------------- */
 
+// Records why the session is failing; a reason already recorded is kept, since
+// the first failure is the cause and what follows is its consequence
+static void
+session_fail_reason(struct airplay_session *session, enum output_failure_reason reason)
+{
+  if (session->fail_reason == OUTPUT_FAILURE_NONE)
+    session->fail_reason = reason;
+}
+
+// Writes the reason that goes with the state being reported to the device:
+// FAILED and PASSWORD carry one, every other state clears it
+static void
+session_reason_write(struct airplay_session *session, enum output_device_state state)
+{
+  struct output_device *device;
+
+  device = outputs_device_get(session->device_id);
+  if (!device)
+    return;
+
+  if (state == OUTPUT_STATE_FAILED || state == OUTPUT_STATE_PASSWORD)
+    device->last_failure = output_failure_reported(session->fail_reason, state == OUTPUT_STATE_PASSWORD, session->pin_attempt);
+  else
+    device->last_failure = OUTPUT_FAILURE_NONE;
+}
+
 // Maps our internal state to the generic output state and then makes a callback
 // to the player to tell that state
 static void
@@ -1612,6 +1649,11 @@ session_status(struct airplay_session *session)
 	DPRINTF(E_LOG, L_AIRPLAY, "Bug! Unhandled state in session_status(): %d\n", session->state);
 	state = OUTPUT_STATE_FAILED;
     }
+
+  // Only a report the player hears changes the device's reason, so a
+  // background capability probe leaves it alone
+  if (session->callback_id >= 0)
+    session_reason_write(session, state);
 
   outputs_cb(session->callback_id, session->device_id, state);
   session->callback_id = -1;
@@ -2227,14 +2269,9 @@ deferred_session_stop_cb(int fd, short what, void *arg)
 static void
 session_connected(struct airplay_session *session)
 {
-  struct output_device *device;
-
   session->state = AIRPLAY_STATE_CONNECTED;
 
-  device = outputs_device_get(session->device_id);
-  if (device)
-    device->last_failure = OUTPUT_FAILURE_NONE;
-
+  // The report clears the device's failure reason
   session_status(session);
 }
 
@@ -6299,6 +6336,27 @@ anchor_sent_stats_describe(char *buf, size_t size, struct airplay_session *sessi
              (int64_t)(session->anchor_sent_ms - stats->added_ms), stats->delay_req_count, stats->first_delay_req_ms - stats->added_ms);
 }
 
+// Whether anchors were given up because the receiver never took our clock: it
+// has sent our PTP service no delay request. Shairport Sync measures its clock
+// another way, so it is never judged by this
+static bool
+anchor_no_clock(struct airplay_session *session)
+{
+  struct ptpd_peer_stats stats;
+  struct output_device *device;
+  struct airplay_extra *extra;
+
+  if (session->ptpd_slave_id == 0 || ptpd_peer_stats_get(session->ptpd_slave_id, &stats) < 0)
+    return false;
+
+  device = outputs_device_get(session->device_id);
+  extra = device ? device->extra_device_info : NULL;
+  if (extra && extra->shairport)
+    return false;
+
+  return stats.delay_req_count == 0;
+}
+
 // Runs with proceed_on_rtsp_not_ok, since a rejected anchor is retryable: the
 // suspected cause of an in-band or RTSP-level rejection is that the anchor
 // raced the receiver's lock onto our PTP timeline (it can arrive under a
@@ -6401,7 +6459,16 @@ response_handler_send_anchor(struct evrtsp_request *req, struct airplay_session 
 
   if (actions & ANCHOR_ACT_ABORT)
     {
-      DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME repeatedly rejected by '%s', giving up\n", session->devname);
+      if (anchor_no_clock(session))
+	{
+	  DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME repeatedly rejected by '%s', giving up (no delay requests from it)\n", session->devname);
+	  session_fail_reason(session, OUTPUT_FAILURE_NO_CLOCK);
+	}
+      else
+	{
+	  DPRINTF(E_LOG, L_AIRPLAY, "SETRATEANCHORTIME repeatedly rejected by '%s', giving up\n", session->devname);
+	  session_fail_reason(session, OUTPUT_FAILURE_REFUSED);
+	}
       return AIRPLAY_SEQ_ABORT;
     }
 
@@ -6710,7 +6777,7 @@ session_master_attach(struct airplay_session *session, struct output_device *dev
       // it can surface as a capacity-specific API error; either way this is a
       // hard failure, not a soft retry candidate.
       if (encoder_budget_rejected)
-	device->last_failure = OUTPUT_FAILURE_CAPACITY;
+	session_fail_reason(session, OUTPUT_FAILURE_CAPACITY);
       session->state = AIRPLAY_STATE_FAILED;
       return -1;
     }
@@ -7060,6 +7127,10 @@ pair_job_timeout_cb(int fd, short what, void *arg)
     return;
 
   DPRINTF(E_LOG, L_AIRPLAY, "Pair setup for '%s' did not complete in %d s, giving up this attempt\n", session->devname, AIRPLAY_PAIR_COMPUTE_TIMEOUT_SEC);
+
+  // A PIN pairing ends in the password state, but the receiver never judged
+  // the PIN, so this reason is the one reported
+  session_fail_reason(session, OUTPUT_FAILURE_TIMEOUT);
 
   // Release the slot if this session's job holds it. The job itself is left
   // alone, the pairing thread may still be using it, and its late result is
@@ -7515,6 +7586,7 @@ sequence_continue_cb(struct evrtsp_request *req, void *arg)
   if (!req)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "No response to %s from '%s'\n", cur_request->name, session->devname);
+      session_fail_reason(session, (session->answered || session->encrypted_ok) ? OUTPUT_FAILURE_TIMEOUT : OUTPUT_FAILURE_UNREACHABLE);
       // The keys have already worked on this connection, so this timeout
       // cannot be an auth rejection - do not cost the user their pairing.
       if (session->encrypted_ok)
@@ -7530,11 +7602,18 @@ sequence_continue_cb(struct evrtsp_request *req, void *arg)
       goto error;
     }
 
+  session->answered = true;
+
   if (req->response_code != RTSP_OK)
     {
       if (!cur_request->proceed_on_rtsp_not_ok)
 	{
 	  DPRINTF(E_LOG, L_AIRPLAY, "Response to %s from '%s' was negative, aborting (%d %s)\n", cur_request->name, session->devname, req->response_code, req->response_code_line);
+	  // An authentication answer, or any answer during PIN pairing, is the
+	  // password state's to report
+	  if (req->response_code != RTSP_UNAUTHORIZED && req->response_code != RTSP_CONNECTION_AUTH_REQUIRED
+	      && session->state != AIRPLAY_STATE_AUTH)
+	    session_fail_reason(session, OUTPUT_FAILURE_REFUSED);
 	  goto error;
 	}
 
@@ -8418,6 +8497,8 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
   else if (*p == '\0')
     DPRINTF(E_WARN, L_AIRPLAY, "AirPlay device '%s': am has no value\n", name);
 
+  extra->shairport = (p && strstr(p, "ShairportSync"));
+
   // The MediaRemote now-playing channel goes to every receiver that
   // advertises it (bit 50), whatever its model: a receiver with a screen
   // shows itself paused without it. The per-device config can veto it,
@@ -8742,6 +8823,8 @@ airplay_device_authorize(struct output_device *device, const char *pin, int call
   session = session_make(device, callback_id);
   if (!session)
     return -1;
+
+  session->pin_attempt = true;
 
   sequence_start(AIRPLAY_SEQ_PAIR_SETUP, session, (void *)pin, "device_authorize");
 
