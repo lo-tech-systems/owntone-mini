@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## Version 1.6.0 - 2026-11-18
 
 - new: an event channel, a local Unix socket (setting `event_socket`, users
   allowed in `event_socket_allowed_users`) on which a supervisor is told, as
