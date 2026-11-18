@@ -32,7 +32,8 @@ EXTRA_DIST = \
 	$(CONF_FILE) \
 	$(LOGROTATE_CONFIG_FILE).in \
 	$(SYSTEMD_SERVICE_FILE).in \
-	tools/event_channel_client.py
+	tools/event_channel_client.py \
+	tools/upnp_fake_renderer.py
 
 install-data-hook:
 	$(MKDIR_P) "$(DESTDIR)$(localstatedir)/log"
