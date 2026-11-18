@@ -4890,10 +4890,11 @@ payload_make_setpeers(struct evrtsp_request *req, struct airplay_session *sessio
 // values. sourceVersion is the AirPlay version from our User-Agent, when it
 // has one. Only for a speaker with remote_commands set.
 //
-// A receiver that gets the now-playing channel gets senderSupportsRelay and
-// isMultiSelectAirPlay alone: without them iOS (Home, Control Center) does
-// not find our playback on a HomePod, although the HomePod takes the
-// now-playing messages.
+// A receiver that gets the now-playing channel gets senderSupportsRelay
+// alone: without it iOS (Home, Control Center) does not find our playback on a
+// HomePod, although the HomePod takes the now-playing messages.
+// isMultiSelectAirPlay is not sent with it, as it makes the members of a
+// HomePod stereo pair advertise our session's group instead of their pair.
 static void
 setup_sender_keys_add(plist_t root, struct airplay_session *session)
 {
@@ -4902,10 +4903,7 @@ setup_sender_keys_add(plist_t root, struct airplay_session *session)
   if (!session->remote_commands)
     {
       if (session->mrp)
-	{
-	  wplist_dict_add_bool(root, "senderSupportsRelay", true);
-	  wplist_dict_add_bool(root, "isMultiSelectAirPlay", true);
-	}
+	wplist_dict_add_bool(root, "senderSupportsRelay", true);
       return;
     }
 

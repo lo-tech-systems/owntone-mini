@@ -27,6 +27,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <inttypes.h>
 #include <errno.h>
@@ -50,6 +51,10 @@
 #include "plist_wrap.h"
 
 #define RTSP_VERSION "RTSP/1.0"
+
+// The longest event message accepted, headers and body; more unread data than
+// this means the connection is not carrying RTSP messages
+#define AIRPLAY_EVENTS_MESSAGE_MAX (64 * 1024)
 
 struct airplay_events_client
 {
@@ -275,6 +280,62 @@ response_create_from_raw(struct evbuffer *response, uint8_t *body, size_t body_l
     evbuffer_add(response, body, body_len);
 }
 
+// The value of an RTSP header in the header block hdr (hdr_len bytes, ending
+// with the blank line), as an integer, or -1 if the header is not there
+static long
+header_int_get(const uint8_t *hdr, size_t hdr_len, const char *name)
+{
+  size_t name_len = strlen(name);
+  size_t i;
+
+  for (i = 0; i + name_len + 1 < hdr_len; i++)
+    {
+      if ((i == 0 || hdr[i - 1] == '\n') && strncasecmp((const char *)hdr + i, name, name_len) == 0 && hdr[i + name_len] == ':')
+	return strtol((const char *)hdr + i + name_len + 1, NULL, 10);
+    }
+
+  return -1;
+}
+
+// Finds the first whole RTSP message in in: its length including any body
+// (from Content-Length) and its CSeq (0 if it has none). A message can arrive
+// over several encrypted frames, each carrying at most 1024 bytes, so a long
+// command (as iOS sends through a HomePod) is split. Returns 1 while the
+// message is still incomplete, -1 if it cannot be an RTSP message.
+static int
+message_find(size_t *msg_len, int *cseq, const uint8_t *in, size_t in_len)
+{
+  size_t hdr_len;
+  long content_length;
+
+  for (hdr_len = 0; hdr_len + 4 <= in_len; hdr_len++)
+    {
+      if (memcmp(in + hdr_len, "\r\n\r\n", 4) == 0)
+	break;
+    }
+
+  if (hdr_len + 4 > in_len)
+    return 1;
+
+  hdr_len += 4;
+
+  content_length = header_int_get(in, hdr_len, "Content-Length");
+  if (content_length < 0)
+    content_length = 0;
+  else if (content_length > AIRPLAY_EVENTS_MESSAGE_MAX)
+    return -1;
+
+  *cseq = (int)header_int_get(in, hdr_len, "CSeq");
+  if (*cseq < 0)
+    *cseq = 0;
+
+  if (in_len < hdr_len + (size_t)content_length)
+    return 1;
+
+  *msg_len = hdr_len + (size_t)content_length;
+  return 0;
+}
+
 static int
 body_find(uint8_t **body, size_t *body_len, uint8_t *in, size_t in_len)
 {
@@ -468,7 +529,7 @@ handle_event(struct airplay_events_client *client, const char *verb, double leve
 }
 
 static int
-respond(struct airplay_events_client *client)
+respond(struct airplay_events_client *client, int cseq)
 {
   struct evbuffer *response;
   struct evbuffer *encrypted;
@@ -477,7 +538,7 @@ respond(struct airplay_events_client *client)
   int ret;
 
   CHECK_NULL(L_AIRPLAY, response = evbuffer_new());
-  response_create_from_raw(response, NULL, 0, 0, NULL);
+  response_create_from_raw(response, NULL, 0, cseq, NULL);
 
   plain = evbuffer_pullup(response, -1);
   plain_len = evbuffer_get_length(response);
@@ -512,10 +573,12 @@ static void
 incoming_cb(int fd, short what, void *arg)
 {
   struct airplay_events_client *client = arg;
-  char *verb = NULL;
+  char *verb;
   double level;
   uint8_t *plain;
   size_t plain_len;
+  size_t msg_len;
+  int cseq;
   int ret;
 
   DPRINTF(E_DBG, L_AIRPLAY, "AirPlay event from '%s'\n", client->name);
@@ -539,32 +602,44 @@ incoming_cb(int fd, short what, void *arg)
       goto disconnect;
     }
 
-  plain = evbuffer_pullup(client->pending, -1);
-  plain_len = evbuffer_get_length(client->pending);
-
-  ret = rtsp_parse(&verb, &level, plain, plain_len);
-  if (ret == 1)
+  // Each whole message is handled in turn; an incomplete one stays pending
+  // until the rest of it arrives
+  while ((plain_len = evbuffer_get_length(client->pending)) > 0)
     {
-      DPRINTF(E_SPAM, L_AIRPLAY, "Incomplete RTSP event message, waiting for more data\n");
-      return;
-    }
+      plain = evbuffer_pullup(client->pending, -1);
 
-  evbuffer_drain(client->pending, -1);
+      ret = message_find(&msg_len, &cseq, plain, plain_len);
+      if (ret == 1 && plain_len <= AIRPLAY_EVENTS_MESSAGE_MAX)
+	{
+	  DPRINTF(E_SPAM, L_AIRPLAY, "Incomplete RTSP event message, waiting for more data\n");
+	  return;
+	}
+      else if (ret != 0)
+	{
+	  DPRINTF(E_WARN, L_AIRPLAY, "Data from '%s' on the event channel is not an RTSP message\n", client->name);
+	  goto disconnect;
+	}
 
-  // A message we cannot use is still answered: the receiver waits for the
-  // answer to every request it sends, and one left unanswered (for example a
-  // remoteConrolSessionCreate) can stop it answering us
-  if (ret == 0)
-    {
-      handle_event(client, verb, level);
-      free(verb);
-    }
+      verb = NULL;
+      ret = rtsp_parse(&verb, &level, plain, msg_len);
 
-  ret = respond(client);
-  if (ret < 0)
-    {
-      DPRINTF(E_WARN, L_AIRPLAY, "Could not send AirPlay event response\n");
-      goto disconnect;
+      evbuffer_drain(client->pending, msg_len);
+
+      // A message we cannot use is still answered: the receiver waits for the
+      // answer to every request it sends, and one left unanswered (for example
+      // a remoteConrolSessionCreate) can stop it answering us
+      if (ret == 0)
+	{
+	  handle_event(client, verb, level);
+	  free(verb);
+	}
+
+      ret = respond(client, cseq);
+      if (ret < 0)
+	{
+	  DPRINTF(E_WARN, L_AIRPLAY, "Could not send AirPlay event response\n");
+	  goto disconnect;
+	}
     }
 
   return;
