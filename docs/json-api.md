@@ -174,7 +174,8 @@ curl -X PUT "http://localhost:3689/api/metadata" \
 | `requires_auth` | boolean | `true` if the output currently requires authorization |
 | `needs_auth_key` | boolean | `true` if the server does not have a valid stored auth key |
 | `pin_pending` | boolean | `true` if the last attempt to enable the output stopped because the device wants a PIN or password. Submit it with `pin` in [Update an output](#update-an-output). Cleared when a later activation attempt gets past that step. For an Apple TV enabled with `include_tv: false` it is true while any of its HomePods is waiting for one |
-| `volume` | integer | Output volume in percent |
+| `volume` | integer | Output volume in percent. While the output is muted, or held by sending it 0, it is the level the speaker returns to |
+| `muted` | boolean | `true` while the output is muted with `muted` (see [Update an output](#update-an-output)): it is sent 0 and keeps `volume` |
 | `offset_ms` | integer | Timing offset in milliseconds |
 | `format` | string | Active audio format |
 | `supported_formats` | array | Supported audio format strings |
@@ -192,8 +193,8 @@ The state of what the row plays. For an output on its own that is its own connec
 | --- | ---- | ----- |
 | `state` | string | `"stopped"` (no connection), `"startup"` (connecting), `"connected"` (connected, audio not flowing yet), `"streaming"`, `"failed"`, or `"password"` (the device wants a PIN or password) |
 | `failure` | string | Why the last start failed: `"capacity"` if the buffered-encode budget was used up, otherwise `"none"` |
-| `held` | boolean | `true` while the output is held with `hold` (see [Update an output](#update-an-output)): it paused itself and is sent no audio. For a group it is `true` when every speaker of the group that has a session is held. Cleared when the hold ends or the session ends |
-| `holdable` | boolean | `true` if `hold` would be accepted now: the output, or a speaker of its group that plays audio, has a connected or streaming buffered AirPlay 2 session |
+| `held` | boolean | `true` while the output is held with `hold` (see [Update an output](#update-an-output)): it paused itself and is paused in place (a buffered AirPlay 2 session) or sent 0 (any other). For a group it is `true` when every speaker of the group that has a session is held. Cleared when the hold ends or the session ends |
+| `holdable` | boolean | `true` if `hold` would be accepted now: the output, or a speaker of its group that plays audio, has a connected or streaming AirPlay 2 or AirPlay 1 session that is not being stopped |
 
 An output that is selected is not necessarily streaming: `selected` says what
 was asked for, `session.state` what the device is doing. When playback starts
@@ -331,23 +332,42 @@ All fields are optional. Any combination may be supplied in one request.
 | `offset_ms` | integer | Set timing offset in milliseconds, from `-2000` to `2000` |
 | `mode` | string | Set the protocol mode preference: `"auto"`, `"raop"`, `"airplay2"`, `"airplay2_buffered"`, `"airplay2_buffered_24"`, `"airplay2_surround_stereo"`, or `"airplay2_surround_upmix"` |
 | `hold` | boolean | `true` holds a speaker that paused itself, `false` ends the hold. See below |
+| `muted` | boolean | `true` mutes the output, `false` ends the mute. See below |
 
-Fields are applied in this order: `offset_ms`, `selected` (with `include_tv`),
-`volume`, `hold`, `pin`, `format`, `mode`. If one fails, the ones before it have
-already taken effect.
+Fields are applied in this order: `offset_ms`, `mode` (unless the request has
+`selected: false`), `muted`, `selected` (with `include_tv`), `mode` (when the
+request has `selected: false`), `volume`, `hold`, `pin`, `format`. If one fails,
+the ones before it have already taken effect.
 
 A buffered AirPlay 2 receiver (an Apple TV, a HomePod) pauses itself when its
 own pause is pressed, and its own play does not restart it. It keeps reading
 audio until its buffer is full and then stops, and the session then fails.
-`hold: true` stops sending it audio, so the session stays up, and tells it that
-playback is paused. `hold: false` restarts it at the live position: its buffer
-is flushed and it is given a new start time. For a group (a stereo pair, or an
-Apple TV and its HomePods) every speaker of the group with a session is held or
-restarted together. Holding a speaker that is held, or ending the hold of one
-that is not, is accepted and changes nothing. A request for an output that
-cannot be held (no session, or not a buffered AirPlay 2 session) gets HTTP `409
+`hold: true` pauses it in place with its buffer kept, so the members of a
+stereo pair stop together, and stops sending it audio. The session stays up,
+and the receiver is told that playback is paused. `hold: false` restarts it at the live
+position: its buffer is flushed and it is given a new start time. A real-time
+AirPlay 2 or an AirPlay 1 speaker is held by sending it 0 while its audio keeps
+flowing, so it stays in time; `hold: false` sends it its own level again. For a
+group (a stereo pair, or an Apple TV and its HomePods) every speaker of the
+group with a session is held or restarted together. Holding a speaker that is
+held, or ending the hold of one that is not, is accepted and changes nothing. A
+request for an output that cannot be held (no session, a session that is still
+starting or is being stopped, or a speaker of another kind) gets HTTP `409
 Conflict` with body `{"error": "not_holdable"}`. The hold ends with the
-session.
+session; a speaker of a held group whose session is set up again ends the hold
+of the others.
+
+`muted: true` sends the output 0 and keeps its level in `volume`; `muted:
+false` sends that level again. The mute applies to every speaker of the
+output's group and needs no session: a muted output that is started later
+starts silent. While an output is muted or held by sending it 0, a level set on
+it moves the level it returns to and nothing is sent, and the speaker's own
+volume control is not recorded: a turn of it is reported once on the [event
+channel](event-channel.md) as the receiver command `wake`, and nothing else
+changes. Disabling the output ends its mute. `muted` on an output that is off
+is kept for its next start and cleared when it is next switched off, so a later
+`selected: true` without `muted` starts it silent; a supervisor sends `muted`
+with every enable.
 
 **Response**
 
@@ -362,6 +382,11 @@ one that does not answer within about 4 seconds. A speaker that answers part of
 the way and then stalls can take up to about 30 seconds. A client should treat
 a timeout during a start as "pending" and check again, not as the daemon being
 down.
+
+Disabling a connected or streaming AirPlay 2 output ends its session on the
+receiver with `TEARDOWN` and answers once the receiver has replied, or after
+1.5 seconds without a reply. An AirPlay 1 output is given about 2 seconds,
+longer only when a request it was already sent has its own timer running.
 
 Returns HTTP `400 Bad Request` if the id is not a number, the body is missing
 or not valid JSON, no output has that id, `volume` or `offset_ms` is out of
@@ -472,6 +497,7 @@ GET /api/config
 | `live_offset` | boolean | Always `true` in this build. It means an output's `offset_ms` can be changed during playback |
 | `event_channel` | integer | Version of the [event channel](event-channel.md) protocol, or `0` when the channel is off |
 | `event_socket` | string or null | Path of the event channel's socket, `null` when the channel is off |
+| `api_features` | array | Names of what this build's API does beyond the base. `"mute"`: [Update an output](#update-an-output) takes `muted` and each output row carries it. A client treats a missing list as empty; the order is not significant |
 
 **Example**
 
@@ -498,7 +524,8 @@ curl -X GET "http://localhost:3689/api/config"
   "restart_required": false,
   "live_offset": true,
   "event_channel": 1,
-  "event_socket": "/run/owntone-mini/events.sock"
+  "event_socket": "/run/owntone-mini/events.sock",
+  "api_features": ["mute"]
 }
 ```
 

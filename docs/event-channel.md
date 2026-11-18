@@ -60,9 +60,12 @@ server allows four connections at once.
 | `error` | `code`, `text`. The server closes the connection after it. |
 
 `capabilities` lists what this build can report: `changed`,
-`receiver_command`, `device_volume`, `include_tv` and `start_volume`.
+`receiver_command`, `device_volume`, `include_tv`, `start_volume` and `mute`.
 `start_volume` means an enable that carries a `volume` starts the speakers at
-that level (see [Update an output](json-api.md#update-an-output)).
+that level (see [Update an output](json-api.md#update-an-output)). `mute` means
+an output can be muted with `muted`, and a muted speaker, or one held by sending
+it 0, reports a turn of its own volume control as the receiver command `wake`
+(see below).
 
 `changed` carries no detail. The client reads `GET /api/outputs` to find out
 what changed. At most one `changed` is sent per 20 ms on a connection, so a
@@ -74,8 +77,8 @@ put an event in order with the hello.
 
 | `kind` | Extra fields | Meaning |
 |--------|--------------|---------|
-| `receiver_command` | `verb` (the receiver's own word, unchanged: for example `paus`, `play`, `nitm`, `pitm`), `protocol` (`"airplay2_events"`) | A speaker or Apple TV sent a command on its events connection. The daemon does not pause, resume or deselect anything because of it. The receiver still gets its normal reply. |
-| `device_volume` | `verb` (`dmcp.device-volume`, `dmcp.volume`, `volumeup`, `volumedown`, `upnp.volume` or `dvlc`), `value` (the raw value for `dmcp.device-volume`, the level in dB on the same scale for `dvlc`, a percentage as a decimal string for the others) | A receiver set its volume through the control interface; for `upnp.volume`, a speaker's UPnP renderer reported a level set on the speaker itself (see [upnp_volume_follow](configuration.md#upnp_volume_follow)); for `dvlc`, an AirPlay 2 speaker reported a turn of its own volume control on its events connection (see `remote_commands` in [the per-speaker settings](configuration.md)). The volume has already been recorded when the event is sent. A `dvlc` level is not sent back to the speaker, which is already playing at it. |
+| `receiver_command` | `verb` (the receiver's own word, unchanged: for example `paus`, `play`, `nitm`, `pitm`; or `wake`), `protocol` (`"airplay2_events"`, `"dacp"` or `"upnp"`) | A speaker or Apple TV sent a command. With `"airplay2_events"` it came on an AirPlay 2 receiver's events connection. With `"dacp"` an AirPlay 1 receiver sent its own pause, play, play/pause or mute toggle as a DACP request, reported as `paus`, `play`, `plps` or `mute`. Verb `wake` means a turn of a silent speaker's own volume control (it is muted, or held by sending it 0) was read: from `dvlc` (`"airplay2_events"`), from DACP `setproperty`, `volumeup` or `volumedown` (`"dacp"`), or from a UPnP renderer's level (`"upnp"`). It is sent once per turn, and nothing is changed because of it. The daemon does not pause, resume or deselect anything because of a command. The receiver still gets its normal reply. |
+| `device_volume` | `verb` (`dmcp.device-volume`, `dmcp.volume`, `volumeup`, `volumedown`, `upnp.volume` or `dvlc`), `value` (the raw value for `dmcp.device-volume`, the level in dB on the same scale for `dvlc`, a percentage as a decimal string for the others) | A receiver set its volume through the control interface; for `upnp.volume`, a speaker's UPnP renderer reported a level set on the speaker itself (see [upnp_volume_follow](configuration.md#upnp_volume_follow)); for `dvlc`, an AirPlay 2 speaker reported a turn of its own volume control on its events connection (see `remote_commands` in [the per-speaker settings](configuration.md)). The volume has already been recorded when the event is sent. A `dvlc` level is not sent back to the speaker, which is already playing at it. A silent speaker's own levels are not recorded and not reported as `device_volume`. |
 
 `speaker.id` is the id of the output the event is reported under, as a string,
 or `"0"` when a `dmcp.volume` applies to every speaker. For a device the daemon knows it is
@@ -97,7 +100,7 @@ Example:
 
 ```json
 {"type":"hello","protocol":1,"client":"supervisor 1.0"}
-{"type":"hello","seq":1,"protocol":1,"version":"1.6.0","boot":"3f9a1c2e77b04d15","uptime_ms":1843,"capabilities":["changed","receiver_command","device_volume","include_tv","start_volume"],"ping_interval_ms":10000,"idle_close_ms":30000,"max_line":4096}
+{"type":"hello","seq":1,"protocol":1,"version":"1.6.0","boot":"3f9a1c2e77b04d15","uptime_ms":1843,"capabilities":["changed","receiver_command","device_volume","include_tv","start_volume","mute"],"ping_interval_ms":10000,"idle_close_ms":30000,"max_line":4096}
 {"type":"changed","seq":2,"what":"outputs"}
 {"type":"event","seq":3,"kind":"receiver_command","verb":"paus","protocol":"airplay2_events","speaker":{"id":"9988776655443322","member_id":"9988776655443399","name":"TV A"},"at_ms":190511}
 {"type":"event","seq":4,"kind":"device_volume","verb":"volumeup","value":"45","speaker":{"id":"8734567012345678","member_id":"8734567012345678","name":"Speaker A"},"at_ms":191002}

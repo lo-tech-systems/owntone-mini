@@ -138,6 +138,46 @@
   broken messages and lost. Event messages are now put together from their
   `Content-Length` before they are read, several in one read are each
   handled, and each answer carries the request's `CSeq`
+- change: disabling a connected or streaming AirPlay 2 speaker ends its
+  session on the receiver with `TEARDOWN` instead of only closing the
+  connection, and answers once the receiver replies or after 1.5 seconds. A
+  HomePod kept the closed session for a while, and Home's controls for it did
+  not work in the next session. Whatever ends a session being stopped, on
+  AirPlay 1 too, it is reported as stopped exactly once, and a level, flush or
+  second stop sent meanwhile no longer takes the place of the stop
+- change: a held buffered AirPlay 2 speaker is paused in place with a rate 0
+  anchor, keeping its buffer, so it stops at once instead of playing out
+  what it had buffered, and the members of a stereo pair stop together. The
+  position its screen and Home show stands still while it is held
+- fix: a HomePod stereo pair keeps its row while we play to it. The members
+  of a pair share one group UUID, the pair keeps the member that led it last
+  while both advertise our group, and the session describes the sender as a
+  multi-select sender, without which Home did not always offer its controls
+  for our playback
+- new: `PUT /api/outputs/{id}` takes `muted`, and each output row carries it.
+  A muted output, and every speaker of its group, is sent 0 and keeps its
+  level in `volume`, the level it returns to. The mute needs no session (a
+  muted output that is started later starts silent) and ends when the output
+  is disabled. `GET /api/config` lists `api_features` (`"mute"`), and the event
+  channel's hello lists the capability `mute`
+- new: a real-time AirPlay 2 speaker and an AirPlay 1 speaker that pause
+  themselves can be held with `hold`: they are sent 0 while their audio keeps
+  flowing, so they stay in time, and keep their level, which is sent again
+  when the hold ends. A speaker of a held group whose session is set up again
+  ends the hold of the others
+- new: a turn of a silent speaker's own volume control (it is muted, or held
+  by sending it 0) is not recorded as its level; it is reported once on the
+  event channel as the receiver command `wake`, read from `dvlc`, from DACP
+  `setproperty`, `volumeup` and `volumedown`, or from its UPnP renderer. The
+  answers to the levels sent to it, and the reports that follow its level
+  being put back, are no longer taken for its own changes
+- new: an AirPlay 1 receiver's own pause, play, play/pause and mute toggle
+  (DACP) are reported on the event channel as receiver commands `paus`,
+  `play`, `plps` and `mute`. A receiver command carries the protocol it came
+  from: `airplay2_events`, `dacp` or `upnp`
+- change: when a speaker starts streaming, the level on the wire is compared
+  with the level due and sent again if they differ, so a mute, an unmute or a
+  level change made while it was starting is put right
 
 ## Version 1.5.0 - 2026-10-14
 
