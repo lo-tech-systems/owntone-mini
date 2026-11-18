@@ -200,6 +200,10 @@ struct raop_session
   uint64_t device_id;
   int callback_id;
 
+  // Set once the player has been told OUTPUT_STATE_STREAMING since the session
+  // last entered STREAMING, so it is only reported once per transition
+  bool streaming_reported;
+
   struct raop_master_session *master_session;
 
   struct evrtsp_connection *ctrl;
@@ -4951,7 +4955,7 @@ raop_write(struct output_buffer *obuf)
 	evtimer_add(keep_alive_timer, &keep_alive_tv);
 
       rs->state = RAOP_STATE_STREAMING;
-      // Make a cb?
+      rs->streaming_reported = false;
 
       // Catches a volume set that arrived while the session was still
       // starting (the RECORD response handler captures device->volume when
@@ -4971,6 +4975,18 @@ raop_write(struct output_buffer *obuf)
 	  if (ret < 0)
 	    DPRINTF(E_WARN, L_RAOP, "Could not re-send volume to '%s'\n", rs->devname);
 	}
+    }
+
+  // Tells the player that audio is flowing, once per CONNECTED->STREAMING
+  // transition. Deferred until the player has registered a callback (it
+  // may not have yet), so it is re-checked on every write.
+  for (rs = raop_sessions; rs; rs = rs->next)
+    {
+      if (rs->state != RAOP_STATE_STREAMING || rs->streaming_reported || rs->callback_id < 0)
+	continue;
+
+      rs->streaming_reported = true;
+      raop_status(rs);
     }
 }
 
