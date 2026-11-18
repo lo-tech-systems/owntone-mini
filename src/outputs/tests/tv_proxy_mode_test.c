@@ -239,6 +239,67 @@ enable_without_a_group_clears_the_exclusion(void)
   case_end();
 }
 
+static void
+pair_memory_needs_every_member_on_the_issued_group(void)
+{
+  struct stereo_leader_memory m;
+
+  case_begin("pair_memory_needs_every_member_on_the_issued_group");
+
+  // Both members on the group we issued, the last leader present
+  m = (struct stereo_leader_memory){ false, true, 2, 2 };
+  CHECK(stereo_leader_memory_applies(m));
+
+  // One of the two on it: another sender's group or a stale advertisement
+  m = (struct stereo_leader_memory){ false, true, 2, 1 };
+  CHECK(!stereo_leader_memory_applies(m));
+
+  // Neither on it
+  m = (struct stereo_leader_memory){ false, true, 2, 0 };
+  CHECK(!stereo_leader_memory_applies(m));
+
+  // A pair with one member present, which is on it
+  m = (struct stereo_leader_memory){ false, true, 1, 1 };
+  CHECK(stereo_leader_memory_applies(m));
+
+  case_end();
+}
+
+static void
+pair_memory_never_overrides_a_known_leader(void)
+{
+  struct stereo_leader_memory m;
+
+  case_begin("pair_memory_never_overrides_a_known_leader");
+
+  m = (struct stereo_leader_memory){ true, true, 2, 2 };
+  CHECK(!stereo_leader_memory_applies(m));
+  m = (struct stereo_leader_memory){ true, false, 0, 0 };
+  CHECK(!stereo_leader_memory_applies(m));
+
+  case_end();
+}
+
+static void
+pair_memory_needs_the_last_leader_present(void)
+{
+  struct stereo_leader_memory m;
+
+  case_begin("pair_memory_needs_the_last_leader_present");
+
+  // The member that led last has gone, or never had a session of ours
+  m = (struct stereo_leader_memory){ false, false, 2, 2 };
+  CHECK(!stereo_leader_memory_applies(m));
+  m = (struct stereo_leader_memory){ false, false, 2, 0 };
+  CHECK(!stereo_leader_memory_applies(m));
+
+  // No members at all
+  m = (struct stereo_leader_memory){ false, true, 0, 0 };
+  CHECK(!stereo_leader_memory_applies(m));
+
+  case_end();
+}
+
 int
 main(int argc, char **argv)
 {
@@ -256,6 +317,9 @@ main(int argc, char **argv)
   enable_refuses_a_change_while_selected();
   enable_refuses_speakers_only_without_a_group();
   enable_without_a_group_clears_the_exclusion();
+  pair_memory_needs_every_member_on_the_issued_group();
+  pair_memory_never_overrides_a_known_leader();
+  pair_memory_needs_the_last_leader_present();
 
   printf("%d cases, %d failed\n", cases_run, cases_failed);
 

@@ -138,6 +138,10 @@ struct output_device
   char *group_id;
   char *group_name;
   char *raw_gid;        // Raw mDNS gid, used to cross-reference TV proxy groups
+  // The group UUID of this device's latest AirPlay 2 session (canonical
+  // device only), kept after the session so a receiver still advertising it
+  // is recognised
+  char issued_gid[37];
   uint64_t group_leader_id;
   unsigned tv_proxy_reconnects;  // Automatic leader reconnects since it last streamed
   // One-shot override set by the player to start a TV proxy leader's real
@@ -204,6 +208,11 @@ struct output_device
   // a flush or a new callback would take the stop's place and its report
   // would be lost
   unsigned stop_pending:1;
+  // Set on the AirPlay 2 candidate of a stereo pair member made the pair's
+  // leader because it led the pair last and both members now advertise a
+  // group one of our sessions issued; undone at the start of every group
+  // refresh
+  unsigned leader_remembered:1;
 
   // Credentials if relevant
   const char *password;

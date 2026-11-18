@@ -183,6 +183,12 @@ struct output_group
   bool last_logged_multi_leader;
   int last_logged_leaders;
 
+  // The member that last led the pair by its own advertisement; kept across
+  // refreshes, cleared when an Apple TV is found to lead the group
+  uint64_t last_leader_id;
+  // Whether the last refresh kept the pair's last leader, for its log line
+  bool last_logged_remembered;
+
   struct output_group *next;
 };
 
@@ -463,6 +469,20 @@ output_group_refresh(void)
   for (device = outputs_device_list; device; device = device->next)
     {
       candidate = device->candidate_airplay2;
+
+      // A pair member made leader from memory by the previous refresh goes
+      // back to what its own advertisement gave it (see
+      // airplay_stereo_state_set): the memory is worked out afresh below
+      if (candidate && candidate->leader_remembered)
+        {
+          candidate->leader_remembered = 0;
+          candidate->is_group_leader = 0;
+          candidate->is_group_hidden = 1;
+          candidate->group_leader_id = 0;
+          free(candidate->display_name);
+          candidate->display_name = safe_strdup(candidate->name);
+        }
+
       if (!candidate || !candidate->is_tv_proxy_group)
         continue;
 
@@ -512,6 +532,11 @@ output_group_refresh(void)
           group->leader_id = device->id;
           group->leader_known = true;
         }
+
+      // Remembered from the member's own advertisement only: a leader from
+      // memory was undone above
+      if (candidate->is_group_leader)
+        group->last_leader_id = device->id;
 
       output_group_member_add(group, device->id);
     }
@@ -575,11 +600,74 @@ output_group_refresh(void)
 
       candidate_promote_as_proxy_leader(tv_candidate, tv_device, group);
 
+      // A pair behind an Apple TV is never given a leader from memory
+      group->last_leader_id = 0;
+
       // Left at E_DBG: the "AirPlay stereo group state updated" log below
       // already reports leader changes at E_INFO.
       DPRINTF(E_DBG, L_PLAYER,
               "AirPlay TV proxy group: Apple TV '%s' (id=%" PRIu64 ") linked as leader for HomePod group gid=%s, name='%s'\n",
               tv_device->name, tv_device->id, group->id, group->name ? group->name : "(unknown)");
+    }
+
+  // A stereo pair we play to as a multi-select sender advertises the group
+  // our sessions gave it, with neither member as its leader, and would lose
+  // its row. While both members advertise the group UUID we issued to the
+  // member that last led the pair, that member stays the leader. The member
+  // ids are canonical devices, which carry issued_gid; the group fields are on
+  // their AirPlay 2 candidates. Not after a restart until a member leads the
+  // pair by its own advertisement again
+  for (group = outputs_group_list; group; group = group->next)
+    {
+      struct output_device *remembered = NULL;
+      struct stereo_leader_memory m = { group->leader_known, false, 0, 0 };
+      size_t i;
+
+      if (!group->leader_known && group->last_leader_id)
+        {
+          for (i = 0; i < group->members_count; i++)
+            if (group->member_ids[i] == group->last_leader_id)
+              remembered = outputs_device_get(group->last_leader_id);
+
+          m.remembered_present = (remembered && remembered->candidate_airplay2 && remembered->issued_gid[0]);
+
+          for (i = 0; i < group->members_count; i++)
+            {
+              device = outputs_device_get(group->member_ids[i]);
+              candidate = device ? device->candidate_airplay2 : NULL;
+
+              m.members++;
+              if (m.remembered_present && candidate && candidate->raw_gid
+                  && strcasecmp(candidate->raw_gid, remembered->issued_gid) == 0)
+                m.members_on_issued++;
+            }
+
+          if (stereo_leader_memory_applies(m))
+            {
+              candidate = remembered->candidate_airplay2;
+              candidate->leader_remembered = 1;
+              candidate->is_group_leader = 1;
+              candidate->is_group_hidden = 0;
+              candidate->group_leader_id = remembered->id;
+              free(candidate->display_name);
+              candidate->display_name = safe_asprintf("%s (Stereo)", candidate->group_name ? candidate->group_name : candidate->name);
+              group->leader_id = remembered->id;
+              group->leader_known = true;
+            }
+        }
+
+      if (group->leader_known && remembered)
+        {
+          if (!group->last_logged_remembered)
+            DPRINTF(E_INFO, L_PLAYER, "Stereo group '%s': both members advertise our group, keeping '%s' as its leader\n",
+                    group->name ? group->name : group->id, remembered->name);
+          group->last_logged_remembered = true;
+        }
+      else if (group->last_logged_remembered)
+        {
+          DPRINTF(E_INFO, L_PLAYER, "Stereo group '%s': no longer keeping its last leader\n", group->name ? group->name : group->id);
+          group->last_logged_remembered = false;
+        }
     }
 
   for (group = outputs_group_list; group; group = group->next)
