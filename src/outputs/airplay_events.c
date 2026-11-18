@@ -340,7 +340,8 @@ rtsp_parse(char **verb, uint8_t *in, size_t in_len)
 
   DPRINTF(E_INFO, L_AIRPLAY, "Received event type '%s', value '%s'\n", type, value);
 
-  if (strcmp(value, "paus") != 0 && strcmp(value, "play") != 0 && strcmp(value, "nitm") != 0 && strcmp(value, "pitm") != 0)
+  if (strcmp(value, "paus") != 0 && strcmp(value, "play") != 0 && strcmp(value, "plps") != 0 &&
+      strcmp(value, "nitm") != 0 && strcmp(value, "pitm") != 0)
     {
       // Receivers send command values we have no handling for, and the value
       // on its own rarely says what was meant by it. Dump the whole event: it
