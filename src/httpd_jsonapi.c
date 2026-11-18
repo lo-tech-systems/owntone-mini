@@ -223,6 +223,7 @@ jsonapi_reply_settings_option_get(struct httpd_request *hreq)
   const char *optionname   = hreq->path_parts[3];
   const struct setting_entry *entry;
   const char *live_pipe_path;
+  char value[16];
   json_object *jreply;
 
   entry = settings_entry_lookup(categoryname, optionname);
@@ -255,8 +256,11 @@ jsonapi_reply_settings_option_get(struct httpd_request *hreq)
     // default is in force.
     json_object_object_add(jreply, "value", json_object_new_string(config_get_str("user_agent", PACKAGE_NAME "/" PACKAGE_VERSION)));
   else if (strcmp(entry->config_key, "device_volume_echo") == 0)
-    // Not written to the file by default, so report the mode the player uses
-    json_object_object_add(jreply, "value", json_object_new_string(config_get_str("device_volume_echo", "reporter")));
+    {
+      // Not written to the file by default, so report the mode the player uses
+      config_get_str_copy("device_volume_echo", "reporter", value, sizeof(value));
+      json_object_object_add(jreply, "value", json_object_new_string(value));
+    }
   else
     json_object_object_add(jreply, "value", json_object_new_string(config_get_str(entry->config_key, "")));
 

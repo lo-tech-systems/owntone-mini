@@ -85,6 +85,11 @@ void config_unload(void);
 // Read a string value. Returns fallback if the key is absent or null.
 const char *config_get_str(const char *key, const char *fallback);
 
+// Copy a string value into buf (truncated to len), under the config lock, for
+// a key that may be changed through the API while it is being read. Copies
+// fallback if the key is absent or null.
+void config_get_str_copy(const char *key, const char *fallback, char *buf, size_t len);
+
 // Read an integer value. Returns fallback if absent or wrong type.
 int  config_get_int(const char *key, int fallback);
 

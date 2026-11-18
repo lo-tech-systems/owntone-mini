@@ -250,6 +250,9 @@ struct output_device
   int volume_sent;
   uint64_t volume_sent_ms;
   struct event *volume_echo_timer;
+  // Levels sent back to the device since volume_echo_since_ms, to cap them
+  int volume_echo_count;
+  uint64_t volume_echo_since_ms;
 
   // Wall-clock time of the last successful mDNS advertisement for this
   // candidate. Set by candidate_store(); 0 if never set (legacy devices).

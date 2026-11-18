@@ -250,6 +250,14 @@ config_get_str(const char *key, const char *fallback)
   return ret;
 }
 
+void
+config_get_str_copy(const char *key, const char *fallback, char *buf, size_t len)
+{
+  pthread_mutex_lock(&config_lck);
+  snprintf(buf, len, "%s", get_str_unlocked(key, fallback));
+  pthread_mutex_unlock(&config_lck);
+}
+
 static int
 get_int_unlocked(const char *key, int fallback)
 {

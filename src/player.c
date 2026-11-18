@@ -141,6 +141,10 @@
 // is the speaker confirming that send and is not sent back again.
 #define PLAYER_VOLUME_ECHO_DELAY_MS 150
 #define PLAYER_VOLUME_ECHO_WINDOW_MS 2000
+// At most this many levels are sent back to one speaker in this many ms, in
+// case speakers that set each other's level never settle
+#define PLAYER_VOLUME_ECHO_MAX_SENDS 5
+#define PLAYER_VOLUME_ECHO_MAX_PERIOD_MS 5000
 
 // Number of empty-output GC checks before requesting mDNS rediscovery.
 #define ZERO_OUTPUT_RESCAN_CHECKS 3
@@ -3822,8 +3826,10 @@ monotonic_ms(void)
 static enum volume_echo_mode
 volume_echo_mode_get(void)
 {
-  const char *value = config_get_str("device_volume_echo", "reporter");
+  char value[16];
   size_t i;
+
+  config_get_str_copy("device_volume_echo", "reporter", value, sizeof(value));
 
   for (i = 0; i < ARRAY_SIZE(volume_echo_mode_names); i++)
     {
@@ -3870,13 +3876,42 @@ device_volume_echo_cb(struct output_device *device, enum output_device_state sta
 static void
 volume_echo_send_one(struct output_device *device, const char *why)
 {
+  uint64_t now;
   int ret;
 
+  // A session still starting has the start's callback registered, which a
+  // send would replace even if the backend then declines it, so the start
+  // would never report back
+  if (!device->session || device->state < OUTPUT_STATE_CONNECTED)
+    {
+      DPRINTF(E_INFO, L_PLAYER, "Volume echo: not sending %d to %s '%s' (%s): %s\n",
+              device->volume, why, device->name, volume_echo_role(device),
+              device->session ? "still starting" : "no session");
+      return;
+    }
+
+  now = monotonic_ms();
+  if (now - device->volume_echo_since_ms >= PLAYER_VOLUME_ECHO_MAX_PERIOD_MS)
+    {
+      device->volume_echo_since_ms = now;
+      device->volume_echo_count = 0;
+    }
+
+  if (device->volume_echo_count >= PLAYER_VOLUME_ECHO_MAX_SENDS)
+    {
+      DPRINTF(E_LOG, L_PLAYER, "Volume echo: not sending %d to %s '%s' (%s): already sent %d in %d ms\n",
+              device->volume, why, device->name, volume_echo_role(device),
+              device->volume_echo_count, PLAYER_VOLUME_ECHO_MAX_PERIOD_MS);
+      return;
+    }
+
   ret = outputs_device_volume_set(device, device_volume_echo_cb);
+  if (ret > 0)
+    device->volume_echo_count++;
 
   DPRINTF(E_INFO, L_PLAYER, "Volume echo: sending %d to %s '%s' (%s): %s\n",
           device->volume, why, device->name, volume_echo_role(device),
-          (ret > 0) ? "sent" : (ret == 0) ? "no session, not sent" : "failed");
+          (ret > 0) ? "sent" : (ret == 0) ? "declined by the backend" : "failed");
 }
 
 // Queued from the timer as a command, so it never runs while another command

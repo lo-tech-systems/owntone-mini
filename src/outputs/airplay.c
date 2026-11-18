@@ -3982,6 +3982,14 @@ payload_make_set_volume(struct evrtsp_request *req, struct airplay_session *sess
   if (device)
     session->volume = device->volume;
 
+  // Every level sent, including the start and resync ones, so the player can
+  // tell the device confirming it from the device setting a level itself
+  if (device)
+    {
+      device->volume_sent = session->volume;
+      device->volume_sent_ms = monotonic_ms();
+    }
+
   raop_volume = airplay_volume_from_pct(session->volume, session->devname);
 
   /* Don't let locales get in the way here */
