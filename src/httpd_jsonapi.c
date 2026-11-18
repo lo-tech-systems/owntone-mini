@@ -200,6 +200,7 @@ static const struct setting_entry settings_table[] = {
   { "player", "pipe_bits_per_sample",        SETTING_TYPE_INT,  "pipe_bits_per_sample"        },
   { "player", "resample_quality",            SETTING_TYPE_STR,  "resample_quality"            },
   { "player", "device_volume_echo",          SETTING_TYPE_STR,  "device_volume_echo"          },
+  { "player", "airplay_setpeers",            SETTING_TYPE_STR,  "airplay_setpeers"            },
   { "player", "upnp_volume_follow",          SETTING_TYPE_BOOL, "upnp_volume_follow"          },
   { "player", "upnp_event_port",             SETTING_TYPE_INT,  "upnp_event_port"             },
 };
@@ -262,6 +263,12 @@ jsonapi_reply_settings_option_get(struct httpd_request *hreq)
     {
       // Not written to the file by default, so report the mode the player uses
       config_get_str_copy("device_volume_echo", "reporter", value, sizeof(value));
+      json_object_object_add(jreply, "value", json_object_new_string(value));
+    }
+  else if (strcmp(entry->config_key, "airplay_setpeers") == 0)
+    {
+      // Not written to the file by default, so report the mode airplay.c uses
+      config_get_str_copy("airplay_setpeers", "all", value, sizeof(value));
       json_object_object_add(jreply, "value", json_object_new_string(value));
     }
   else
@@ -364,6 +371,16 @@ jsonapi_reply_settings_option_put(struct httpd_request *hreq)
           if (strcmp(value, "off") != 0 && strcmp(value, "reporter") != 0 && strcmp(value, "group") != 0)
             {
               snprintf(errmsg, sizeof(errmsg), "Invalid device_volume_echo: must be 'off', 'reporter' or 'group'");
+              DPRINTF(E_LOG, L_WEB, "%s\n", errmsg);
+              jparse_free(request);
+              return jsonapi_reply_error(hreq, HTTP_BADREQUEST, errmsg);
+            }
+        }
+      else if (strcmp(entry->config_key, "airplay_setpeers") == 0)
+        {
+          if (strcmp(value, "all") != 0 && strcmp(value, "apple") != 0 && strcmp(value, "off") != 0)
+            {
+              snprintf(errmsg, sizeof(errmsg), "Invalid airplay_setpeers: must be 'all', 'apple' or 'off'");
               DPRINTF(E_LOG, L_WEB, "%s\n", errmsg);
               jparse_free(request);
               return jsonapi_reply_error(hreq, HTTP_BADREQUEST, errmsg);

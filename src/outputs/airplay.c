@@ -284,6 +284,10 @@
 // and with a message that names the cause.
 #define AIRPLAY_PAIR_COMPUTE_TIMEOUT_SEC 10
 
+// How long after a receiver is added as our clock peer the number of delay
+// requests it has sent is logged, see ptp_report_cb()
+#define AIRPLAY_PTP_REPORT_DELAY_SEC  3
+
 // This is an arbitrary value which just needs to be kept in sync with the config
 #define AIRPLAY_CONFIG_MAX_VOLUME     11
 
@@ -429,6 +433,8 @@ struct airplay_extra
   bool igl;
   // The speaker's remote_commands setting, see session->remote_commands
   bool remote_commands;
+  // Made by Apple, from the advertisement, see airplay_txt_is_apple()
+  bool apple;
 };
 
 struct airplay_master_session
@@ -731,6 +737,20 @@ struct airplay_session
   // if it has not been
   uint64_t ptpd_peer_added_ms;
 
+  // Copy of extra->apple, for the airplay_setpeers setting
+  bool apple;
+  // Set once the receiver has accepted SETPEERSX, so the bare SETPEERS that
+  // follows it in the start sequence is skipped
+  bool setpeersx_accepted;
+  // The peer list request last sent ("SETPEERSX" or "SETPEERS"), NULL until
+  // one is, for the clock report
+  const char *setpeers_sent;
+  // Why SETPEERSX was not sent, for the log, see setpeersx_wanted()
+  const char *setpeersx_skipped_why;
+  // One-shot timer that logs how many delay requests the receiver sent in
+  // its first seconds as our clock peer (see ptp_report_cb())
+  struct event *ptp_report_ev;
+
   struct airplay_session *next;
 };
 
@@ -921,6 +941,13 @@ static char *airplay_user_agent;
 /* Precision Time Protocol */
 static char airplay_ptp_clock_uuid[37];
 static bool airplay_ptp_is_disabled;
+
+// Receivers that refused SETPEERSX, by device id, so their later sessions
+// send the bare SETPEERS straight away. Kept until the process ends. Player
+// thread only
+#define AIRPLAY_SETPEERSX_REFUSED_MAX 32
+static uint64_t airplay_setpeersx_refused[AIRPLAY_SETPEERSX_REFUSED_MAX];
+static int airplay_setpeersx_refused_count;
 
 // Tracks the last-logged address/port/features per AirPlay device id, so
 // a re-resolve of an already-known device (e.g. an Avahi TTL refresh) does
@@ -1898,6 +1925,9 @@ session_free(struct airplay_session *session)
   if (session->pairev)
     event_free(session->pairev);
 
+  if (session->ptp_report_ev)
+    event_free(session->ptp_report_ev);
+
   airplay_buffered_stop(session->buffered);
 
   if (session->server_fd >= 0)
@@ -2058,6 +2088,29 @@ anchor_retry_cb(int fd, short what, void *arg)
     return;
 
   sequence_start(AIRPLAY_SEQ_SEND_ANCHOR, session, NULL, "anchor_retry");
+}
+
+// Logs how many delay requests the receiver sent us in its first seconds as
+// our clock peer. A receiver that follows our clock sends them within a
+// second or so, one that ignores it sends none, so the line shows whether the
+// peer list it was given (SETPEERSX or SETPEERS) worked. Armed when the
+// receiver is added as a clock peer; freed with the session, so it cannot
+// fire after the session has gone.
+static void
+ptp_report_cb(int fd, short what, void *arg)
+{
+  struct airplay_session *session = arg;
+  struct ptpd_peer_stats stats;
+  const char *method = session->setpeers_sent ? session->setpeers_sent : "no peer list yet";
+
+  if (session->ptpd_slave_id == 0 || ptpd_peer_stats_get(session->ptpd_slave_id, &stats) < 0)
+    {
+      DPRINTF(E_INFO, L_AIRPLAY, "PTP: no clock statistics for '%s' (via %s)\n", session->devname, method);
+      return;
+    }
+
+  DPRINTF(E_INFO, L_AIRPLAY, "PTP: '%s' sent %" PRIu32 " delay requests in the first %d s (via %s)\n",
+          session->devname, stats.delay_req_count, AIRPLAY_PTP_REPORT_DELAY_SEC, method);
 }
 
 static void
@@ -2379,6 +2432,7 @@ session_make(struct output_device *device, int callback_id)
   CHECK_NULL(L_AIRPLAY, session->np_reassert_ev = evtimer_new(evbase_player, np_reassert_cb, session));
   CHECK_NULL(L_AIRPLAY, session->np_artwork_ev = evtimer_new(evbase_player, np_artwork_cb, session));
   CHECK_NULL(L_AIRPLAY, session->pairev = evtimer_new(evbase_player, pair_job_timeout_cb, session));
+  CHECK_NULL(L_AIRPLAY, session->ptp_report_ev = evtimer_new(evbase_player, ptp_report_cb, session));
 
   session->serial = airplay_session_serial_next++;
 
@@ -2405,6 +2459,7 @@ session_make(struct output_device *device, int callback_id)
   session->supports_encryption = extra->supports_encryption;
   session->devtype = extra->devtype;
   session->remote_commands = extra->remote_commands;
+  session->apple = extra->apple;
 
   // MRP state is only needed for receivers the wanted_metadata gate above
   // (feature bit 50 + devtype + config) actually turned on for.
@@ -4570,8 +4625,40 @@ payload_make_record(struct evrtsp_request *req, struct airplay_session *session,
   return 0;
 }
 
+// One timing peer of a SETPEERSX list. Our own entry also gets a ClockID,
+// added by the caller.
+static plist_t
+setpeersx_peer_make(const char *id, plist_t addresses)
+{
+  plist_t peer;
+
+  peer = plist_new_dict();
+  wplist_dict_add_string(peer, "ID", id);
+  wplist_dict_add_uint(peer, "DeviceType", 0);
+  wplist_dict_add_bool(peer, "SupportsClockPortMatchingOverride", false);
+  plist_dict_set_item(peer, "Addresses", addresses);
+
+  return peer;
+}
+
+// A receiver's entry in a SETPEERSX list, under an ID made up for it
+static plist_t
+setpeersx_receiver_make(const char *address)
+{
+  plist_t addresses;
+  char id[37];
+
+  uuid_make(id);
+
+  addresses = plist_new_array();
+  plist_array_append_item(addresses, plist_new_string(address));
+
+  return setpeersx_peer_make(id, addresses);
+}
+
 // Appends the receiver addresses of the OTHER members of this session's stereo
-// pair to the SETPEERS array. Each member of a pair must know about its
+// pair to the SETPEERS array, or with extended set, an entry for each to the
+// SETPEERSX array. Each member of a pair must know about its
 // sibling so the two speakers form a PTP mesh and phase-lock to each other
 // rather than only to our clock, which keeps their stereo image aligned.
 // owntone drives a pair as one session per member (both live in
@@ -4579,7 +4666,7 @@ payload_make_record(struct evrtsp_request *req, struct airplay_session *session,
 // group id, which is equal for both members and NULL for ungrouped devices, so
 // the ATV and solo devices are unaffected. Returns the number appended.
 static int
-setpeers_add_group_members(plist_t array, struct airplay_session *session)
+setpeers_add_group_members(plist_t array, struct airplay_session *session, bool extended)
 {
   struct output_device *device;
   struct output_device *other;
@@ -4609,11 +4696,134 @@ setpeers_add_group_members(plist_t array, struct airplay_session *session)
       if (!other_group_id || strcmp(other_group_id, group_id) != 0)
 	continue; // Different pair, or not grouped
 
-      plist_array_append_item(array, plist_new_string(s->address));
+      if (extended)
+	plist_array_append_item(array, setpeersx_receiver_make(s->address));
+      else
+	plist_array_append_item(array, plist_new_string(s->address));
       count++;
     }
 
   return count;
+}
+
+static bool
+setpeersx_refused_get(uint64_t device_id)
+{
+  int i;
+
+  for (i = 0; i < airplay_setpeersx_refused_count; i++)
+    {
+      if (airplay_setpeersx_refused[i] == device_id)
+	return true;
+    }
+
+  return false;
+}
+
+static void
+setpeersx_refused_set(uint64_t device_id)
+{
+  if (setpeersx_refused_get(device_id) || airplay_setpeersx_refused_count >= AIRPLAY_SETPEERSX_REFUSED_MAX)
+    return;
+
+  airplay_setpeersx_refused[airplay_setpeersx_refused_count] = device_id;
+  airplay_setpeersx_refused_count++;
+}
+
+// Apple receivers on current firmware ignore our clock after a bare SETPEERS
+// and keep announcing their own; they take ours from SETPEERSX, the form
+// Apple's own senders use. The airplay_setpeers setting decides who gets it:
+// "all" (every receiver that uses PTP), "apple" (Apple receivers only) or
+// "off" (none). A receiver that has refused it is sent SETPEERS. Read on
+// every start, so a change applies to the next session. Sets *why to the
+// reason when SETPEERSX is not wanted.
+static bool
+setpeersx_wanted(struct airplay_session *session, const char **why)
+{
+  char value[16];
+
+  if (setpeersx_refused_get(session->device_id))
+    {
+      *why = "it refused SETPEERSX earlier";
+      return false;
+    }
+
+  config_get_str_copy("airplay_setpeers", "all", value, sizeof(value));
+
+  if (strcmp(value, "off") == 0)
+    {
+      *why = "airplay_setpeers is off";
+      return false;
+    }
+  else if (strcmp(value, "apple") == 0 && !session->apple)
+    {
+      *why = "airplay_setpeers is apple and this is not an Apple receiver";
+      return false;
+    }
+  else if (strcmp(value, "apple") == 0)
+    return true;
+  else if (strcmp(value, "all") != 0)
+    DPRINTF(E_WARN, L_AIRPLAY, "Unknown airplay_setpeers '%s', using 'all'\n", value);
+
+  return true;
+}
+
+// Sent instead of SETPEERS when setpeersx_wanted() says so (see
+// response_handler_setpeersx() for a refusal). The list has our own entry,
+// with the ID, clock and addresses of our SETUP timingPeerInfo, then the
+// receiver's and, on a stereo pair, the other member's.
+static int
+payload_make_setpeersx(struct evrtsp_request *req, struct airplay_session *session, void *arg)
+{
+  plist_t root;
+  plist_t addresses;
+  plist_t peer;
+  const char *why = NULL;
+  uint8_t *data;
+  size_t len;
+  int ret;
+  int peers;
+
+  if (!session->use_ptp)
+    return 1; // Skip to next request
+
+  if (!setpeersx_wanted(session, &why))
+    {
+      session->setpeersx_skipped_why = why;
+      return 1; // SETPEERS is sent instead
+    }
+
+  addresses = plist_new_array();
+  if (session->local_v4_address)
+    plist_array_append_item(addresses, plist_new_string(session->local_v4_address));
+  if (session->local_v6_address)
+    plist_array_append_item(addresses, plist_new_string(session->local_v6_address));
+
+  peer = setpeersx_peer_make(airplay_ptp_clock_uuid, addresses);
+  wplist_dict_add_int(peer, "ClockID", (int64_t)ptpd_clock_id_get()); // Signed, as in SETUP
+
+  root = plist_new_array();
+  plist_array_append_item(root, peer);
+  plist_array_append_item(root, setpeersx_receiver_make(session->address));
+
+  peers = setpeers_add_group_members(root, session, true);
+  if (peers > 0)
+    DPRINTF(E_INFO, L_AIRPLAY, "SETPEERSX for '%s': added %d stereo-pair peer(s) for cross-clock sync\n",
+            session->devname, peers);
+
+  ret = wplist_to_bin(&data, &len, root);
+  plist_free(root);
+
+  if (ret < 0)
+    return -1;
+
+  evbuffer_add(req->output_buffer, data, len);
+  free(data);
+
+  DPRINTF(E_INFO, L_AIRPLAY, "Sending SETPEERSX to '%s'\n", session->devname);
+  session->setpeers_sent = "SETPEERSX";
+
+  return 0;
 }
 
 static int
@@ -4626,6 +4836,9 @@ payload_make_setpeers(struct evrtsp_request *req, struct airplay_session *sessio
 
   if (!session->use_ptp)
     return 1; // Skip to next request
+
+  if (session->setpeersx_accepted)
+    return 1; // The receiver has its peers from SETPEERSX
 
   plist_t root;
 
@@ -4642,7 +4855,7 @@ payload_make_setpeers(struct evrtsp_request *req, struct airplay_session *sessio
 
   // On a stereo pair, also list the other member(s) so the two speakers form
   // a PTP mesh and phase-align to each other, not only to us.
-  peers = setpeers_add_group_members(root, session);
+  peers = setpeers_add_group_members(root, session, false);
   if (peers > 0)
     DPRINTF(E_INFO, L_AIRPLAY, "SETPEERS for '%s': added %d stereo-pair peer address(es) for cross-clock sync\n",
             session->devname, peers);
@@ -4654,6 +4867,10 @@ payload_make_setpeers(struct evrtsp_request *req, struct airplay_session *sessio
     return -1;
 
   evbuffer_add(req->output_buffer, data, len);
+
+  DPRINTF(E_INFO, L_AIRPLAY, "Sending SETPEERS to '%s' (%s)\n", session->devname,
+          session->setpeersx_skipped_why ? session->setpeersx_skipped_why : "SETPEERSX not sent");
+  session->setpeers_sent = "SETPEERS";
 
   return 0;
 }
@@ -5466,6 +5683,7 @@ handle_timingpeerinfo(uint32_t *slave_id, plist_t response, const char *local_v4
 static enum airplay_seq_type
 response_handler_setup_session(struct evrtsp_request *req, struct airplay_session *session)
 {
+  struct timeval ptp_report_tv = { AIRPLAY_PTP_REPORT_DELAY_SEC, 0 };
   plist_t response;
   plist_t item;
   uint64_t uintval;
@@ -5533,6 +5751,8 @@ response_handler_setup_session(struct evrtsp_request *req, struct airplay_sessio
 	goto error;
 
       session->ptpd_peer_added_ms = monotonic_ms();
+
+      evtimer_add(session->ptp_report_ev, &ptp_report_tv);
     }
 
   plist_free(response);
@@ -5541,6 +5761,44 @@ response_handler_setup_session(struct evrtsp_request *req, struct airplay_sessio
  error:
   plist_free(response);
   return AIRPLAY_SEQ_ABORT;
+}
+
+// Runs with proceed_on_rtsp_not_ok, so a refusal never ends the start. A
+// receiver that refuses SETPEERSX, with an RTSP error or a nonzero status in
+// its answer, is remembered and sent SETPEERS from then on, starting with the
+// SETPEERS row that follows this one. A receiver that accepts it is not sent
+// SETPEERS.
+static enum airplay_seq_type
+response_handler_setpeersx(struct evrtsp_request *req, struct airplay_session *session)
+{
+  plist_t response = NULL;
+  plist_t item;
+  int64_t inband_status = 0;
+
+  if (evbuffer_get_length(req->input_buffer) > 0 && wplist_from_evbuf(&response, req->input_buffer) == 0)
+    {
+      item = (plist_get_node_type(response) == PLIST_DICT) ? plist_dict_get_item(response, "status") : NULL;
+      if (item)
+	plist_get_int_val(item, &inband_status);
+      plist_free(response);
+    }
+
+  if (req->response_code == RTSP_OK && inband_status == 0)
+    {
+      DPRINTF(E_DBG, L_AIRPLAY, "SETPEERSX accepted by '%s'\n", session->devname);
+      session->setpeersx_accepted = true;
+      return AIRPLAY_SEQ_CONTINUE;
+    }
+
+  if (req->response_code != RTSP_OK)
+    DPRINTF(E_WARN, L_AIRPLAY, "'%s' refused SETPEERSX (status %d), using SETPEERS\n", session->devname, req->response_code);
+  else
+    DPRINTF(E_WARN, L_AIRPLAY, "'%s' refused SETPEERSX (status %d, in-band %" PRIi64 "), using SETPEERS\n", session->devname, req->response_code, inband_status);
+
+  setpeersx_refused_set(session->device_id);
+  session->setpeersx_skipped_why = "it refused SETPEERSX";
+
+  return AIRPLAY_SEQ_CONTINUE;
 }
 
 static enum airplay_seq_type
@@ -6723,9 +6981,9 @@ static struct airplay_seq_definition airplay_seq_definition[] =
 // The size of the second array dimension MUST at least be the size of largest
 // sequence + 1, because then we can count on a zero terminator when iterating.
 // The buffered start adds three POSTs to START_PLAYBACK (which is also the
-// longest sequence), so size for that plus the optional auth-setup step and
-// the terminator.
-static struct airplay_seq_request airplay_seq_request[][10] =
+// longest sequence, with SETPEERSX ahead of SETPEERS), so size for that plus
+// the optional auth-setup step and the terminator.
+static struct airplay_seq_request airplay_seq_request[][11] =
 {
   {
     { AIRPLAY_SEQ_START, "GET /info", EVRTSP_REQ_GET, NULL, response_handler_info_start, NULL, "/info", false },
@@ -6738,6 +6996,10 @@ static struct airplay_seq_request airplay_seq_request[][10] =
     // and a WWW-Authenticate header, and then we may need re-run with password auth
     { AIRPLAY_SEQ_START_PLAYBACK, "SETUP (session)", EVRTSP_REQ_SETUP, payload_make_setup_session, response_handler_setup_session, "application/x-apple-binary-plist", NULL, true },
     { AIRPLAY_SEQ_START_PLAYBACK, "RECORD", EVRTSP_REQ_RECORD, payload_make_record, response_handler_record, NULL, NULL, false },
+    // SETPEERSX, when the airplay_setpeers setting wants it, else skipped. A
+    // refusal does not end the start: the SETPEERS row below is then sent,
+    // and is skipped only if SETPEERSX was accepted
+    { AIRPLAY_SEQ_START_PLAYBACK, "SETPEERSX", EVRTSP_REQ_SETPEERSX, payload_make_setpeersx, response_handler_setpeersx, "application/x-apple-binary-plist", NULL, true },
     { AIRPLAY_SEQ_START_PLAYBACK, "SETPEERS", EVRTSP_REQ_SETPEERS, payload_make_setpeers, NULL, "/peer-list-changed", NULL, false },
     // Buffered mode, or a speaker with remote_commands (payload_make skips them
     // otherwise): the MediaRemote command table and audio-mode POST bracket
@@ -6849,6 +7111,14 @@ sequence_continue_cb(struct evrtsp_request *req, void *arg)
       // cannot be an auth rejection - do not cost the user their pairing.
       if (session->encrypted_ok)
 	session->protocol_error = true;
+      // A receiver that drops the connection or never answers rather than
+      // refusing SETPEERSX is sent SETPEERS when it is next started, so it is
+      // not failed on every start
+      if (cur_request->rtsp_type == EVRTSP_REQ_SETPEERSX)
+	{
+	  DPRINTF(E_WARN, L_AIRPLAY, "'%s' did not answer SETPEERSX, using SETPEERS from its next start\n", session->devname);
+	  setpeersx_refused_set(session->device_id);
+	}
       goto error;
     }
 
@@ -7537,6 +7807,27 @@ airplay_seen_device_forget(uint64_t id, int family)
     }
 }
 
+// Whether a receiver is made by Apple, from its advertisement: a type we
+// recognise (AirPort Express, Apple TV, HomePod), a model of an Apple product
+// family ("Mac" also covers MacBook and Mac mini) or the manufacturer
+static bool
+airplay_txt_is_apple(enum airplay_devtype devtype, const char *model, const char *manufacturer)
+{
+  const char *apple_models[] = { "AudioAccessory", "HomeAccessory", "AppleTV", "Mac", "iMac" };
+  size_t i;
+
+  if (devtype != AIRPLAY_DEV_OTHER)
+    return true;
+
+  for (i = 0; model && i < ARRAY_SIZE(apple_models); i++)
+    {
+      if (strncmp(model, apple_models[i], strlen(apple_models[i])) == 0)
+	return true;
+    }
+
+  return (manufacturer && strstr(manufacturer, "Apple"));
+}
+
 static void
 airplay_device_cb(const char *name, const char *type, const char *domain, const char *hostname, int family, const char *address, int port, struct keyval *txt)
 {
@@ -7732,6 +8023,8 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
     extra->devtype = AIRPLAY_DEV_HOMEPOD;
   else if (*p == '\0')
     DPRINTF(E_WARN, L_AIRPLAY, "AirPlay device '%s': am has no value\n", name);
+
+  extra->apple = airplay_txt_is_apple(extra->devtype, p, keyval_get(txt, "manufacturer"));
 
   // The MediaRemote now-playing channel is only meaningful to Apple TV class
   // receivers; gate the bit-50 advertisement on devtype (now known) and let

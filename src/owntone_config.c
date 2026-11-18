@@ -200,6 +200,7 @@ static const char *api_settable_keys[] = {
   "resample_quality",
   "user_agent",
   "device_volume_echo",
+  "airplay_setpeers",
   "upnp_volume_follow",
   "upnp_event_port",
   NULL
