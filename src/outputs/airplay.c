@@ -569,6 +569,11 @@ struct airplay_session
   // remote_commands setting is false.
   bool remote_commands;
 
+  // The device belongs to a HomePod group led by an Apple TV. Such a session
+  // keeps its own group UUID and is not described as a multi-select sender,
+  // so the HomePods go on advertising the Apple TV's group
+  bool tv_proxy_member;
+
   bool req_has_auth;
   bool supports_auth_setup;
   bool supports_encryption;
@@ -2386,6 +2391,48 @@ session_cipher_setup(struct airplay_session *session, const uint8_t *key, size_t
   return -1;
 }
 
+// The members of a stereo pair share one group UUID, as an iPhone gives one to
+// everything it plays to; anything else gets its own. Runs when a session's
+// /info answer arrives, so a member whose session has no UUID yet is skipped.
+// The UUID is kept on the device, so the outputs can tell the pair advertising
+// our group from one advertising another sender's
+static void
+session_group_uuid_set(struct airplay_session *session)
+{
+  struct output_device *device;
+  struct output_device *other;
+  struct airplay_session *s;
+  const char *group_id;
+  const char *other_group_id;
+
+  device = outputs_device_get(session->device_id);
+  group_id = device ? outputs_device_group_id(device) : NULL;
+
+  if (group_id && !session->tv_proxy_member)
+    {
+      for (s = airplay_sessions; s; s = s->next)
+	{
+	  if (s == session || s->group_uuid[0] == '\0' || s->tv_proxy_member)
+	    continue;
+
+	  other = outputs_device_get(s->device_id);
+	  other_group_id = other ? outputs_device_group_id(other) : NULL;
+	  if (other_group_id && strcmp(other_group_id, group_id) == 0)
+	    {
+	      snprintf(session->group_uuid, sizeof(session->group_uuid), "%s", s->group_uuid);
+	      DPRINTF(E_INFO, L_AIRPLAY, "'%s' shares group UUID %s with '%s'\n", session->devname, session->group_uuid, s->devname);
+	      goto out;
+	    }
+	}
+    }
+
+  uuid_make(session->group_uuid);
+
+ out:
+  if (device)
+    snprintf(device->issued_gid, sizeof(device->issued_gid), "%s", session->group_uuid);
+}
+
 static int
 session_ids_set(struct airplay_session *session)
 {
@@ -2435,7 +2482,7 @@ session_ids_set(struct airplay_session *session)
 
   // Session UUID, ID and session URL
   uuid_make(session->session_uuid);
-  uuid_make(session->group_uuid);
+  session_group_uuid_set(session);
 
   gcry_randomize(&session->session_id, sizeof(session->session_id), GCRY_STRONG_RANDOM);
   gcry_randomize(&session->stream_connection_id, sizeof(session->stream_connection_id), GCRY_STRONG_RANDOM);
@@ -2532,6 +2579,7 @@ session_make(struct output_device *device, int callback_id)
   session->supports_encryption = extra->supports_encryption;
   session->devtype = extra->devtype;
   session->remote_commands = extra->remote_commands;
+  session->tv_proxy_member = outputs_device_is_tv_proxy_group(device);
   session->supports_setpeersx = extra->supports_setpeersx;
 
   // MRP state is only needed for receivers the wanted_metadata gate above
@@ -5046,11 +5094,15 @@ payload_make_setpeers(struct evrtsp_request *req, struct airplay_session *sessio
 // values. sourceVersion is the AirPlay version from our User-Agent, when it
 // has one. Only for a speaker with remote_commands set.
 //
-// A receiver that gets the now-playing channel gets senderSupportsRelay
-// alone: without it iOS (Home, Control Center) does not find our playback on a
-// HomePod, although the HomePod takes the now-playing messages.
-// isMultiSelectAirPlay is not sent with it, as it makes the members of a
-// HomePod stereo pair advertise our session's group instead of their pair.
+// A receiver that gets the now-playing channel gets senderSupportsRelay and
+// isMultiSelectAirPlay: without them iOS (Home, Control Center) does not find
+// our playback on a HomePod or control it, although the HomePod takes the
+// now-playing messages. The members of a stereo pair then advertise the group
+// we give them instead of their pair's, so a pair's members share one group
+// UUID (see session_group_uuid_set) and the outputs keep the pair's last
+// leader while they advertise it. The HomePods behind an Apple TV get
+// senderSupportsRelay alone, as they must go on advertising the Apple TV's
+// group.
 static void
 setup_sender_keys_add(plist_t root, struct airplay_session *session)
 {
@@ -5059,7 +5111,11 @@ setup_sender_keys_add(plist_t root, struct airplay_session *session)
   if (!session->remote_commands)
     {
       if (session->mrp)
-	wplist_dict_add_bool(root, "senderSupportsRelay", true);
+	{
+	  wplist_dict_add_bool(root, "senderSupportsRelay", true);
+	  if (!session->tv_proxy_member)
+	    wplist_dict_add_bool(root, "isMultiSelectAirPlay", true);
+	}
       return;
     }
 
@@ -5082,7 +5138,10 @@ setup_sender_keys_desc(struct airplay_session *session)
   if (session->remote_commands)
     return "all";
 
-  return session->mrp ? "relay only" : "none";
+  if (!session->mrp)
+    return "none";
+
+  return session->tv_proxy_member ? "relay only" : "relay, multi-select";
 }
 
 static int
