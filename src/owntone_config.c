@@ -111,19 +111,24 @@ config_defaults_build(void)
 {
   json_object *defaults;
   json_object *trusted_networks;
+  json_object *event_users;
 
   defaults = json_object_new_object();
   if (!defaults)
     return NULL;
 
   trusted_networks = json_object_new_array();
-  if (!trusted_networks)
+  event_users = json_object_new_array();
+  if (!trusted_networks || !event_users)
     {
+      json_object_put(trusted_networks);
+      json_object_put(event_users);
       json_object_put(defaults);
       return NULL;
     }
 
   json_object_array_add(trusted_networks, json_object_new_string("lan"));
+  json_object_array_add(event_users, json_object_new_string("autostream"));
 
   json_object_object_add(defaults, "uid", json_object_new_string("owntone"));
   json_object_object_add(defaults, "server_name", json_object_new_string("owntone-mini"));
@@ -161,6 +166,11 @@ config_defaults_build(void)
   json_object_object_add(defaults, "device_removal_grace_period", json_object_new_int(180));
   json_object_object_add(defaults, "airplay_timing_port", json_object_new_int(0));
   json_object_object_add(defaults, "airplay_control_port", json_object_new_int(0));
+  // The notifier socket, and the users besides root and the daemon's own
+  // that may connect to it. An empty path turns the notifier off. Read once at
+  // start, so neither is API-settable.
+  json_object_object_add(defaults, "event_socket", json_object_new_string("/run/owntone-mini/events.sock"));
+  json_object_object_add(defaults, "event_socket_allowed_users", event_users);
   json_object_object_add(defaults, "trusted_networks", trusted_networks);
   json_object_object_add(defaults, "airplay_devices", json_object_new_object());
 

@@ -31,7 +31,8 @@ nobase_dist_doc_DATA = \
 EXTRA_DIST = \
 	$(CONF_FILE) \
 	$(LOGROTATE_CONFIG_FILE).in \
-	$(SYSTEMD_SERVICE_FILE).in
+	$(SYSTEMD_SERVICE_FILE).in \
+	tools/event_channel_client.py
 
 install-data-hook:
 	$(MKDIR_P) "$(DESTDIR)$(localstatedir)/log"
@@ -53,7 +54,8 @@ CLEANFILES = $(BUILT_SOURCES)
 do_subst = $(SED) -e 's|@sbindir[@]|$(sbindir)|g' \
              -e 's|@localstatedir[@]|$(localstatedir)|g' \
              -e 's|@PACKAGE[@]|$(PACKAGE)|g' \
-             -e 's|@OWNTONE_USER[@]|$(OWNTONE_USER)|g'
+             -e 's|@OWNTONE_USER[@]|$(OWNTONE_USER)|g' \
+             -e 's|@OWNTONE_GROUP[@]|$(OWNTONE_GROUP)|g'
 
 # these files use $prefix, which is determined at build (not configure) time
 $(SYSTEMD_SERVICE_FILE): Makefile

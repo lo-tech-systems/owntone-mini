@@ -7,6 +7,10 @@ After=network-online.target remote-fs.target
 [Service]
 ExecStart=@sbindir@/owntone -f
 
+# The notifier socket lives here; the daemon runs unprivileged and cannot make
+# the directory itself.
+ExecStartPre=/usr/bin/install -d -m 0755 -o @OWNTONE_USER@ -g @OWNTONE_GROUP@ /run/owntone-mini
+
 # Media path must outrank default-priority housekeeping; see
 # the companion audio service for the rest of the ladder.
 Nice=-12

@@ -24,9 +24,8 @@
 //
 // Exits 0 when every case passes, 1 otherwise, printing one line per failure
 // and a count (with -v, one line per passing case too). The program is also
-// listed under check_PROGRAMS in src/Makefile.am, so "make check" builds it
-// (it is not run by "make check"), and a plain "make" or "make install" does
-// not build it.
+// listed under check_PROGRAMS and TESTS in src/Makefile.am, so "make check"
+// builds and runs it, and a plain "make" or "make install" does not build it.
 
 #include <stdint.h>
 #include <stdbool.h>

@@ -48,6 +48,7 @@
 #include "misc.h"
 #include "misc_json.h"
 #include "player.h"
+#include "evchan.h"
 #include "outputs.h"
 #include "input.h"
 
@@ -441,6 +442,12 @@ jsonapi_reply_config(struct httpd_request *hreq)
   json_object_object_add(jreply, "buildoptions", jbuildopts);
   json_object_object_add(jreply, "restart_required", json_object_new_boolean(config_restart_required_get()));
   json_object_object_add(jreply, "live_offset", json_object_new_boolean(true));
+  // The notifier's protocol version (0 when it is off) and where to find it
+  json_object_object_add(jreply, "event_channel", json_object_new_int(evchan_enabled() ? EVCHAN_PROTOCOL_VERSION : 0));
+  if (evchan_enabled())
+    json_object_object_add(jreply, "event_socket", json_object_new_string(evchan_socket_path()));
+  else
+    json_object_object_add(jreply, "event_socket", NULL);
 
   CHECK_ERRNO(L_WEB, evbuffer_add_printf(hreq->out_body, "%s", json_object_to_json_string(jreply)));
   jparse_free(jreply);

@@ -69,6 +69,7 @@
 #include "mdns.h"
 #include "player.h"
 #include "worker.h"
+#include "evchan.h"
 #include "ptpd.h"
 #include "memstats.h"
 
@@ -625,6 +626,13 @@ main(int argc, char **argv)
       goto worker_fail;
     }
 
+  // The notifier is started before the player so that it is already draining
+  // its command pipe, and is a registered listener, by the time anything can
+  // post to it. Not having it is not fatal.
+  ret = evchan_init();
+  if (ret != 0)
+    DPRINTF(E_WARN, L_MAIN, "Event channel failed to start, continuing without it\n");
+
   /* Spawn player thread */
   ret = player_init();
   if (ret != 0)
@@ -634,6 +642,10 @@ main(int argc, char **argv)
       ret = EXIT_FAILURE;
       goto player_fail;
     }
+
+  // Before the HTTP server, so that the socket is bound by the time
+  // /api/config can report the capability
+  evchan_start();
 
   /* Spawn HTTPd thread */
   ret = httpd_init();
@@ -729,6 +741,9 @@ main(int argc, char **argv)
   DPRINTF(E_LOG, L_MAIN, "mDNS deinit\n");
   mdns_deinit();
 
+  // Clients hear that the daemon is stopping before the player goes away
+  evchan_shutdown();
+
  sig_event_fail:
  signalfd_fail:
   DPRINTF(E_LOG, L_MAIN, "HTTPd deinit\n");
@@ -745,6 +760,9 @@ main(int argc, char **argv)
  player_fail:
   DPRINTF(E_LOG, L_MAIN, "Worker deinit\n");
   worker_deinit();
+
+  // After every thread that posts to it has been joined
+  evchan_deinit();
 
  worker_fail:
   if (ret == EXIT_FAILURE)
