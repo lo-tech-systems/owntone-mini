@@ -106,6 +106,13 @@
   so a session can no longer be started with the other backend's device
   details, and a session that ends no longer clears the registration of a
   newer session on the same device
+- fix: an AirPlay 2 receiver reached over a unique local or global IPv6
+  address is added as our clock peer at that address. The interface name was
+  appended to every IPv6 address, which the address lookup refuses on one
+  that is not link-local, so the receiver was added at its link-local
+  address instead, our clock came from an address the receiver had not been
+  told about, and the receiver ignored it. A timing peer that cannot be
+  added is logged with the reason
 
 ## Version 1.5.0 - 2026-10-14
 

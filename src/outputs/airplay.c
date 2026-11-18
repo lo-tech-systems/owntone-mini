@@ -5435,20 +5435,25 @@ handle_timingpeerinfo(uint32_t *slave_id, plist_t response, const char *local_v4
       if (ret < 0 || naddr.sa.sa_family != family)
 	continue;
 
-      // Append %ifname to ipv6 because libairptpd needs it to send if the address is link-local (fe80)
-      if (family == AF_INET6 && net_if_get(ifname, sizeof(ifname), local_v6_address) == 0)
-	snprintf(peer_straddress, sizeof(peer_straddress), "%s%%%s", ptr, ifname);
-      else if (family == AF_INET)
-	snprintf(peer_straddress, sizeof(peer_straddress), "%s", ptr);
+      // Append %ifname to a link-local (fe80) ipv6 address, because libairptpd
+      // needs it to send there. Any other address is used as it is, since the
+      // address lookup refuses a scope on an address that is not link-local.
+      if (family == AF_INET6 && IN6_IS_ADDR_LINKLOCAL(&naddr.sin6.sin6_addr))
+	{
+	  if (net_if_get(ifname, sizeof(ifname), local_v6_address) < 0)
+	    continue;
+
+	  snprintf(peer_straddress, sizeof(peer_straddress), "%s%%%s", ptr, ifname);
+	}
       else
-	continue;
+	snprintf(peer_straddress, sizeof(peer_straddress), "%s", ptr);
 
       // Just add the first good address
       ret = ptpd_slave_add(slave_id, peer_straddress);
       if (ret == 0)
 	return 0;
 
-      DPRINTF(E_WARN, L_AIRPLAY, "Could not add timing peer '%s', trying the next address\n", peer_straddress);
+      DPRINTF(E_WARN, L_AIRPLAY, "Could not add timing peer '%s' (%s), trying the next address\n", peer_straddress, ptpd_errmsg_get());
     }
 
  error:

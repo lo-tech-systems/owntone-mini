@@ -69,6 +69,14 @@ ptpd_slave_add(uint32_t *slave_id, const char *addr)
   return airptp_peer_add(slave_id, addr, ptpd_hdl);
 }
 
+const char *
+ptpd_errmsg_get(void)
+{
+  const char *errmsg = airptp_errmsg_get();
+
+  return errmsg ? errmsg : "unknown error";
+}
+
 void
 ptpd_slave_remove(uint32_t slave_id)
 {

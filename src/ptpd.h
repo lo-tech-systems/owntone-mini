@@ -10,6 +10,11 @@ ptpd_clock_id_get(void);
 int
 ptpd_slave_add(uint32_t *slave_id, const char *addr);
 
+// Why the latest failed call on the calling thread failed, for example
+// ptpd_slave_add(). Never NULL.
+const char *
+ptpd_errmsg_get(void);
+
 void
 ptpd_slave_remove(uint32_t slave_id);
 
