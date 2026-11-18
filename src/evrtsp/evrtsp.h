@@ -134,6 +134,14 @@ struct evrtsp_connection *evrtsp_connection_new(
 /** Frees an rtsp connection */
 void evrtsp_connection_free(struct evrtsp_connection *evcon);
 
+/**
+ * Sets how long, in seconds, the connection attempt and each read and write
+ * may take; it is read each time one of them starts. -1 selects the default
+ * of each phase, and 0 means no limit.
+ */
+void evrtsp_connection_set_timeout(struct evrtsp_connection *evcon,
+    int timeout_in_secs);
+
 /** Set a callback for connection close. */
 void evrtsp_connection_set_closecb(struct evrtsp_connection *evcon,
     void (*)(struct evrtsp_connection *, void *), void *);
