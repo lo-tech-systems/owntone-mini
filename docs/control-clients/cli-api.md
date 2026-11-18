@@ -30,7 +30,10 @@ curl -X PUT http://localhost:3689/api/outputs/1 \
   -d '{"selected":true}'
 ```
 
-Send `{"selected":false}` to disable it. To make a list of outputs the only
+Send `{"selected":false}` to disable it. For an Apple TV that leads a group of
+HomePods, add `"include_tv":false` to play on the HomePods only, or
+`"include_tv":true` to include the Apple TV; to change it, disable the output
+first, otherwise the request is refused with `409`. To make a list of outputs the only
 enabled ones in one request:
 
 ```shell

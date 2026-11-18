@@ -82,6 +82,8 @@ that is noted.
 | `high_resolution_clock` | boolean | `true` | `true`, `false` | Set `false` on a system whose timer resolution is too coarse for the player tick, which makes the player use a longer tick interval. Not written to the file by default. | No |
 | `airplay_timing_port` | integer | `0` | A free UDP port, or `0` | Fixed local port for AirPlay timing. `0` lets the system choose. Useful when a firewall needs a known port. Restart required. | No |
 | `airplay_control_port` | integer | `0` | A free UDP port, or `0` | Fixed local port for AirPlay control. `0` lets the system choose. Restart required. | No |
+| `event_socket` | string | `"/run/owntone-mini/events.sock"` | A path, or an empty string | Unix socket on which a local supervisor is told that the outputs changed and what receivers have asked for. An empty string turns the [event channel](event-channel.md) off. The directory must already exist; the installed service file creates the default one. Restart required. | No |
+| `event_socket_allowed_users` | list of strings | `["autostream"]` | User names (at most eight) | Users that may connect to the event socket, in addition to root and the user the daemon runs as. Anyone else is refused. The names are looked up at each connection, so a listed user may be created after the daemon has started. Restart required. | No |
 | `user_agent` | string | Derived from the build (`<product>/<version>`) | Up to 255 bytes, no control characters | `User-Agent` header sent on AirPlay RTSP requests. Useful when a receiver behaves differently depending on the sender. Not written to the file by default. An empty string sent through the API removes the key and restores the derived value, and GET always reports the effective value. Restart required. | Yes (`misc`) |
 | `port` | integer | `3689` | A free TCP port | Port for the HTTP JSON API. Not written to the file by default. Restart required. | No |
 | `bind_address` | string | Not set (all addresses) | An IP address, or `::` | Address the HTTP, AirPlay and PTP services bind to. When set, mDNS discovery is also limited to the interface that has this address. `::` is the same as not setting it. Not written to the file by default. | No |
@@ -142,7 +144,9 @@ Apple TV does not need. When `false`, the Apple TV also receives audio.
 This only affects a TV proxy leader started because its followers are already
 streaming. A direct start (no follower available) always sends audio to the
 Apple TV regardless of this setting. A change through the API takes effect on
-the next TV proxy leader start.
+the next TV proxy leader start. It has no effect on a group that was enabled
+without its Apple TV (see `include_tv` in the [JSON API](json-api.md#update-an-output)),
+because the Apple TV then has no session.
 
 ### resample_quality
 

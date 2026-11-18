@@ -49,6 +49,7 @@ configuration page below.
 
 - [Configuration](docs/configuration.md)
 - [JSON API](docs/json-api.md)
+- [Event channel](docs/event-channel.md)
 - [Pipe input](docs/inputs/pipe.md)
 - [AirPlay outputs](docs/audio-outputs/airplay.md)
 - [Artwork](docs/artwork.md)

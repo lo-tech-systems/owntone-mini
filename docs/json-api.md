@@ -46,6 +46,7 @@ endpoint can return are listed in its section.
 | 401 | Credentials needed (see above) |
 | 403 | Address not trusted and no `admin_password` set |
 | 404 | Unknown setting |
+| 409 | An output's `include_tv` option cannot be changed while it is selected (`{"error": "reselect_required"}`), or `include_tv: false` was sent for an Apple TV that does not lead a group of HomePods at the moment (`{"error": "group_not_present"}`) |
 | 500 | The server could not carry out the request |
 | 503 | A buffered output was refused because the encoder budget is used up |
 
@@ -172,13 +173,39 @@ curl -X PUT "http://localhost:3689/api/metadata" \
 | `has_password` | boolean | `true` if the output advertises password protection |
 | `requires_auth` | boolean | `true` if the output currently requires authorization |
 | `needs_auth_key` | boolean | `true` if the server does not have a valid stored auth key |
-| `pin_pending` | boolean | `true` if the last attempt to enable the output stopped because the device wants a PIN or password. Submit it with `pin` in [Update an output](#update-an-output). Cleared when a later activation attempt gets past that step |
+| `pin_pending` | boolean | `true` if the last attempt to enable the output stopped because the device wants a PIN or password. Submit it with `pin` in [Update an output](#update-an-output). Cleared when a later activation attempt gets past that step. For an Apple TV enabled with `include_tv: false` it is true while any of its HomePods is waiting for one |
 | `volume` | integer | Output volume in percent |
 | `offset_ms` | integer | Timing offset in milliseconds |
 | `format` | string | Active audio format |
 | `supported_formats` | array | Supported audio format strings |
 | `mode` | string | Active protocol mode preference. One of `"auto"` (the default), `"raop"`, `"airplay2"`, `"airplay2_buffered"`, `"airplay2_buffered_24"`, `"airplay2_surround_stereo"`, or `"airplay2_surround_upmix"` |
 | `supported_modes` | array | Concrete protocol modes available for this output; a subset of `["raop", "airplay2", "airplay2_buffered", "airplay2_buffered_24", "airplay2_surround_stereo", "airplay2_surround_upmix"]`. Reflects capability learned from the device itself, so it can grow after the output is first discovered. Never includes `"auto"`, which is always accepted. Empty if no protocol is known yet |
+| `session` | object | What the output is playing on, see [Session](#session) |
+| `has_homepods` | boolean | `true` only for an Apple TV that currently leads a group of HomePods which are present, which is exactly when it can be enabled with `include_tv: false` (see [Update an output](#update-an-output)). `false` for every other output |
+
+#### Session
+
+The state of what the row plays. For an output on its own that is its own connection. For an Apple TV that was enabled with `include_tv: false` it is the HomePods it leads, as one: the Apple TV has no session of its own then, and `pin_pending` is likewise the HomePods'.
+
+| Key | Type | Value |
+| --- | ---- | ----- |
+| `state` | string | `"stopped"` (no connection), `"startup"` (connecting), `"connected"` (connected, audio not flowing yet), `"streaming"`, `"failed"`, or `"password"` (the device wants a PIN or password) |
+| `failure` | string | Why the last start failed: `"capacity"` if the buffered-encode budget was used up, otherwise `"none"` |
+
+An output that is selected is not necessarily streaming: `selected` says what
+was asked for, `session.state` what the device is doing. For HomePods played
+without their Apple TV, `session.state` is `"streaming"` if any HomePod streams,
+otherwise `"startup"` if any is starting or connected, otherwise `"password"`,
+`"failed"` or `"stopped"` in that order of precedence.
+
+A pair is listed as one output; its second speaker is hidden. A group of
+HomePods that sits behind an Apple TV is listed as the Apple TV; the HomePods
+are hidden. Enabling, disabling and
+setting the volume of the listed output applies to every output in its group.
+
+A row used to carry `paused_by_device`. It has been removed: a pause from a
+device is now only [reported](event-channel.md), and does not change the
+output.
 
 The AirPlay 2 modes beyond plain `"airplay2"` (realtime) select a buffered
 transport, where the receiver queues audio ahead of playout instead of
@@ -226,7 +253,7 @@ curl -X GET "http://localhost:3689/api/outputs"
   "outputs": [
     {
       "id": "1",
-      "name": "Living Room",
+      "name": "Speaker A",
       "type": "AirPlay 2",
       "selected": true,
       "has_password": false,
@@ -237,9 +264,25 @@ curl -X GET "http://localhost:3689/api/outputs"
       "format": "alac",
       "supported_formats": ["pcm", "alac"],
       "mode": "auto",
-      "supported_modes": ["raop", "airplay2"]
+      "supported_modes": ["raop", "airplay2"],
+      "session": {"state": "streaming", "failure": "none"},
+      "has_homepods": false
     }
   ]
+}
+```
+
+An Apple TV that leads two HomePods, enabled without the Apple TV, looks like
+this once the HomePods are playing (other keys left out); the session is the
+HomePods', not the Apple TV's:
+
+```json
+{
+  "id": "186916976721924",
+  "name": "TV A",
+  "selected": true,
+  "session": {"state": "streaming", "failure": "none"},
+  "has_homepods": true
 }
 ```
 
@@ -272,23 +315,56 @@ All fields are optional. Any combination may be supplied in one request.
 | Key | Type | Value |
 | --- | ---- | ----- |
 | `selected` | boolean | Enable or disable the output |
+| `include_tv` | boolean | With `selected: true` on an Apple TV that leads a group of HomePods: `true` plays on the Apple TV and the HomePods (the default behaviour), `false` plays on the HomePods only and gives the Apple TV no session. Ignored for any other output, except that `false` is refused with `409` (see below) unless the output's `has_homepods` is `true`. When absent the option is left as it was |
 | `volume` | integer | Set output volume, from `0` to `100` |
 | `pin` | string | Submit a PIN for authorization |
 | `format` | string | Set the output audio format |
 | `offset_ms` | integer | Set timing offset in milliseconds, from `-2000` to `2000` |
 | `mode` | string | Set the protocol mode preference: `"auto"`, `"raop"`, `"airplay2"`, `"airplay2_buffered"`, `"airplay2_buffered_24"`, `"airplay2_surround_stereo"`, or `"airplay2_surround_upmix"` |
 
-Fields are applied in this order: `offset_ms`, `selected`, `volume`, `pin`,
-`format`, `mode`. If one fails, the ones before it have already taken effect.
+Fields are applied in this order: `offset_ms`, `selected` (with `include_tv`),
+`volume`, `pin`, `format`, `mode`. If one fails, the ones before it have
+already taken effect.
 
 **Response**
 
 Returns HTTP `204 No Content` on success.
 
+Enabling an output blocks until the speaker has started or its start attempts
+have run out, which for a speaker that is switched off but still listed can take
+well over a minute, and other requests to the player (including
+`GET /api/outputs`) wait behind it. A client should treat a timeout during a
+start as "pending" and check again, not as the daemon being down.
+
 Returns HTTP `400 Bad Request` if the id is not a number, the body is missing
 or not valid JSON, no output has that id, `volume` or `offset_ms` is out of
 range, the output could not be enabled, disabled or given the format, the PIN
 was not accepted, or `mode` is not one of the names listed above.
+
+The `include_tv` option is fixed for as long as the output is selected. A
+request that would change it while the output is selected gets HTTP `409
+Conflict` with body `{"error": "reselect_required"}` and changes nothing:
+disable the output, then enable it with the other option. Repeating the option
+it already has is accepted. When the group is enabled without the Apple TV,
+the HomePods are started, kept in sync, given their volume and metadata, and
+restarted if one drops out exactly as a stereo pair is; the Apple TV shows
+nothing. The returned status is that of the HomePods, so `400` means none of
+them could be started. Disabling the output stops every speaker in the group.
+If `include_tv: false` is sent for an Apple TV that does not lead a group of
+HomePods at the moment, because its HomePods have not been discovered yet or
+have been away for longer than the grace period, the request gets HTTP `409
+Conflict` with body `{"error": "group_not_present"}` and nothing is selected or
+started; the Apple TV is not given a session on its own. A client should wait
+for the group to appear (the output list changes, and the row's `has_homepods`
+becomes `true`) and send the request again. Once a group has been
+enabled without its Apple TV, the Apple TV is not started by a later "play on
+the selected outputs" request even if its HomePods go away, until the output
+is enabled again.
+
+The option is not changed by disabling, so a client that enables the output
+should send `include_tv` every time. Rows do not
+report the option. `PUT /api/outputs/set` does not take the
+option and uses whatever was last set.
 
 Enabling (`"selected":true`) a buffered AirPlay 2 output (`airplay2_buffered`,
 `airplay2_buffered_24`, or one of the surround modes) can fail with HTTP `503
@@ -360,6 +436,8 @@ GET /api/config
 | `buildoptions` | array | Array of server feature strings |
 | `restart_required` | boolean | `true` if a restart-required config change is pending |
 | `live_offset` | boolean | Always `true` in this build. It means an output's `offset_ms` can be changed during playback |
+| `event_channel` | integer | Version of the [event channel](event-channel.md) protocol, or `0` when the channel is off |
+| `event_socket` | string or null | Path of the event channel's socket, `null` when the channel is off |
 
 **Example**
 
@@ -384,7 +462,9 @@ curl -X GET "http://localhost:3689/api/config"
     "Regex"
   ],
   "restart_required": false,
-  "live_offset": true
+  "live_offset": true,
+  "event_channel": 1,
+  "event_socket": "/run/owntone-mini/events.sock"
 }
 ```
 

@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+- new: an event channel, a local Unix socket (setting `event_socket`, users
+  allowed in `event_socket_allowed_users`) on which a supervisor is told, as
+  it happens, that the list of outputs has changed, that a receiver has sent
+  a command, or that a receiver has set its volume. An event is reported under
+  the id of the output row that stands for the device, with the device's own
+  id alongside as `member_id`. It runs on its own thread
+  and never holds up playback or the other outputs. See
+  `docs/event-channel.md`. `tools/event_channel_client.py` is a command line
+  client for it
+- new: each row of `GET /api/outputs` has `session` (what the output plays on:
+  its connection state and why its last start failed, or the HomePods' when an
+  Apple TV was enabled without itself) and `has_homepods` (true only for an
+  Apple TV that currently leads a group of HomePods). `GET /api/config`
+  reports `event_channel` and `event_socket`
+- new: an Apple TV that leads a group of HomePods can be enabled without the
+  Apple TV, by sending `include_tv: false` with `selected: true` in
+  `PUT /api/outputs/{id}`. The HomePods then start, stay in sync and recover
+  exactly as a stereo pair does, and the Apple TV is not contacted. Changing
+  the option while the output is selected is refused with `409` and
+  `{"error": "reselect_required"}`, and `include_tv: false` for an Apple TV
+  that does not lead a group of HomePods at the moment is refused with `409`
+  and `{"error": "group_not_present"}`
+- change: a pause or play sent by a receiver (for example an Apple TV going
+  into standby) is reported on the event channel and nothing else; it no
+  longer deselects the output or changes playback. The `paused_by_device`
+  field is removed from the outputs API
+- change: a volume set by a receiver through the control interface is applied
+  as before and is also reported on the event channel
+- fix: enabling a speaker that fails at once, such as one inside its grace
+  period after disappearing from the network, and a speaker that learns a
+  buffered mode, now update clients of the outputs list
+
 ## Version 1.5.0 - 2026-10-14
 
 - fix: the two speakers of an AirPlay 2 stereo pair could start about half

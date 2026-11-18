@@ -50,6 +50,33 @@ A HomePod stereo pair is not driven as a single combined session: each
 member of the pair is played to individually (one session per speaker), with
 the pair's two speakers kept in phase via their own clock sync.
 
+## HomePods behind an Apple TV
+
+HomePods that the Apple TV uses as its speakers are listed as the Apple TV.
+Enabling the Apple TV starts the HomePods and then the Apple TV itself, whose
+session carries control, metadata and volume while the HomePods play the audio
+(see `tv_proxy_leader_audio_suppress` in [Configuration](../configuration.md)).
+
+The group can also be enabled without the Apple TV, by sending `include_tv:
+false` with the request that enables it (see [Update an
+output](../json-api.md#update-an-output)). The HomePods then play as an ordinary
+stereo pair: they are started together, hold their start for each other, share
+one first frame, and are retried if one drops out, and the Apple TV is not
+contacted at all, so it shows no Now Playing screen. The choice holds until the
+output is disabled; to change it, disable the output and enable it again.
+While it is enabled this way, the Apple TV's row shows the session of the
+HomePods rather than its own, which is none.
+
+## Commands sent by a receiver
+
+A receiver can send commands of its own over the AirPlay events connection:
+pause, play, next and previous, for example when an Apple TV goes into standby
+or someone presses a button on its remote. owntone-mini answers the receiver
+as before but no longer acts on them: playback and the selected outputs do not
+change. The command is reported on the [event channel](../event-channel.md) for
+a supervisor to decide what to do with it. A volume change made on a receiver
+is applied and also reported there.
+
 ## Now Playing on Apple TV
 
 When streaming to an Apple TV, owntone-mini registers as a MediaRemote now-playing
