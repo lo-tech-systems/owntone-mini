@@ -760,8 +760,20 @@ outputs_start(output_status_cb started_cb, output_status_cb stopped_cb, bool onl
 int
 outputs_stop(output_status_cb cb);
 
+// Flushes every device that has a session and no operation in flight, and
+// adds the ones flushed to the set a playback flush waits for. Any report of
+// a device takes it out of the set, whichever callback it reaches, and the
+// callback given to outputs_flush_done_cb_set() is called once the last one
+// is out. Returns the number of devices flushed now
 int
 outputs_flush(output_status_cb cb);
+
+// The number of devices a playback flush still waits for
+int
+outputs_flush_waiting(void);
+
+void
+outputs_flush_done_cb_set(void (*cb)(void));
 
 int
 outputs_volume_get(void);

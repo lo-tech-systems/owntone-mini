@@ -7817,12 +7817,15 @@ sequence_resume(struct airplay_session *session, bool ok)
 }
 
 // True for the sequences that start a speaker up to and including pairing,
-// which are limited by AIRPLAY_START_TIMEOUT_SEC
+// and for a playback flush, which a player command waits for: these are
+// limited by AIRPLAY_START_TIMEOUT_SEC. The limit is the connection's, set at
+// each sequence start, so it holds while the flush is the newest sequence
 static bool
 sequence_start_limited(enum airplay_seq_type seq_type)
 {
   return seq_type == AIRPLAY_SEQ_START || seq_type == AIRPLAY_SEQ_PROBE
-         || seq_type == AIRPLAY_SEQ_PAIR_TRANSIENT || seq_type == AIRPLAY_SEQ_PAIR_VERIFY;
+         || seq_type == AIRPLAY_SEQ_PAIR_TRANSIENT || seq_type == AIRPLAY_SEQ_PAIR_VERIFY
+         || seq_type == AIRPLAY_SEQ_FLUSH || seq_type == AIRPLAY_SEQ_FLUSH_BUFFERED;
 }
 
 // All errors that may occur during a sequence are called back async

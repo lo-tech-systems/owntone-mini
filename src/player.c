@@ -356,6 +356,11 @@ static struct commands_base *cmdbase;
 // from the player thread (where we can't use player_playback_pause)
 static int player_flush_pending;
 
+// A playback stop, pause or flush command waits for the devices it flushed
+// (see outputs_flush). pb_suspend()'s flush is made by no command, so it
+// ends none
+static bool player_flush_command;
+
 // Config values and player settings category
 static int speaker_autoselect;
 static int clear_queue_on_stop_disabled;
@@ -1885,15 +1890,17 @@ device_level_edge_cb(struct output_device *device, enum output_device_state stat
 static void
 device_flush_cb(struct output_device *device, enum output_device_state status)
 {
+  // The command, if any, ends when the last device it flushed has reported,
+  // whatever the report, see flush_done_cb()
   if (!device)
     {
       DPRINTF(E_LOG, L_PLAYER, "Output device disappeared before flush completion!\n");
-      goto out;
+      return;
     }
   else if (status == OUTPUT_STATE_FAILED)
     {
       DPRINTF(E_LOG, L_PLAYER, "The %s device '%s' failed during execution of flush command\n", device->type_name, device->name);
-      goto out;
+      return;
     }
 
   DPRINTF(E_DBG, L_PLAYER, "Callback from %s device %s to device_flush_cb (status %d)\n", device->type_name, device->name, status);
@@ -1907,9 +1914,34 @@ device_flush_cb(struct output_device *device, enum output_device_state status)
     }
 
   outputs_device_stop_delayed(device, device_streaming_cb);
+}
 
- out:
+// The last device a playback flush waited for has reported
+static void
+flush_done_cb(void)
+{
+  if (!player_flush_command)
+    return;
+
+  player_flush_command = false;
   commands_exec_end(cmdbase, 0);
+}
+
+// Makes a playback stop, pause or flush command wait for the devices still
+// being flushed. Returns the command state for the caller to return
+static enum command_state
+flush_command_wait(int *retval)
+{
+  if (outputs_flush_waiting() == 0)
+    {
+      *retval = 0;
+      return COMMAND_END;
+    }
+
+  // One event ends the command: the flush set emptying
+  player_flush_command = true;
+  *retval = 1;
+  return COMMAND_PENDING;
 }
 
 static void
@@ -2583,7 +2615,7 @@ playback_stop(void *arg, int *retval)
 
   // We may be restarting very soon, so we don't bring the devices to a full
   // stop just yet; this saves time when restarting, which is nicer for the user
-  *retval = outputs_flush(device_flush_cb);
+  outputs_flush(device_flush_cb);
   outputs_metadata_purge();
 
   // Stops the input
@@ -2592,10 +2624,7 @@ playback_stop(void *arg, int *retval)
   status_update(PLAY_STOPPED, LISTENER_PLAYER);
 
   // We're async if we need to flush devices
-  if (*retval > 0)
-    return COMMAND_PENDING;
-
-  return COMMAND_END;
+  return flush_command_wait(retval);
 }
 
 static enum command_state
@@ -2862,15 +2891,12 @@ playback_pause(void *arg, int *retval)
 
   pb_session_pause();
 
-  *retval = outputs_flush(device_flush_cb);
+  outputs_flush(device_flush_cb);
   outputs_metadata_purge();
 
-  // We're async if we need to flush devices
-  if (*retval > 0)
-    return COMMAND_PENDING; // async
-
-  // Otherwise, just run the bottom half
-  return COMMAND_END;
+  // We're async if we need to flush devices, otherwise the bottom half just
+  // runs
+  return flush_command_wait(retval);
 }
 
 static enum command_state
@@ -2890,14 +2916,10 @@ playback_flush(void *arg, int *retval)
 
   input_flush(NULL);
 
-  *retval = outputs_flush(device_flush_cb);
+  outputs_flush(device_flush_cb);
   outputs_metadata_purge();
 
-  if (*retval > 0)
-    return COMMAND_PENDING; // async
-
-  // Otherwise we are done
-  return COMMAND_END;
+  return flush_command_wait(retval);
 }
 
 // Replaces the session facts of an Apple TV's row with those of the HomePods it
@@ -5274,6 +5296,7 @@ player_init(void)
   }
 
   ret = outputs_init();
+  outputs_flush_done_cb_set(flush_done_cb);
   if (ret < 0)
     {
       DPRINTF(E_FATAL, L_PLAYER, "Output initiation failed\n");

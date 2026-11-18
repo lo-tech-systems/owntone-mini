@@ -104,6 +104,9 @@ static struct output_definition *outputs[] = {
 // level send and an operation
 #define OUTPUTS_MAX_CALLBACKS 96
 
+// The most devices one playback flush waits for
+#define OUTPUTS_MAX_FLUSH 32
+
 // A step on the player thread that takes this long (in milliseconds) delays the
 // audio of outputs that are already playing, so it is logged at the normal level
 #define OUTPUTS_STEP_SLOW_MS 20
@@ -137,6 +140,13 @@ static uint64_t outputs_buffer_duration_ms;
 static bool outputs_exclusive_mode;
 
 static struct outputs_callback_register outputs_cb_register[OUTPUTS_MAX_CALLBACKS];
+
+// The devices a playback flush waits for. Any report of a device takes it out,
+// whichever callback the report reaches: the flush's slot may have been
+// reused by a level send since. Player thread only
+static uint64_t outputs_flush_ids[OUTPUTS_MAX_FLUSH];
+static int outputs_flush_ids_count;
+static void (*outputs_flush_done)(void);
 static struct event *outputs_deferredev;
 static struct timeval outputs_stop_timeout = { OUTPUTS_STOP_TIMEOUT, 0 };
 
@@ -1323,6 +1333,42 @@ callback_get(struct output_device *device)
   return NULL;
 }
 
+static void
+flush_ids_add(struct output_device *device)
+{
+  int i;
+
+  for (i = 0; i < outputs_flush_ids_count; i++)
+    if (outputs_flush_ids[i] == device->id)
+      return;
+
+  if (outputs_flush_ids_count == ARRAY_SIZE(outputs_flush_ids))
+    {
+      DPRINTF(E_LOG, L_PLAYER, "Too many devices to wait for in a flush, not waiting for '%s'\n", device->name);
+      return;
+    }
+
+  outputs_flush_ids[outputs_flush_ids_count++] = device->id;
+}
+
+// Takes a reporting device out of the flush set. True when that emptied it
+static bool
+flush_ids_remove(uint64_t device_id)
+{
+  int i;
+
+  for (i = 0; i < outputs_flush_ids_count; i++)
+    {
+      if (outputs_flush_ids[i] != device_id)
+	continue;
+
+      outputs_flush_ids[i] = outputs_flush_ids[--outputs_flush_ids_count];
+      return (outputs_flush_ids_count == 0);
+    }
+
+  return false;
+}
+
 // Takes a slot for a report the backend will make for this device (see
 // outputs_callbacks_add). *fresh tells callback_settle() whether the slot was
 // taken for this call or reused
@@ -1379,6 +1425,8 @@ deferred_cb(int fd, short what, void *arg)
   struct output_device *device;
   output_status_cb cb;
   enum output_device_state state;
+  uint64_t reg_device_id;
+  bool flush_done;
   int callback_id;
 
   for (callback_id = 0; callback_id < ARRAY_SIZE(outputs_cb_register); callback_id++)
@@ -1389,6 +1437,11 @@ deferred_cb(int fd, short what, void *arg)
 	  // callback might result in (could call back in)
 	  cb = outputs_cb_register[callback_id].cb;
 	  state = outputs_cb_register[callback_id].state;
+	  reg_device_id = outputs_cb_register[callback_id].reg_device_id;
+
+	  // Whatever the report, the device has answered: a flush waits for it
+	  // no longer. The flush ends after the callback has run
+	  flush_done = flush_ids_remove(reg_device_id);
 
 	  // Will be NULL if the device has disappeared
 	  device = outputs_device_get(outputs_cb_register[callback_id].device_id);
@@ -1444,6 +1497,9 @@ deferred_cb(int fd, short what, void *arg)
 	  DPRINTF(E_DBG, L_PLAYER, "Making deferred callback to %p, id was %d\n", cb, callback_id);
 
 	  cb(device, state);
+
+	  if (flush_done && outputs_flush_done)
+	    outputs_flush_done();
 	}
     }
 
@@ -3315,14 +3371,31 @@ outputs_flush(output_status_cb cb)
 
   for (device = outputs_device_list; device; device = device->next)
     {
-      ret = outputs_device_flush(device, cb);
-      if (ret < 0)
+      // Its operation reports for it; a flush would take the operation's slot
+      if (device->op != OUTPUT_OP_NONE)
 	continue;
 
+      ret = outputs_device_flush(device, cb);
+      if (ret <= 0)
+	continue;
+
+      flush_ids_add(device);
       pending += ret;
     }
 
   return pending;
+}
+
+int
+outputs_flush_waiting(void)
+{
+  return outputs_flush_ids_count;
+}
+
+void
+outputs_flush_done_cb_set(void (*cb)(void))
+{
+  outputs_flush_done = cb;
 }
 
 int

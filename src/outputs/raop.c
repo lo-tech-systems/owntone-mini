@@ -121,6 +121,9 @@
 // seconds
 #define RAOP_TEARDOWN_TIMEOUT_SEC  2
 
+// A playback flush a player command waits for gives up after this many seconds
+#define RAOP_FLUSH_TIMEOUT_SEC     4
+
 enum raop_devtype {
   RAOP_DEV_APEX1_80211G,
   RAOP_DEV_APEX2_80211N,
@@ -2923,6 +2926,11 @@ raop_cb_flush(struct evrtsp_request *req, void *arg)
   if (!req)
     goto error;
 
+  // The flush's short limit is not for the requests after it. A stopping
+  // session keeps the TEARDOWN's
+  if (!rs->stopping)
+    evrtsp_connection_set_timeout(rs->ctrl, -1);
+
   if (req->response_code != RTSP_OK)
     {
       DPRINTF(E_LOG, L_RAOP, "FLUSH request to '%s' failed: %d %s\n", rs->devname, req->response_code, req->response_code_line);
@@ -4961,9 +4969,16 @@ raop_device_flush(struct output_device *device, int callback_id)
   if (rs->state != RAOP_STATE_STREAMING)
     return 0; // No-op, nothing to flush
 
+  // A player command waits for the answer, so it is not waited for long;
+  // the answer puts the default back
+  evrtsp_connection_set_timeout(rs->ctrl, RAOP_FLUSH_TIMEOUT_SEC);
+
   ret = raop_send_req_flush(rs, raop_cb_flush, "flush");
   if (ret < 0)
-    return -1;
+    {
+      evrtsp_connection_set_timeout(rs->ctrl, -1);
+      return -1;
+    }
 
   rs->callback_id = callback_id;
 
