@@ -722,6 +722,16 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
 	  jparse_free(request);
 	  return jsonapi_reply_error(hreq, HTTP_CONFLICT, "group_not_present");
 	}
+      if (selected && ret == -2)
+	{
+	  jparse_free(request);
+	  return jsonapi_reply_error(hreq, HTTP_BADREQUEST, "pin_required");
+	}
+      if (selected && ret < 0)
+	{
+	  jparse_free(request);
+	  return jsonapi_reply_error(hreq, HTTP_BADREQUEST, "start_failed");
+	}
       if (ret < 0)
 	goto error;
     }
