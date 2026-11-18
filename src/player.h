@@ -165,9 +165,6 @@ player_speaker_enable(uint64_t id, int include_tv, int volume);
 int
 player_speaker_disable(uint64_t id);
 
-void
-player_speaker_resurrect(void *arg);
-
 int
 player_speaker_authorize(uint64_t id, const char *pin);
 

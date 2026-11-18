@@ -303,6 +303,10 @@ struct output_device
 
   struct event *stop_timer;
 
+  // Restarts a selected device whose session failed; exists only while armed
+  // (see the player). Its argument is a heap copy of the device id
+  struct event *resurrect_ev;
+
   // The last level sent to the device and when (monotonic ms, 0 if never), so
   // a level the device then reports can be told apart from one it set itself,
   // and the player's timer that sends a reported level back (see the DACP

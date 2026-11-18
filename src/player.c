@@ -1733,6 +1733,65 @@ static void
 device_volume_echo_cb(struct output_device *device, enum output_device_state status);
 static int
 device_start(struct output_device *device, bool only_probe, bool explicit_request);
+static void
+device_request(struct output_device *device, enum output_request req, bool explicit_request, bool backend_changes);
+
+// A selected device whose session failed is started again by a timer of its
+// own. The timer's argument is a copy of the device id, so a device freed in
+// the meantime is found missing rather than read; the timer is freed when it
+// fires, when the device is deselected and with the device
+static void
+resurrect_cb(int fd, short what, void *arg)
+{
+  uint64_t *id = arg;
+  struct output_device *device;
+
+  device = outputs_device_get(*id);
+  if (!device)
+    return;
+
+  event_free(device->resurrect_ev);
+  device->resurrect_ev = NULL;
+  free(id);
+
+  DPRINTF(E_DBG, L_PLAYER, "Speaker resurrect: '%s' (id=%" PRIu64 ")\n", device->name, device->id);
+
+  // Not while it waits for a PIN (a start would replace the PIN on screen),
+  // and not when nothing plays: every source is a live pipe, which plays on
+  // when its speakers fail, so there is no suspended playback to resume
+  if (!device->selected || device->pin_pending || device->busy || device->prevent_playback || player_state != PLAY_PLAYING)
+    return;
+
+  device_request(device, OUTPUT_REQ_SELECT, false, false);
+  status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
+}
+
+static void
+resurrect_arm(struct output_device *device, int seconds)
+{
+  struct timeval tv = { seconds, 0 };
+  uint64_t *id;
+
+  if (!device->resurrect_ev)
+    {
+      CHECK_NULL(L_PLAYER, id = malloc(sizeof(*id)));
+      *id = device->id;
+      CHECK_NULL(L_PLAYER, device->resurrect_ev = evtimer_new(evbase_player, resurrect_cb, id));
+    }
+
+  evtimer_add(device->resurrect_ev, &tv);
+}
+
+static void
+resurrect_cancel(struct output_device *device)
+{
+  if (!device->resurrect_ev)
+    return;
+
+  free(event_get_callback_arg(device->resurrect_ev));
+  event_free(device->resurrect_ev);
+  device->resurrect_ev = NULL;
+}
 
 // The handlers below hold what a backend report means to the player. Every
 // callback given to outputs leads to device_report(), which moves the device's
@@ -1830,7 +1889,7 @@ handle_streaming(struct output_device *device, enum output_device_state status, 
 	  device->tv_proxy_reconnects++;
 	  DPRINTF(E_LOG, L_PLAYER, "TV proxy: Apple TV '%s' dropped its session, reconnecting in %d sec (attempt %u of %d)\n",
 	          outputs_device_display_name(device), PLAYER_TV_PROXY_RECONNECT_TIME, device->tv_proxy_reconnects, PLAYER_TV_PROXY_RECONNECT_MAX);
-	  worker_execute(player_speaker_resurrect, &(device->id), sizeof(device->id), PLAYER_TV_PROXY_RECONNECT_TIME);
+	  resurrect_arm(device, PLAYER_TV_PROXY_RECONNECT_TIME);
 	  goto out;
 	}
 
@@ -1839,8 +1898,7 @@ handle_streaming(struct output_device *device, enum output_device_state status, 
 
       DPRINTF(E_LOG, L_PLAYER, "Attempting reconnection in %d sec to the %s device '%s'\n", PLAYER_SPEAKER_RESURRECT_TIME, device->type_name, device->name);
 
-      // TODO do this internally instead of through the worker
-      worker_execute(player_speaker_resurrect, &(device->id), sizeof(device->id), PLAYER_SPEAKER_RESURRECT_TIME);
+      resurrect_arm(device, PLAYER_SPEAKER_RESURRECT_TIME);
     }
   else if (status == OUTPUT_STATE_STOPPED)
     {
@@ -2614,6 +2672,10 @@ device_request(struct output_device *device, enum output_request req, bool expli
 
   if (req == OUTPUT_REQ_SELECT && device->pin_pending && !explicit_request)
     DPRINTF(E_INFO, L_PLAYER, "Not starting '%s': it waits for a PIN\n", device->name);
+
+  // A device no longer wanted is not brought back
+  if (req == OUTPUT_REQ_DESELECT && !device->selected)
+    resurrect_cancel(device);
 
   flags_apply(device, &res);
   result_phases_apply(device, &res, res.next_op, explicit_request);
@@ -4243,31 +4305,6 @@ speaker_mode_set(void *arg, int *retval)
   return COMMAND_END;
 }
 
-// Attempts to reactivate a speaker that has failed, while the player plays.
-// Every source is a live pipe, which plays on when its speakers fail, so there
-// is no suspended playback to resume first
-static enum command_state
-speaker_resurrect(void *arg, int *retval)
-{
-  struct speaker_set_param *param = arg;
-  struct output_device *device;
-
-  *retval = 0;
-
-  device = outputs_device_get(*param->device_ids);
-  if (!device)
-    return COMMAND_END;
-
-  DPRINTF(E_DBG, L_PLAYER, "Speaker resurrect: '%s' (id=%" PRIu64 ")\n", device->name, device->id);
-
-  if (device->busy || device->prevent_playback || !device->selected || player_state != PLAY_PLAYING)
-    return COMMAND_END;
-
-  device_request(device, OUTPUT_REQ_SELECT, false, false);
-
-  return COMMAND_END;
-}
-
 static enum command_state
 speaker_authorize(void *arg, int *retval)
 {
@@ -5228,16 +5265,6 @@ player_speaker_disable(uint64_t id)
   ret = commands_exec_sync(cmdbase, speaker_disable, speaker_generic_bh, &id);
 
   return ret;
-}
-
-void
-player_speaker_resurrect(void *arg)
-{
-  struct speaker_set_param param;
-
-  param.device_ids = (uint64_t *)arg;
-
-  commands_exec_sync(cmdbase, speaker_resurrect, NULL, &param);
 }
 
 int

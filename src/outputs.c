@@ -3284,6 +3284,11 @@ outputs_device_free(struct output_device *device)
 
   if (device->stop_timer)
     event_free(device->stop_timer);
+  if (device->resurrect_ev)
+    {
+      free(event_get_callback_arg(device->resurrect_ev));
+      event_free(device->resurrect_ev);
+    }
   if (device->volume_echo_timer)
     event_free(device->volume_echo_timer);
 
