@@ -2752,10 +2752,13 @@ airplay_volume_to_pct(struct output_device *device, const char *volstr)
   float airplay_volume;
   float volume;
   int max_volume;
+  char *end;
 
-  airplay_volume = atof(volstr);
+  airplay_volume = strtof(volstr, &end);
 
-  if ((airplay_volume == 0.0 && volstr[0] != '0') || airplay_volume > 0.0)
+  // A zero with a sign ('-0.000000') is full volume, so only a string with no
+  // number in it is invalid
+  if (end == volstr || airplay_volume > 0.0)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "AirPlay device volume is invalid: '%s'\n", volstr);
       return -1;

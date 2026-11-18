@@ -87,6 +87,8 @@
   including one the daemon cannot use. A speaker left waiting for an answer
   (to a request for a remote control session) stopped answering the daemon,
   and its session failed
+- fix: a speaker that reports its volume as `-0.000000` (full volume, signed
+  zero) was logged as an invalid volume and its level was not recorded
 
 ## Version 1.5.0 - 2026-10-14
 

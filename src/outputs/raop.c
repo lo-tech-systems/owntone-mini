@@ -2683,10 +2683,13 @@ raop_volume_to_pct(struct output_device *device, const char *volstr)
 {
   float raop_volume;
   float volume;
+  char *end;
 
-  raop_volume = atof(volstr);
+  raop_volume = strtof(volstr, &end);
 
-  if ((raop_volume == 0.0 && volstr[0] != '0') || raop_volume > 0.0)
+  // A zero with a sign ('-0.000000') is full volume, so only a string with no
+  // number in it is invalid
+  if (end == volstr || raop_volume > 0.0)
     {
       DPRINTF(E_LOG, L_RAOP, "RAOP device volume is invalid: '%s'\n", volstr);
       return -1;
