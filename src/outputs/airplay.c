@@ -169,6 +169,11 @@
 //                                             if too short the second member
 //                                             is anchored about one join slack
 //                                             after the first
+//   ANCHOR_GROUP_START_WAIT_MS       2500     how long past ANCHOR_MIN_PEER_AGE_MS
+//                                             a member waits for another
+//                                             member's speaker that was still
+//                                             being started; not below
+//                                             ANCHOR_SIBLING_WAIT_MS
 //   ANCHOR_HOLD_MAX_MS               200      below ANCHOR_MIN_AHEAD_MS and
 //                                             below the join slack; costs that
 //                                             much cushion on every group start
@@ -190,7 +195,8 @@
 //
 // In order: ANCHOR_HOLD_MAX_MS < ANCHOR_MIN_AHEAD_MS, ANCHOR_MIN_AHEAD_MS <=
 // ANCHOR_RETRY_WAIT_MS, ANCHOR_RETRY_WAIT_MS < the anchor lead, and
-// ANCHOR_HOLD_MAX_MS < the time JOIN_SLACK_FRAMES represents.
+// ANCHOR_HOLD_MAX_MS < the time JOIN_SLACK_FRAMES represents. Also
+// ANCHOR_SIBLING_WAIT_MS <= ANCHOR_GROUP_START_WAIT_MS.
 //
 // The *_SLOW_MS and *_WARN_MS thresholds (here, in outputs.c and below) only
 // decide at which level a duration is logged.
@@ -210,6 +216,11 @@
 // enough, but none waits longer than the sibling wait for another.
 #define AIRPLAY_BUFFERED_ANCHOR_MIN_PEER_AGE_MS 1200
 #define AIRPLAY_BUFFERED_ANCHOR_SIBLING_WAIT_MS 500
+// A member of a stereo group that finds a sibling still being set up (or between
+// start retries) is held this much longer past its own clock-peer age, so that
+// both are delivered the same first frame. Costs at most this much extra
+// silence at a pair's first start, and only when one member is slow
+#define AIRPLAY_BUFFERED_ANCHOR_GROUP_START_WAIT_MS 2500
 // A session joining an already-anchored master session gets an anchor this
 // many frames past the current write head, and delivery to it is held until
 // the write head reaches that point - so its first delivered frame matches
@@ -640,6 +651,10 @@ struct airplay_session
   // was built, for the log line when the answer arrives
   bool anchor_sent_stats_valid;
   struct ptpd_peer_stats anchor_sent_stats;
+  // Set once a speaker of the same group was found still being started while
+  // this session's anchor was due, so that the session then also waits for that
+  // speaker's clock peer to mature. Cleared when the anchor is sent
+  bool anchor_sibling_waited;
   // Set once session_streaming_report() has told the player
   // OUTPUT_STATE_STREAMING for this session, so it is only reported once.
   bool streaming_reported;
@@ -7801,47 +7816,97 @@ airplay_device_authorize(struct output_device *device, const char *pin, int call
   return 1;
 }
 
+// True while another selected speaker of the session's device group is still
+// being started: it has no session yet (it may be between start attempts), or
+// its session has not got as far as connected, and has not failed. The Apple
+// TV leading a group of HomePods is not a sibling, it carries no audio of its
+// own while they play.
+static bool
+group_sibling_device_starting(struct airplay_session *session)
+{
+  struct output_device *self;
+  struct output_device *device;
+  struct airplay_session *other;
+  const char *group_id;
+  const char *other_group_id;
+
+  self = outputs_device_get(session->device_id);
+  if (!self)
+    return false;
+
+  group_id = outputs_device_group_id(self);
+  if (!group_id)
+    return false;
+
+  for (device = outputs_list(); device; device = device->next)
+    {
+      if (device == self || device->type != OUTPUT_TYPE_AIRPLAY || !device->selected)
+	continue;
+
+      other_group_id = outputs_device_group_id(device);
+      if (!other_group_id || strcmp(other_group_id, group_id) != 0)
+	continue;
+
+      if (outputs_device_leads_tv_proxy_group(device))
+	continue;
+
+      other = device->session;
+      if (!other || !(other->state & (AIRPLAY_STATE_F_CONNECTED | AIRPLAY_STATE_F_FAILED)))
+	return true;
+    }
+
+  return false;
+}
+
 // Whether a streaming buffered session may send its anchor yet, and if not,
 // why. A receiver whose clock peer is too young would likely reject it. Members
 // of a group are released together once the youngest has reached the minimum
 // age, but a session never waits more than the sibling wait for the others, a
 // suppressed session neither waits nor is waited for, and a session joining a
-// group that is already playing waits only for its own age. Returns
-// ANCHOR_HOLD_NONE when the anchor is due, otherwise whether the session is
-// held for its own clock peer or for a sibling's.
+// group that is already playing waits only for its own age. A session that
+// finds another member's speaker still being started waits for it, and then for
+// its clock peer to mature, for a little longer than the sibling wait, so that
+// a member that is slow to set up is not left to join the others later.
+// Returns ANCHOR_HOLD_NONE when the anchor is due, otherwise whether the
+// session is held for its own clock peer or for a sibling's.
 static enum airplay_anchor_hold_reason
 anchor_start_hold_reason(struct airplay_session *session, uint64_t now)
 {
+  struct airplay_anchor_hold_in in = { 0 };
   struct airplay_session *sibling;
-  uint64_t age;
-  bool sibling_young = false;
 
-  if (session->ptpd_peer_added_ms == 0)
-    return ANCHOR_HOLD_NONE;
+  in.peer_known = (session->ptpd_peer_added_ms != 0);
+  in.own_age_ms = (now > session->ptpd_peer_added_ms) ? now - session->ptpd_peer_added_ms : 0;
+  in.suppressed = session->audio_suppressed;
 
-  age = (now > session->ptpd_peer_added_ms) ? now - session->ptpd_peer_added_ms : 0;
-  if (age < AIRPLAY_BUFFERED_ANCHOR_MIN_PEER_AGE_MS)
-    return ANCHOR_HOLD_OWN_AGE;
-
-  if (session->audio_suppressed || age >= AIRPLAY_BUFFERED_ANCHOR_MIN_PEER_AGE_MS + AIRPLAY_BUFFERED_ANCHOR_SIBLING_WAIT_MS)
-    return ANCHOR_HOLD_NONE;
-
-  for (sibling = airplay_sessions; sibling; sibling = sibling->next)
+  // Only a session past its own age and inside the longest wait needs to know
+  // about its siblings
+  if (in.peer_known && !in.suppressed && in.own_age_ms >= AIRPLAY_BUFFERED_ANCHOR_MIN_PEER_AGE_MS
+      && in.own_age_ms < AIRPLAY_BUFFERED_ANCHOR_MIN_PEER_AGE_MS + AIRPLAY_BUFFERED_ANCHOR_GROUP_START_WAIT_MS)
     {
-      if (sibling == session || !session_is_live_buffered(sibling, session->master_session))
-	continue;
+      for (sibling = airplay_sessions; sibling; sibling = sibling->next)
+	{
+	  if (sibling == session || !session_is_live_buffered(sibling, session->master_session))
+	    continue;
 
-      if (sibling->anchor_state == ANCHOR_CONFIRMED)
-	return ANCHOR_HOLD_NONE;
+	  // A line that is already playing: this is a join
+	  if (sibling->anchor_state == ANCHOR_CONFIRMED)
+	    return ANCHOR_HOLD_NONE;
 
-      if (sibling->audio_suppressed || sibling->anchor_state != ANCHOR_PENDING || sibling->ptpd_peer_added_ms == 0)
-	continue;
+	  if (sibling->audio_suppressed || sibling->anchor_state != ANCHOR_PENDING || sibling->ptpd_peer_added_ms == 0)
+	    continue;
 
-      if (now - sibling->ptpd_peer_added_ms < AIRPLAY_BUFFERED_ANCHOR_MIN_PEER_AGE_MS)
-	sibling_young = true;
+	  if (now - sibling->ptpd_peer_added_ms < AIRPLAY_BUFFERED_ANCHOR_MIN_PEER_AGE_MS)
+	    in.sibling_young = true;
+	}
+
+      in.sibling_starting = group_sibling_device_starting(session);
+      if (in.sibling_starting)
+	session->anchor_sibling_waited = true;
     }
 
-  return sibling_young ? ANCHOR_HOLD_SIBLING : ANCHOR_HOLD_NONE;
+  return airplay_anchor_start_hold(&in, AIRPLAY_BUFFERED_ANCHOR_MIN_PEER_AGE_MS,
+                                   session->anchor_sibling_waited ? AIRPLAY_BUFFERED_ANCHOR_GROUP_START_WAIT_MS : AIRPLAY_BUFFERED_ANCHOR_SIBLING_WAIT_MS);
 }
 
 static void
@@ -7991,6 +8056,7 @@ airplay_write(struct output_buffer *obuf)
 		DPRINTF(E_INFO, L_AIRPLAY, "Releasing anchor for '%s': clock peer %" PRIu64 " ms old%s\n", session->devname,
 		        now_ms - session->ptpd_peer_added_ms, session->anchor_hold_reason == ANCHOR_HOLD_SIBLING ? ", waited for a sibling" : "");
 
+	      session->anchor_sibling_waited = false;
 	      sequence_start(AIRPLAY_SEQ_SEND_ANCHOR, session, NULL, "anchor");
 	    }
 	}

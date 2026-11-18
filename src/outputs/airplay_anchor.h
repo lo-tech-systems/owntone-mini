@@ -89,6 +89,25 @@ airplay_anchor_transition(enum airplay_anchor_state from, enum airplay_anchor_ev
 			  const struct airplay_anchor_ctx *ctx, int retries_max,
 			  struct airplay_anchor_result *out);
 
+// What the caller knows about a buffered session that has not yet sent its
+// anchor, for deciding whether the anchor is due
+struct airplay_anchor_hold_in
+{
+  bool peer_known;          // the receiver is our clock peer yet
+  uint64_t own_age_ms;      // for how long
+  bool suppressed;          // the session carries no audio
+  bool sibling_starting;    // a group member's speaker is still being started
+  bool sibling_young;       // a live, pending group member's clock peer is below the minimum age
+};
+
+// Whether the anchor is due, and if not, whom the session waits for. It waits
+// for its own clock peer to reach min_age_ms. If a sibling is starting or young
+// it then waits for it, but never beyond a further wait_ms of its own peer age,
+// and a suppressed session does not wait for a sibling at all. The caller
+// chooses the one wait_ms that applies. Returns ANCHOR_HOLD_NONE when due.
+enum airplay_anchor_hold_reason
+airplay_anchor_start_hold(const struct airplay_anchor_hold_in *in, uint64_t min_age_ms, uint64_t wait_ms);
+
 // True for a state that holds the master session's shared line: an anchor
 // accepted on it or one sent and not yet answered.
 bool

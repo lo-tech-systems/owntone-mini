@@ -349,6 +349,148 @@ p_names(void)
 }
 
 
+/* ---------------------------- First anchor hold ---------------------------- */
+
+#define MIN_AGE        1200
+#define SIBLING_WAIT   500
+#define GROUP_WAIT     2500
+
+static struct airplay_anchor_hold_in
+hold_in(uint64_t age)
+{
+  struct airplay_anchor_hold_in in;
+
+  memset(&in, 0, sizeof(in));
+  in.peer_known = true;
+  in.own_age_ms = age;
+
+  return in;
+}
+
+static void
+h_own_age_holds(void)
+{
+  struct airplay_anchor_hold_in in = hold_in(0);
+
+  case_begin("h_own_age_holds");
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, SIBLING_WAIT) == ANCHOR_HOLD_OWN_AGE);
+  in.own_age_ms = MIN_AGE - 1;
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, SIBLING_WAIT) == ANCHOR_HOLD_OWN_AGE);
+
+  // Whatever the siblings are doing, and whichever wait applies
+  in.sibling_starting = true;
+  in.sibling_young = true;
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, GROUP_WAIT) == ANCHOR_HOLD_OWN_AGE);
+
+  // A suppressed session still waits for its own clock peer
+  in.suppressed = true;
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, GROUP_WAIT) == ANCHOR_HOLD_OWN_AGE);
+  case_end();
+}
+
+static void
+h_solo_released_past_min_age(void)
+{
+  struct airplay_anchor_hold_in in = hold_in(MIN_AGE);
+
+  case_begin("h_solo_released_past_min_age");
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, SIBLING_WAIT) == ANCHOR_HOLD_NONE);
+  in.own_age_ms = MIN_AGE + 1;
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, GROUP_WAIT) == ANCHOR_HOLD_NONE);
+  in.own_age_ms = 60000;
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, SIBLING_WAIT) == ANCHOR_HOLD_NONE);
+  case_end();
+}
+
+static void
+h_sibling_starting_holds_to_cap(void)
+{
+  struct airplay_anchor_hold_in in = hold_in(MIN_AGE);
+
+  case_begin("h_sibling_starting_holds_to_cap");
+  in.sibling_starting = true;
+
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, GROUP_WAIT) == ANCHOR_HOLD_SIBLING);
+  in.own_age_ms = MIN_AGE + SIBLING_WAIT;
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, GROUP_WAIT) == ANCHOR_HOLD_SIBLING);
+  in.own_age_ms = MIN_AGE + GROUP_WAIT - 1;
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, GROUP_WAIT) == ANCHOR_HOLD_SIBLING);
+
+  // Released at the cap, and not before it is reached
+  in.own_age_ms = MIN_AGE + GROUP_WAIT;
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, GROUP_WAIT) == ANCHOR_HOLD_NONE);
+  in.own_age_ms = MIN_AGE + GROUP_WAIT + 1000;
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, GROUP_WAIT) == ANCHOR_HOLD_NONE);
+  case_end();
+}
+
+static void
+h_young_sibling_holds_to_sibling_wait(void)
+{
+  struct airplay_anchor_hold_in in = hold_in(MIN_AGE);
+
+  case_begin("h_young_sibling_holds_to_sibling_wait");
+  in.sibling_young = true;
+
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, SIBLING_WAIT) == ANCHOR_HOLD_SIBLING);
+  in.own_age_ms = MIN_AGE + SIBLING_WAIT - 1;
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, SIBLING_WAIT) == ANCHOR_HOLD_SIBLING);
+  in.own_age_ms = MIN_AGE + SIBLING_WAIT;
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, SIBLING_WAIT) == ANCHOR_HOLD_NONE);
+
+  // The longer wait of a group's first start holds a young sibling as well
+  in.own_age_ms = MIN_AGE + SIBLING_WAIT;
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, GROUP_WAIT) == ANCHOR_HOLD_SIBLING);
+  in.own_age_ms = MIN_AGE + GROUP_WAIT;
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, GROUP_WAIT) == ANCHOR_HOLD_NONE);
+  case_end();
+}
+
+static void
+h_no_sibling_waiting_releases(void)
+{
+  struct airplay_anchor_hold_in in = hold_in(MIN_AGE);
+
+  case_begin("h_no_sibling_waiting_releases");
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, SIBLING_WAIT) == ANCHOR_HOLD_NONE);
+  in.own_age_ms = MIN_AGE + 100;
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, GROUP_WAIT) == ANCHOR_HOLD_NONE);
+  case_end();
+}
+
+static void
+h_suppressed_never_waits_for_sibling(void)
+{
+  struct airplay_anchor_hold_in in = hold_in(MIN_AGE);
+
+  case_begin("h_suppressed_never_waits_for_sibling");
+  in.suppressed = true;
+  in.sibling_starting = true;
+  in.sibling_young = true;
+
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, GROUP_WAIT) == ANCHOR_HOLD_NONE);
+  in.own_age_ms = MIN_AGE + 100;
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, SIBLING_WAIT) == ANCHOR_HOLD_NONE);
+  case_end();
+}
+
+static void
+h_unknown_peer_released(void)
+{
+  struct airplay_anchor_hold_in in = hold_in(0);
+
+  case_begin("h_unknown_peer_released");
+  in.peer_known = false;
+  in.sibling_starting = true;
+  in.sibling_young = true;
+
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, GROUP_WAIT) == ANCHOR_HOLD_NONE);
+  in.own_age_ms = MIN_AGE + 100;
+  CHECK(airplay_anchor_start_hold(&in, MIN_AGE, SIBLING_WAIT) == ANCHOR_HOLD_NONE);
+  case_end();
+}
+
+
 /* ---------------------------- Scripted sequences --------------------------- */
 
 #define SIM_SESSIONS 4
@@ -903,6 +1045,14 @@ main(int argc, char **argv)
   p_within_hold_other_states();
   p_within_hold_wrap();
   p_names();
+
+  h_own_age_holds();
+  h_solo_released_past_min_age();
+  h_sibling_starting_holds_to_cap();
+  h_young_sibling_holds_to_sibling_wait();
+  h_no_sibling_waiting_releases();
+  h_suppressed_never_waits_for_sibling();
+  h_unknown_peer_released();
 
   s_cold_start_both_accept();
   s_rejection_while_sibling_in_flight_keeps_line();

@@ -160,6 +160,21 @@ airplay_anchor_transition(enum airplay_anchor_state from, enum airplay_anchor_ev
     }
 }
 
+enum airplay_anchor_hold_reason
+airplay_anchor_start_hold(const struct airplay_anchor_hold_in *in, uint64_t min_age_ms, uint64_t wait_ms)
+{
+  if (!in->peer_known)
+    return ANCHOR_HOLD_NONE;
+
+  if (in->own_age_ms < min_age_ms)
+    return ANCHOR_HOLD_OWN_AGE;
+
+  if (in->suppressed || in->own_age_ms >= min_age_ms + wait_ms)
+    return ANCHOR_HOLD_NONE;
+
+  return (in->sibling_starting || in->sibling_young) ? ANCHOR_HOLD_SIBLING : ANCHOR_HOLD_NONE;
+}
+
 bool
 airplay_anchor_holds_line(enum airplay_anchor_state state)
 {
