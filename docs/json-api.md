@@ -42,13 +42,13 @@ endpoint can return are listed in its section.
 
 | Code | Meaning |
 | ---- | ------- |
-| 400 | Invalid or missing request body, bad value, unknown output id, or unknown path. Enabling an output that could not be started has the body `{"error": "pin_required"}` or `{"error": "start_failed"}` |
+| 400 | Invalid or missing request body, bad value, unknown output id, or unknown path |
 | 401 | Credentials needed (see above) |
 | 403 | Address not trusted and no `admin_password` set |
 | 404 | Unknown setting |
 | 409 | An output's `include_tv` option cannot be changed while it is selected (`{"error": "reselect_required"}`), or `include_tv: false` was sent for an Apple TV that does not lead a group of HomePods at the moment (`{"error": "group_not_present"}`) |
 | 500 | The server could not carry out the request |
-| 503 | A buffered output was refused because the encoder budget is used up |
+| 503 | Not sent by the output endpoints: a buffered output refused for want of encoder capacity is reported as its session state |
 
 ## Player
 
@@ -192,7 +192,7 @@ The state of what the row plays. For an output on its own that is its own connec
 | Key | Type | Value |
 | --- | ---- | ----- |
 | `state` | string | `"stopped"` (no connection), `"connecting"` (a start, a probe or a PIN pairing is under way), `"connected"` (connected, audio not flowing yet; a buffered AirPlay 2 speaker stays here until it has accepted its start time), `"streaming"`, `"stopping"` (a stop is waiting for the receiver to end its session), `"failed"`, or `"password"` (the device wants a PIN or password). `"startup"` is no longer sent |
-| `failure` | string | Why the state is `"failed"` or `"password"`; `"none"` in every other state. `"pin_required"` (the PIN start was sent, so the PIN is on the receiver's screen), `"pin_invalid"` (pair setup with the PIN given was refused), `"refused"` (the receiver answered no to something other than authentication, including a PIN start it refused outright), `"unreachable"` (no connection, or no answer before the receiver had answered anything), `"timeout"` (no answer after it had answered, or pair setup took too long), `"no_clock"` (buffered playback could not be started because the receiver never used our clock), `"capacity"` (the buffered-encode budget was used up). A PIN given with `pin` whose pair setup times out is `"password"` with `"timeout"`: the receiver never judged the PIN, the start is not repeated, and the next start shows a new PIN. Clients treat any other value as `"refused"` on a `"failed"` row and `"pin_required"` on a `"password"` row |
+| `failure` | string | Why the state is `"failed"` or `"password"`, or `"cancelled"` on a `"stopped"` row whose start was ended by a disable; `"none"` otherwise. `"pin_required"` (the PIN start was sent, so the PIN is on the receiver's screen), `"pin_invalid"` (pair setup with the PIN given was refused), `"refused"` (the receiver answered no to something other than authentication, including a PIN start it refused outright), `"unreachable"` (no connection, or no answer before the receiver had answered anything), `"timeout"` (no answer after it had answered, or pair setup took too long), `"no_clock"` (buffered playback could not be started because the receiver never used our clock), `"capacity"` (the buffered-encode budget was used up), `"cancelled"` (a start ended because the output was disabled while it connected), `"lost"` (an established session failed with nothing in flight; the output is not deselected, and is started again later if the speaker is one that is brought back). A PIN given with `pin` whose pair setup times out is `"password"` with `"timeout"`: the receiver never judged the PIN, the start is not repeated, and the next start shows a new PIN. Clients treat any other value as `"refused"` on a `"failed"` row and `"pin_required"` on a `"password"` row |
 | `held` | boolean | `true` while the output is held with `hold` (see [Update an output](#update-an-output)): it paused itself and is paused in place (a buffered AirPlay 2 session) or sent 0 (any other). For a group it is `true` when every speaker of the group that has a session is held. Cleared when the hold ends or the session ends |
 | `holdable` | boolean | `true` if `hold` would be accepted now: the output, or a speaker of its group that plays audio, has a connected or streaming AirPlay 2 or AirPlay 1 session that is not being stopped |
 
@@ -327,7 +327,7 @@ All fields are optional. Any combination may be supplied in one request.
 | `selected` | boolean | Enable or disable the output |
 | `include_tv` | boolean | With `selected: true` on an Apple TV that leads a group of HomePods: `true` plays on the Apple TV and the HomePods (the default behaviour), `false` plays on the HomePods only and gives the Apple TV no session. Ignored for any other output, except that `false` is refused with `409` (see below) unless the output's `has_homepods` is `true`. When absent the option is left as it was |
 | `volume` | integer | Set output volume, from `0` to `100`. Sent with `selected: true` it is also the level the speakers start at: it is set on the output, and on every other member of its group (a stereo pair, or the HomePods behind an Apple TV), before they are started, and is not limited by the volume of speakers already playing. `0` starts them silent. Without `selected: true` it sets the level of the output |
-| `pin` | string | Submit a PIN for authorization |
+| `pin` | string | Submit a PIN for authorization, at most 15 characters. With `selected: true` in the same request the PIN and the start it unlocks are one request (see below) |
 | `format` | string | Set the output audio format |
 | `offset_ms` | integer | Set timing offset in milliseconds, from `-2000` to `2000` |
 | `mode` | string | Set the protocol mode preference: `"auto"`, `"raop"`, `"airplay2"`, `"airplay2_buffered"`, `"airplay2_buffered_24"`, `"airplay2_surround_stereo"`, or `"airplay2_surround_upmix"` |
@@ -335,9 +335,20 @@ All fields are optional. Any combination may be supplied in one request.
 | `muted` | boolean | `true` mutes the output, `false` ends the mute. See below |
 
 Fields are applied in this order: `offset_ms`, `mode` (unless the request has
-`selected: false`), `muted`, `selected` (with `include_tv`), `mode` (when the
-request has `selected: false`), `volume`, `hold`, `pin`, `format`. If one fails,
-the ones before it have already taken effect.
+`selected: false`), `muted`, `pin` together with `selected: true`, `selected`
+(with `include_tv` and the start `volume`), `mode` (when the request has
+`selected: false`), `volume`, `hold`, `pin` alone, `format`. If one fails, the
+ones before it have already taken effect.
+
+`pin` with `selected: true` is one request: the output is paired with the PIN
+and, once paired, started with its group as an enable with the same
+`include_tv` and `volume` would start it, `volume` being the level it starts
+at; `selected`, `volume` and `pin` are not applied again. If the receiver
+refuses the PIN the start is made anyway, which puts a new PIN on its screen.
+A pairing that times out starts nothing, since the PIN on screen may be the one
+being typed; the next enable shows a new PIN. Disabling the output during the
+pairing takes the start away. A PIN that arrives while the output has a
+session, or while a start or stop is in flight, is not used.
 
 A buffered AirPlay 2 receiver (an Apple TV, a HomePod) pauses itself when its
 own pause is pressed, and its own play does not restart it. It keeps reading
@@ -371,34 +382,46 @@ with every enable.
 
 **Response**
 
-Returns HTTP `204 No Content` on success.
+Returns HTTP `204 No Content` when every field was accepted. It means the work
+is in flight or done, not that it succeeded: no speaker write waits for the
+speaker. The request answers within one turn of the player (in practice well
+under 200 ms), and what then becomes of each speaker is its `session.state` and
+`session.failure`, sent as an `output_state` event on the [event
+channel](event-channel.md) and read with `GET /api/outputs`. A failure event can
+arrive before the `204`. An enable of an output that is already connecting or
+connected is accepted and changes nothing. `GET /api/config` lists
+`async_outputs` in `api_features` for this behaviour.
 
-Enabling an output waits until the speaker has started or the start has
-failed, and other requests to the player (including `GET /api/outputs`) wait
-behind it. The start makes one attempt: the connection and each request up to
+An enable starts the output: `"connecting"`, then `"connected"` and
+`"streaming"`, or `"failed"` with a reason and the output deselected, or
+`"password"` with `pin_pending` (the PIN is on the receiver's screen). With no
+playback it is only probed, and reads `"stopped"` and selected once the probe
+is done. The start makes one attempt: the connection and each request up to
 setting up the stream give up after 4 seconds, and a request after that after
-15. A speaker that is off or refuses the connection is answered at once, and
-one that does not answer within about 4 seconds. A speaker that answers part of
-the way and then stalls can take up to about 30 seconds. A client should treat
-a timeout during a start as "pending" and check again, not as the daemon being
-down.
+15, so a start that is accepted ends within about 37 seconds at worst.
 
-Disabling a connected or streaming AirPlay 2 output ends its session on the
-receiver with `TEARDOWN` and answers once the receiver has replied, or after
-1.5 seconds without a reply. An AirPlay 1 output is given about 2 seconds,
-longer only when a request it was already sent has its own timer running.
+A disable of a connected or streaming output reads `"stopping"` at once and
+`"stopped"` when the receiver has ended its session: an AirPlay 2 output is
+sent `TEARDOWN` and stops once the receiver has replied, or after 1.5 seconds
+without a reply; an AirPlay 1 output is given about 2 seconds when nothing else
+was in flight on it, otherwise the timeout of the request already sent. A
+disable while the output is connecting reads `"stopping"` at once; the start
+runs on and the output is stopped once it has a session, or reads `"stopped"`
+with `"cancelled"` when the start left none (a start still waiting to pair, or
+between two attempts, is ended there). An enable while the output is stopping
+starts it once the stop has ended. A mode change that moves the output to the
+other protocol while it plays is a stop and a start on the new protocol.
+
+The playback commands that flush the speakers (stop, pause and the pipe's
+flush) still wait for the speakers they flushed, at most 4 seconds.
 
 Returns HTTP `400 Bad Request` if the id is not a number, the body is missing
 or not valid JSON, no output has that id, `volume` or `offset_ms` is out of
 range (an enable with `volume` out of range starts nothing), the output could
-not be disabled or given the format, the PIN was not accepted, or `mode` is
-not one of the names listed above.
-
-An enable that is refused answers `400` with a JSON body naming the reason:
-`{"error": "pin_required"}` when the device asked for a PIN or password (send
-it with `pin`), and `{"error": "start_failed"}` for any other refusal, including an enable of an id
-that no output has. The
-status is the same for both, so a client that ignores the body is unaffected.
+not be given the format, `pin` is longer than 15 characters, or `mode` is not
+one of the names listed above. The bodies `{"error": "pin_required"}` and
+`{"error": "start_failed"}` are no longer sent: a PIN asked for and a failed
+start are the output's state.
 
 The `include_tv` option is fixed for as long as the output is selected. A
 request that would change it while the output is selected gets HTTP `409
@@ -407,8 +430,8 @@ disable the output, then enable it with the other option. Repeating the option
 it already has is accepted. When the group is enabled without the Apple TV,
 the HomePods are started, kept in sync, given their volume and metadata, and
 restarted if one drops out exactly as a stereo pair is; the Apple TV shows
-nothing. The returned status is that of the HomePods, so `400` means none of
-them could be started. Disabling the output stops every speaker in the group.
+nothing. The row's state is that of the HomePods. Disabling the output stops
+every speaker in the group.
 If `include_tv: false` is sent for an Apple TV that does not lead a group of
 HomePods at the moment, because its HomePods have not been discovered yet or
 have been away for longer than the grace period, the request gets HTTP `409
@@ -426,12 +449,12 @@ report the option. `PUT /api/outputs/set` does not take the
 option and uses whatever was last set.
 
 Enabling (`"selected":true`) a buffered AirPlay 2 output (`airplay2_buffered`,
-`airplay2_buffered_24`, or one of the surround modes) can fail with HTTP `503
-Service Unavailable` and body `{"error": "encoder_capacity"}` if admitting it
-would exceed the buffered-encode capacity budget (see
-`buffered_encoder_budget` in [configuration.md](configuration.md)). Other
-outputs are unaffected; retry once capacity frees up (another buffered output
-stops).
+`airplay2_buffered_24`, or one of the surround modes) ends `"failed"` with
+`"capacity"` if admitting it would exceed the buffered-encode capacity budget
+(see `buffered_encoder_budget` in [configuration.md](configuration.md)); the
+request itself answers `204`, and HTTP `503` with `{"error":
+"encoder_capacity"}` is no longer sent. Other outputs are unaffected; retry
+once capacity frees up (another buffered output stops).
 
 **Example**
 
@@ -458,7 +481,9 @@ Content-Type: application/json
 
 **Response**
 
-Returns HTTP `204 No Content` on success, or HTTP `400 Bad Request` if the body
+Returns HTTP `204 No Content` within one turn of the player, without waiting
+for any speaker (each reports its outcome as its state, as for [Update an
+output](#update-an-output)), or HTTP `400 Bad Request` if the body
 is missing, has no `outputs` array, or contains an id that is not a number.
 
 **Example**
@@ -497,7 +522,7 @@ GET /api/config
 | `live_offset` | boolean | Always `true` in this build. It means an output's `offset_ms` can be changed during playback |
 | `event_channel` | integer | Version of the [event channel](event-channel.md) protocol, or `0` when the channel is off |
 | `event_socket` | string or null | Path of the event channel's socket, `null` when the channel is off |
-| `api_features` | array | Names of what this build's API does beyond the base. `"mute"`: [Update an output](#update-an-output) takes `muted` and each output row carries it. A client treats a missing list as empty; the order is not significant |
+| `api_features` | array | Names of what this build's API does beyond the base. `"mute"`: [Update an output](#update-an-output) takes `muted` and each output row carries it. `"async_outputs"`: speaker writes answer within one turn of the player without waiting for the speaker, and outcomes follow as the output's state. `"output_state"`: the [event channel](event-channel.md) sends every output transition as an `output_state` event. A client treats a missing list as empty; the order is not significant |
 
 **Example**
 
@@ -525,7 +550,7 @@ curl -X GET "http://localhost:3689/api/config"
   "live_offset": true,
   "event_channel": 1,
   "event_socket": "/run/owntone-mini/events.sock",
-  "api_features": ["mute"]
+  "api_features": ["mute", "async_outputs", "output_state"]
 }
 ```
 

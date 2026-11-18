@@ -30,9 +30,6 @@
   volume of speakers already playing, so the first volume a speaker is sent
   is the requested one, and `0` starts silent. The event channel's `hello`
   lists a `start_volume` capability for it
-- new: an enable that is refused answers `400` with `{"error":
-  "pin_required"}` when the device asked for a PIN or password, and `{"error":
-  "start_failed"}` for any other refusal
 - change: a session from the pipe plays as soon as the pipe is open. The
   selected speakers join as each one connects, so a speaker that is off no
   longer holds up playback, `GET /api/outputs` or other requests
@@ -178,6 +175,45 @@
 - change: when a speaker starts streaming, the level on the wire is compared
   with the level due and sent again if they differ, so a mute, an unmute or a
   level change made while it was starting is put right
+- fix: AirPlay 2 pair setup is computed on a thread of its own instead of
+  sharing the worker threads with API requests, so a start no longer waits
+  for its pairing behind requests held up by a speaker that does not answer.
+  A pairing with a PIN goes ahead of the others waiting
+- fix: the body of most AirPlay 2 requests (every start time, flush,
+  `TEARDOWN` and setup) was not freed once sent
+- change: speaker writes no longer wait for the speaker. Enabling,
+  disabling, `PUT /api/outputs/set`, a PIN, a mode change and every volume
+  command answer at once (within one turn of the player), and what becomes of
+  each speaker is its state, sent on the event channel and read from
+  `GET /api/outputs`. A disable while a speaker connects lets the start run on
+  and then stops it, or ends it where that is cheap (waiting to pair, between
+  two attempts); an enable while it stops starts it again afterwards. Nothing
+  automatic starts a speaker that waits for a PIN. `GET /api/config` lists the
+  api feature `async_outputs`. The `400` replies `pin_required` and
+  `start_failed` and the `503` reply `encoder_capacity` are no longer sent:
+  each is now the speaker's state and reason. Playback stop, pause and the
+  pipe's flush still wait for the speakers they flushed, at most 4 seconds
+- new: `session.state` reads `connecting` (in place of `startup`) and the new
+  `stopping`, and `session.failure` says why a start failed: `pin_required`,
+  `pin_invalid`, `refused`, `unreachable`, `timeout`, `no_clock`, `capacity`,
+  `cancelled` (disabled while it connected) or `lost` (an established session
+  failed). A buffered AirPlay 2 speaker reads `streaming` only once it has
+  accepted its start time
+- new: the event channel sends an `output_state` event for every transition
+  of an output, with the row's state, reason and flags as `GET /api/outputs`
+  gives them at that instant; the hello lists the capability `output_state`
+  and `GET /api/config` the api feature of the same name. Every message's
+  `seq` now counts every message written, so a gap means a lost message
+- new: `pin` with `selected: true` in `PUT /api/outputs/{id}` pairs the
+  speaker and then starts it, at the `volume` given, in one request; a PIN
+  the receiver refuses is followed by a new PIN on its screen, and a pairing
+  that times out starts nothing. A PIN longer than 15 characters is refused
+- change: a speaker whose session failed is brought back by a timer on the
+  player instead of a worker job, and not while it waits for a PIN
+- fix: a level answer that failed while nothing played could leave the
+  player reading paused with nothing to play
+- fix: a configuration reload that changed the pipe no longer makes the
+  player wait for the pipe thread
 
 ## Version 1.5.0 - 2026-10-14
 
