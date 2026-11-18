@@ -10,6 +10,7 @@
 #include <event2/buffer.h>
 #include "misc.h"
 #include "output_failure.h"
+#include "output_phase.h"
 
 /* Outputs is a generic interface between the player and a media output method,
  * like for instance AirPlay (raop) or ALSA. The purpose of the interface is to
@@ -180,6 +181,19 @@ struct output_device
   // Why the last report was OUTPUT_STATE_FAILED or OUTPUT_STATE_PASSWORD, see
   // output_failure.h; NONE after any other report. Written by the backends.
   enum output_failure_reason last_failure;
+
+  // What clients see and the operation in flight, see output_phase.h. Only
+  // outputs_device_phase_set() writes phase; op and op_gen are written where
+  // an operation begins and by the player's report handler
+  enum output_phase phase;
+  enum output_op op;
+  uint32_t op_gen;          // Bumped when an operation begins, stamped into its callback slot
+  uint64_t op_started_ms;   // For logs and the debug age check
+  unsigned stop_after_start:1;     // A deselect arrived while connecting; the start runs on, then stops
+  unsigned restart_after_stop:1;   // A select or a backend-changing mode switch arrived while stopping
+  unsigned upgrade_after_probe:1;  // A real start was asked for during a probe
+  unsigned then_select:1;          // An authorise to be followed by a start
+  int start_volume;                // The level that start begins at, -1 for none
 
   // Misc device flags
   unsigned selected:1;
