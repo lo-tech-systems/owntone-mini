@@ -631,6 +631,10 @@ struct airplay_session
   bool answered;
   bool pin_attempt;
 
+  // The start was ended because its device is no longer wanted: the keys
+  // are kept and it is not tried again
+  bool start_cancelled;
+
   // Set for a capability probe (GET /info only, session torn down right
   // after). Distinguishes a probe from a real activation in the shared
   // /info handler, which must not run buffered admission/ams selection for
@@ -5514,7 +5518,11 @@ start_failure(struct airplay_session *session)
   // them away is actively harmful: the device drops to requires_auth and the
   // user is sent chasing PIN prompts on a speaker that was never unpaired.
   // Only clear the keys when the failure could plausibly BE an auth failure.
-  if (device->auth_key && !session->protocol_error)
+  if (session->start_cancelled)
+    {
+      DPRINTF(E_INFO, L_AIRPLAY, "Keeping '%s' pairing keys: its start was cancelled\n", session->devname);
+    }
+  else if (device->auth_key && !session->protocol_error)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "Clearing '%s' pairing keys, you need to pair again\n", session->devname);
 
@@ -5581,6 +5589,15 @@ start_retry_timer_cb(int fd, short what, void *arg)
       goto out;
     }
 
+  // Deselected between the attempts: the start ends here
+  if (!device->selected)
+    {
+      DPRINTF(E_INFO, L_AIRPLAY, "Retry of '%s' dropped: it is no longer wanted\n", device->name);
+      device->last_failure = OUTPUT_FAILURE_CANCELLED;
+      outputs_cb(ctx->callback_id, ctx->device_id, OUTPUT_STATE_FAILED);
+      goto out;
+    }
+
   session = session_make(device, ctx->callback_id);
   if (!session)
     {
@@ -5639,6 +5656,13 @@ start_retry_impl(struct airplay_session *session, enum airplay_seq_type seq_type
 
   device = outputs_device_get(session->device_id);
   if (!device)
+    {
+      session_failure(session);
+      return;
+    }
+
+  // A start that is no longer wanted is not tried again, on any address
+  if (session->start_cancelled)
     {
       session_failure(session);
       return;
@@ -6972,6 +6996,7 @@ pair_jobs_dispatch(void)
 {
   struct airplay_pair_job *job;
   struct airplay_session *session;
+  struct output_device *device;
 
   while (!pair_job_current && (job = pair_job_queue_head))
     {
@@ -6985,6 +7010,22 @@ pair_jobs_dispatch(void)
       if (!session || !session->suspended_seq_ctx)
 	{
 	  pair_job_free(job);
+	  continue;
+	}
+
+      // A start whose device was deselected while it waited ends here, and
+      // the pairing thread is not spent on it. A PIN pairing is the user's
+      // and always goes ahead
+      device = outputs_device_get(session->device_id);
+      if (device && !device->selected && !session->pin_attempt)
+	{
+	  DPRINTF(E_INFO, L_AIRPLAY, "Start of '%s' cancelled while it waited to pair\n", session->devname);
+
+	  pair_job_free(job);
+	  session->start_cancelled = true;
+	  session_fail_reason(session, OUTPUT_FAILURE_CANCELLED);
+	  evtimer_del(session->pairev);
+	  sequence_resume(session, false); // May free the session, no use of it after this
 	  continue;
 	}
 
