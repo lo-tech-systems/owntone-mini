@@ -165,7 +165,7 @@
 //   ANCHOR_SIBLING_WAIT_MS           500      above the stagger between group
 //                                             members' pairing (one job at a
 //                                             time, so about one pairing
-//                                             computation plus a worker delay);
+//                                             computation plus the hand-off);
 //                                             if too short the second member
 //                                             is anchored about one join slack
 //                                             after the first
@@ -6512,8 +6512,8 @@ response_handler_pair_generic(int step, struct evrtsp_request *req, struct airpl
 
 /* ------------------- Pair setup computation off the player ---------------- */
 
-// The second pair-setup request is a heavy computation, so it is done by a
-// worker thread instead of the player thread. The job owns the pairing context
+// The second pair-setup request is a heavy computation, so it is done by the
+// pairing thread instead of the player thread. The job owns the pairing context
 // while it is away from the player thread, and carries the serial of the
 // session it belongs to, never the session itself, so a result for a session
 // that has since gone is simply discarded.
@@ -6525,26 +6525,27 @@ struct airplay_pair_job
   size_t body_len;
   const char *errmsg; // Points into sctx (static strings), valid while sctx lives
   uint64_t queued_ms; // Player thread, at enqueue
-  uint64_t started_ms; // Worker thread
-  uint64_t finished_ms; // Worker thread
+  uint64_t started_ms; // Pairing thread
+  uint64_t finished_ms; // Pairing thread
   struct airplay_pair_job *next;
 };
 
 // Queue wait above which the result is logged at the normal level
 #define AIRPLAY_PAIR_WAIT_WARN_MS 1000
 
-// Player thread only. Normally one job is with the worker pool at a time, so
-// pairing never takes more than one core from the audio threads. After a
-// watchdog timeout the abandoned job may still be running when the next one is
-// dispatched.
+// Player thread only. Normally one job is with the pairing thread at a time.
+// After a watchdog timeout the abandoned job may still be running when the
+// next one is dispatched, and the next one then waits for it on that thread. A
+// job asked for with a PIN is queued ahead of the others, since someone is
+// waiting for it.
 static struct airplay_pair_job *pair_job_queue_head;
 static struct airplay_pair_job *pair_job_queue_tail;
 static struct airplay_pair_job *pair_job_current;
 
-// Set in airplay_deinit(). The worker checks it and posts its result under the
-// lock, so no result is posted to the player event base once it is set. The
-// player thread takes the lock for that one assignment only and never waits
-// for a worker.
+// Set in airplay_deinit(). The pairing thread checks it and posts its result
+// under the lock, so no result is posted to the player event base once it is
+// set. The player thread takes the lock for that one assignment only and never
+// waits for the pairing thread.
 static pthread_mutex_t pair_job_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool pair_jobs_deinit;
 
@@ -6573,7 +6574,7 @@ session_find_by_serial(uint64_t serial)
 static void
 pair_job_done_cb(int fd, short what, void *arg);
 
-// *** Thread: worker ***
+// *** Thread: pairing ***
 // Touches nothing but the job it is given and the shutdown flag
 static void
 pair_job_run(void *arg)
@@ -6610,9 +6611,9 @@ pair_job_run(void *arg)
     DPRINTF(E_LOG, L_AIRPLAY, "Could not post the result of a pair setup computation\n");
 }
 
-// Hands the head of the queue to a worker if none is out. A job whose session
-// has gone, or no longer waits for it, is dropped here without costing a worker
-// anything.
+// Hands the head of the queue to the pairing thread if no job is out. A job
+// whose session has gone, or no longer waits for it, is dropped here without
+// costing the pairing thread anything.
 static void
 pair_jobs_dispatch(void)
 {
@@ -6635,11 +6636,11 @@ pair_jobs_dispatch(void)
 	}
 
       pair_job_current = job;
-      if (worker_execute(pair_job_run, &job, sizeof(job), 0) < 0) // Copies the pointer
+      if (worker_pairing_execute(pair_job_run, &job, sizeof(job)) < 0) // Copies the pointer
 	{
 	  // Never handed over, so the job and its context are still ours. Fail
 	  // this start and go on to the next job.
-	  DPRINTF(E_LOG, L_AIRPLAY, "Could not hand the pair setup computation for '%s' to a worker\n", session->devname);
+	  DPRINTF(E_LOG, L_AIRPLAY, "Could not hand the pair setup computation for '%s' to the pairing thread\n", session->devname);
 
 	  pair_job_current = NULL;
 	  pair_job_free(job);
@@ -6655,12 +6656,16 @@ pair_jobs_dispatch(void)
 // Takes the session's pairing context and queues the second pair-setup request
 // for computation. The session keeps nothing of the context until the
 // completion returns it. The job is handed out by pair_jobs_dispatch() once the
-// sequence is parked.
+// sequence is parked. A PIN or password pairing goes to the head of the queue,
+// the others to the tail. The watchdog is armed here, so it counts the time
+// spent waiting in the queue as well as the computation.
 static int
 pair_job_enqueue(struct airplay_session *session)
 {
   struct airplay_pair_job *job;
+  struct airplay_pair_job *waiting;
   struct timeval tv = { AIRPLAY_PAIR_COMPUTE_TIMEOUT_SEC, 0 };
+  int nwaiting;
 
   if (!session->pair_setup_ctx)
     return -1;
@@ -6672,12 +6677,25 @@ pair_job_enqueue(struct airplay_session *session)
   session->pair_setup_ctx = NULL;
   job->queued_ms = monotonic_ms();
 
-  if (pair_job_queue_tail)
-    pair_job_queue_tail->next = job;
-  else
-    pair_job_queue_head = job;
+  if (session->pair_type == PAIR_CLIENT_HOMEKIT_NORMAL && pair_job_queue_head)
+    {
+      for (nwaiting = 0, waiting = pair_job_queue_head; waiting; waiting = waiting->next)
+	nwaiting++;
 
-  pair_job_queue_tail = job;
+      DPRINTF(E_INFO, L_AIRPLAY, "Pair setup for '%s' goes ahead of %d waiting: it was asked for with a PIN\n", session->devname, nwaiting);
+
+      job->next = pair_job_queue_head;
+      pair_job_queue_head = job;
+    }
+  else
+    {
+      if (pair_job_queue_tail)
+	pair_job_queue_tail->next = job;
+      else
+	pair_job_queue_head = job;
+
+      pair_job_queue_tail = job;
+    }
 
   evtimer_add(session->pairev, &tv);
 
@@ -6691,8 +6709,11 @@ pair_job_done_cb(int fd, short what, void *arg)
   struct airplay_pair_job *job = arg;
   struct airplay_session *session;
   unsigned int waited_ms;
+  bool abandoned;
 
-  if (pair_job_current == job)
+  // A job that is not the current one was given up by the watchdog
+  abandoned = (pair_job_current != job);
+  if (!abandoned)
     pair_job_current = NULL;
 
   if (pair_jobs_deinit)
@@ -6704,7 +6725,12 @@ pair_job_done_cb(int fd, short what, void *arg)
   session = session_find_by_serial(job->session_serial);
   if (!session || !session->suspended_seq_ctx)
     {
-      DPRINTF(E_DBG, L_AIRPLAY, "Discarding pair setup result, its session is gone\n");
+      // The pairing thread spent this long on it, which the next job may have
+      // waited for
+      if (abandoned)
+	DPRINTF(E_INFO, L_AIRPLAY, "Abandoned pair setup computation finished after %u ms\n", (unsigned int)(job->finished_ms - job->started_ms));
+      else
+	DPRINTF(E_DBG, L_AIRPLAY, "Discarding pair setup result, its session is gone\n");
       pair_job_free(job);
       pair_jobs_dispatch();
       return;
@@ -6727,7 +6753,7 @@ pair_job_done_cb(int fd, short what, void *arg)
     }
 
   waited_ms = (unsigned int)(job->started_ms - job->queued_ms);
-  DPRINTF((waited_ms > AIRPLAY_PAIR_WAIT_WARN_MS) ? E_LOG : E_INFO, L_AIRPLAY, "Pair setup for '%s' computed in %u ms off the player thread (waited %u ms for a worker)\n",
+  DPRINTF((waited_ms > AIRPLAY_PAIR_WAIT_WARN_MS) ? E_LOG : E_INFO, L_AIRPLAY, "Pair setup for '%s' computed in %u ms off the player thread (waited %u ms for the pairing thread)\n",
     session->devname, (unsigned int)(job->finished_ms - job->started_ms), waited_ms);
 
   session->pair_setup_body = job->body;
@@ -6752,8 +6778,8 @@ pair_job_timeout_cb(int fd, short what, void *arg)
 
   DPRINTF(E_LOG, L_AIRPLAY, "Pair setup for '%s' did not complete in %d s, giving up this attempt\n", session->devname, AIRPLAY_PAIR_COMPUTE_TIMEOUT_SEC);
 
-  // Release the pool slot if this session's job holds it. The job itself is
-  // left alone, the worker may still be using it, and its late result is
+  // Release the slot if this session's job holds it. The job itself is left
+  // alone, the pairing thread may still be using it, and its late result is
   // discarded by serial when it arrives.
   if (pair_job_current && pair_job_current->session_serial == session->serial)
     pair_job_current = NULL;
@@ -8803,9 +8829,10 @@ airplay_deinit(void)
   pair_job_queue_tail = NULL;
   pair_job_current = NULL;
 
-  // A computation already with a worker frees itself when it finishes, from
-  // now on, instead of posting its result to the player event base. A result
-  // posted before this is either run and discarded or dropped with the base.
+  // A computation already with the pairing thread frees itself when it
+  // finishes, from now on, instead of posting its result to the player event
+  // base. A result posted before this is either run and discarded or dropped
+  // with the base.
   pthread_mutex_lock(&pair_job_lock);
   pair_jobs_deinit = true;
   pthread_mutex_unlock(&pair_job_lock);

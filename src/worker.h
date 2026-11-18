@@ -22,6 +22,17 @@
 int
 worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay);
 
+/* Runs cb on the one pairing thread, after any job already queued there. The
+ * argument is copied as by worker_execute().
+ *
+ * @param cb the function to call from the pairing thread
+ * @param cb_arg arguments for callback
+ * @param arg_size size of the arguments given
+ * @return 0 if the work was handed to the thread, -1 if it was dropped
+ */
+int
+worker_pairing_execute(void (*cb)(void *), void *cb_arg, size_t arg_size);
+
 /* Can be called within a callback to get the worker thread's event base
  */
 struct event_base *

@@ -46,7 +46,14 @@
 
 #define THREADPOOL_NTHREADS 4
 
+// Pair setup computations have a pool of their own, so a start that needs one
+// never waits behind API requests or artwork on the general pool. One thread,
+// so pairing never takes more than one core from the audio threads.
+#define PAIRING_NTHREADS 1
+
 static struct evthr_pool *worker_threadpool;
+static struct evthr_pool *pairing_threadpool;
+static char pairing_thread_name[] = "pairing";
 static __thread struct evthr *worker_thr;
 
 
@@ -94,12 +101,13 @@ execute(struct evthr *thr, void *arg, void *shared)
   free(cmdarg);
 }
 
+// The pool's shared argument is the thread name, NULL for the general pool
 static void
 init_cb(struct evthr *thr, void *shared)
 {
   worker_thr = thr;
 
-  thread_setname("worker");
+  thread_setname(shared ? shared : "worker");
 
 #if defined(__linux__)
   // The pool carries work the audio threads must outrank (pairing
@@ -126,11 +134,15 @@ exit_cb(struct evthr *thr, void *shared)
 
 /* ---------------------------- Our worker API  --------------------------- */
 
-int
-worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay)
+static int
+execute_on(struct evthr_pool *pool, void (*cb)(void *), void *cb_arg, size_t arg_size, int delay)
 {
   struct worker_arg *cmdarg;
   void *argcpy;
+
+  // Not started, or already stopped
+  if (!pool)
+    return -1;
 
   cmdarg = calloc(1, sizeof(struct worker_arg));
   if (!cmdarg)
@@ -158,7 +170,7 @@ worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay)
   cmdarg->cb_arg = argcpy;
   cmdarg->delay = delay;
 
-  if (evthr_pool_defer(worker_threadpool, execute, cmdarg) != EVTHR_RES_OK)
+  if (evthr_pool_defer(pool, execute, cmdarg) != EVTHR_RES_OK)
     {
       free(argcpy);
       free(cmdarg);
@@ -166,6 +178,18 @@ worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay)
     }
 
   return 0;
+}
+
+int
+worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay)
+{
+  return execute_on(worker_threadpool, cb, cb_arg, arg_size, delay);
+}
+
+int
+worker_pairing_execute(void (*cb)(void *), void *cb_arg, size_t arg_size)
+{
+  return execute_on(pairing_threadpool, cb, cb_arg, arg_size, 0);
 }
 
 struct event_base *
@@ -193,6 +217,20 @@ worker_init(void)
       goto error;
     }
 
+  pairing_threadpool = evthr_pool_wexit_new(PAIRING_NTHREADS, init_cb, exit_cb, pairing_thread_name);
+  if (!pairing_threadpool)
+    {
+      DPRINTF(E_LOG, L_MAIN, "Could not create pairing thread pool\n");
+      goto error;
+    }
+
+  ret = evthr_pool_start(pairing_threadpool);
+  if (ret < 0)
+    {
+      DPRINTF(E_LOG, L_MAIN, "Could not spawn pairing thread\n");
+      goto error;
+    }
+
   return 0;
   
  error:
@@ -200,9 +238,21 @@ worker_init(void)
   return -1;
 }
 
+// Either pool may be NULL here, after a failed worker_init()
 void
 worker_deinit(void)
 {
-  evthr_pool_stop(worker_threadpool);
-  evthr_pool_free(worker_threadpool);
+  if (pairing_threadpool)
+    {
+      evthr_pool_stop(pairing_threadpool);
+      evthr_pool_free(pairing_threadpool);
+      pairing_threadpool = NULL;
+    }
+
+  if (worker_threadpool)
+    {
+      evthr_pool_stop(worker_threadpool);
+      evthr_pool_free(worker_threadpool);
+      worker_threadpool = NULL;
+    }
 }

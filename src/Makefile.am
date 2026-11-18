@@ -77,7 +77,7 @@ owntone_SOURCES = main.c \
 	ptpd.c ptpd.h \
 	outputs/plist_wrap.h
 
-TESTS = airplay_anchor_test airplay_remote_level_test evchan_proto_test tv_proxy_mode_test speakers_summary_test upnp_parse_test upnp_sub_test
+TESTS = airplay_anchor_test airplay_remote_level_test evchan_proto_test tv_proxy_mode_test speakers_summary_test upnp_parse_test upnp_sub_test worker_test
 # upnp_http_check is run by hand against tools/upnp_fake_renderer.py
 check_PROGRAMS = $(TESTS) upnp_http_check
 airplay_anchor_test_SOURCES = outputs/tests/airplay_anchor_test.c outputs/airplay_anchor.c outputs/airplay_anchor.h
@@ -89,6 +89,8 @@ tv_proxy_mode_test_SOURCES = outputs/tests/tv_proxy_mode_test.c outputs_group_fl
 speakers_summary_test_SOURCES = outputs/tests/speakers_summary_test.c speakers_summary.h
 upnp_parse_test_SOURCES = outputs/tests/upnp_parse_test.c upnp_parse.c upnp_parse.h
 upnp_sub_test_SOURCES = outputs/tests/upnp_sub_test.c upnp_sub.c upnp_sub.h
+worker_test_SOURCES = outputs/tests/worker_test.c worker.c worker.h evthr.c evthr.h
+worker_test_LDADD = $(OWNTONE_LIBS)
 upnp_http_check_SOURCES = outputs/tests/upnp_http_check.c upnp_http.c upnp_http.h upnp_parse.c upnp_parse.h upnp_sub.c upnp_sub.h
 upnp_http_check_LDADD = $(OWNTONE_LIBS)
 
