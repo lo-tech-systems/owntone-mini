@@ -46,6 +46,13 @@ struct player_speaker_info {
   bool busy;
   bool paused_by_device;
 
+  // Session state of this device and why its last start failed
+  enum output_device_state state;
+  enum output_failure_reason last_failure;
+
+  // True for an Apple TV that leads a group of HomePods which are present
+  bool has_homepods;
+
   bool has_video;
 };
 

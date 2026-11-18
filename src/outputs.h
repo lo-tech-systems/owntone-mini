@@ -541,6 +541,11 @@ outputs_device_is_tv_proxy_follower(struct output_device *device);
 bool
 outputs_device_is_tv_proxy_leader(struct output_device *device);
 
+// True when the device is the structural leader of a TV proxy group, whether or
+// not it currently behaves as one.
+bool
+outputs_device_leads_tv_proxy_group(struct output_device *device);
+
 // True once any follower of leader's TV proxy group has a session and is
 // actually streaming audio. Used to gate when the leader's own session may
 // start for real.

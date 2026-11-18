@@ -500,6 +500,38 @@ struct outputs_param
   int output_volume;
 };
 
+static const char *
+output_state_to_string(enum output_device_state state)
+{
+  switch (state)
+    {
+      case OUTPUT_STATE_STARTUP:
+        return "startup";
+      case OUTPUT_STATE_CONNECTED:
+        return "connected";
+      case OUTPUT_STATE_STREAMING:
+        return "streaming";
+      case OUTPUT_STATE_FAILED:
+        return "failed";
+      case OUTPUT_STATE_PASSWORD:
+        return "password";
+      default:
+        return "stopped";
+    }
+}
+
+static json_object *
+speaker_session_to_json(struct player_speaker_info *spk)
+{
+  json_object *session = json_object_new_object();
+
+  json_object_object_add(session, "state", json_object_new_string(output_state_to_string(spk->state)));
+  json_object_object_add(session, "failure",
+                         json_object_new_string(spk->last_failure == OUTPUT_FAILURE_CAPACITY ? "capacity" : "none"));
+
+  return session;
+}
+
 static json_object *
 speaker_to_json(struct player_speaker_info *spk)
 {
@@ -559,6 +591,8 @@ speaker_to_json(struct player_speaker_info *spk)
   json_object_object_add(output, "supported_formats", supported_formats);
   json_object_object_add(output, "mode", json_object_new_string(spk->mode));
   json_object_object_add(output, "supported_modes", supported_modes);
+  json_object_object_add(output, "session", speaker_session_to_json(spk));
+  json_object_object_add(output, "has_homepods", json_object_new_boolean(spk->has_homepods));
 
   return output;
 }

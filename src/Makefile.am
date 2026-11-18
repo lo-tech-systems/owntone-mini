@@ -71,6 +71,7 @@ owntone_SOURCES = main.c \
 	outputs/plist_wrap.h
 
 check_PROGRAMS = airplay_anchor_test
+TESTS = $(check_PROGRAMS)
 airplay_anchor_test_SOURCES = outputs/tests/airplay_anchor_test.c outputs/airplay_anchor.c outputs/airplay_anchor.h
 
 SUBDIRS = libairptp

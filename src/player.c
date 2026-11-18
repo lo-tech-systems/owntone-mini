@@ -2761,6 +2761,11 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
   spk->prevent_playback = device->prevent_playback;
   spk->busy = device->busy;
   spk->paused_by_device = device->paused_by_device;
+
+  spk->state = device->state;
+  spk->last_failure = device->last_failure;
+
+  spk->has_homepods = outputs_device_leads_tv_proxy_group(device);
 }
 
 static bool

@@ -716,6 +716,14 @@ outputs_device_is_tv_proxy_leader(struct output_device *device)
   return meta && meta->is_tv_proxy_group && meta->is_grouped && meta->is_group_leader;
 }
 
+bool
+outputs_device_leads_tv_proxy_group(struct output_device *device)
+{
+  struct output_device *meta = group_meta_device(device);
+
+  return meta && meta->is_tv_proxy_group && meta->is_grouped && meta->is_group_leader;
+}
+
 const char *
 outputs_device_display_name(struct output_device *device)
 {
