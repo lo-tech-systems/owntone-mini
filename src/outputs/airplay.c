@@ -8633,9 +8633,11 @@ hold_nowplaying_send(struct airplay_session *session, bool paused)
                  paused ? "POST /command (NowPlayingInfo update, hold)" : "POST /command (NowPlayingInfo update, hold end)");
 }
 
-// The kind of hold the session can take now: a buffered session in CONNECTED
-// or STREAMING is paused in place and sent no audio; anything else, and a
-// session that is stopping, cannot be held.
+// The kind of hold the session can take now, when it is CONNECTED or
+// STREAMING and not stopping: a buffered session is paused in place and sent
+// no audio; a real-time one is sent 0 while its audio keeps flowing, so it
+// stays in time. buffered_mode is final before CONNECTED, so a session's kind
+// cannot change during its hold. Anything else cannot be held.
 static enum output_hold_kind
 airplay_device_hold_kind(struct output_device *device)
 {
@@ -8645,7 +8647,7 @@ airplay_device_hold_kind(struct output_device *device)
       (session->state != AIRPLAY_STATE_CONNECTED && session->state != AIRPLAY_STATE_STREAMING))
     return OUTPUT_HOLD_NONE;
 
-  return session->buffered_mode ? OUTPUT_HOLD_STREAM : OUTPUT_HOLD_NONE;
+  return session->buffered_mode ? OUTPUT_HOLD_STREAM : OUTPUT_HOLD_MUTE;
 }
 
 // Holds or ends the hold of a buffered session whose receiver paused itself.
