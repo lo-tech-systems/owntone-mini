@@ -68,7 +68,7 @@
 #define EVCHAN_PWBUF_SIZE       4096
 
 // What this build can report. Grows as the kinds of message are implemented.
-#define EVCHAN_CAPS             (EVCHAN_CAP_CHANGED | EVCHAN_CAP_RECEIVER_COMMAND)
+#define EVCHAN_CAPS             (EVCHAN_CAP_CHANGED | EVCHAN_CAP_RECEIVER_COMMAND | EVCHAN_CAP_DEVICE_VOLUME)
 
 struct evchan_conn
 {

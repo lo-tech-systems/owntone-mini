@@ -2726,6 +2726,8 @@ playback_flush(void *arg, int *retval)
 static void
 device_to_speaker_info(struct player_speaker_info *spk, struct output_device *device, uint32_t index)
 {
+  struct output_device *row;
+
   memset(spk, 0, sizeof(struct player_speaker_info));
   spk->id = device->id;
   spk->index = index;
@@ -2763,6 +2765,11 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
 
   spk->state = device->state;
   spk->last_failure = device->last_failure;
+
+  row = outputs_device_row(device);
+  spk->row_id = row->id;
+  strncpy(spk->row_name, outputs_device_display_name(row), sizeof(spk->row_name));
+  spk->row_name[sizeof(spk->row_name) - 1] = '\0';
 
   spk->has_homepods = outputs_device_leads_tv_proxy_group(device);
 }

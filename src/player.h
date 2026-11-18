@@ -52,6 +52,12 @@ struct player_speaker_info {
   // True for an Apple TV that leads a group of HomePods which are present
   bool has_homepods;
 
+  // The output row that stands for this device in the outputs list: the device
+  // itself unless it is a hidden member of a group (a HomePod behind an Apple TV,
+  // the second speaker of a stereo pair), then the visible device of the group
+  uint64_t row_id;
+  char row_name[255];
+
   bool has_video;
 };
 

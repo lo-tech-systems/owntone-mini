@@ -44,6 +44,7 @@
 #include <inttypes.h>
 
 #include "httpd_internal.h"
+#include "evchan.h"
 #include "logger.h"
 #include "misc.h"
 #include "player.h"
@@ -84,6 +85,35 @@ clamp_pct(int value)
   return value < 0 ? 0 : (value > 100 ? 100 : value);
 }
 
+// Reports a volume the device set, after it has been applied. It is reported
+// under the output row that stands for the speaker (the speaker itself unless it
+// is a hidden member of a group), with the speaker's own id alongside. When the
+// speaker is not known the id from the request is used, and 0 stands for all
+// speakers. The report is dropped when no supervisor is listening, and posting
+// never waits.
+static void
+volume_report(const struct player_speaker_info *speaker, uint64_t id, const char *verb, const char *value)
+{
+  int ret;
+
+  if (speaker)
+    ret = evchan_event_device_volume(speaker->row_id, speaker->id, speaker->row_name, verb, value);
+  else
+    ret = evchan_event_device_volume(id, id, NULL, verb, value);
+
+  if (ret < 0)
+    DPRINTF(E_DBG, L_DACP, "Volume '%s' %s not reported, no event channel\n", verb, value);
+}
+
+static void
+volume_report_pct(const struct player_speaker_info *speaker, uint64_t id, const char *verb, int pct)
+{
+  char value[16];
+
+  snprintf(value, sizeof(value), "%d", pct);
+  volume_report(speaker, id, verb, value);
+}
+
 
 /* ------------------------------- SETPROPERTY -------------------------------- */
 
@@ -106,6 +136,8 @@ setproperty_devicevolume(struct setproperty_ctx *ctx, const char *key, const cha
   DPRINTF(E_INFO, L_DACP, "DACP: '%s' reports volume %s -> speaker '%s'\n", key, value, speaker.name);
 
   player_volume_setraw_speaker(speaker.id, value);
+
+  volume_report(&speaker, 0, key, value);
 }
 
 static void
@@ -113,6 +145,7 @@ setproperty_volume(struct setproperty_ctx *ctx, const char *key, const char *val
 {
   struct player_speaker_info speaker;
   const char *speaker_id_param;
+  const struct player_speaker_info *known = NULL;
   uint64_t speaker_id;
   int volume;
 
@@ -122,17 +155,24 @@ setproperty_volume(struct setproperty_ctx *ctx, const char *key, const char *val
   if (speaker_id_param && safe_atou64(speaker_id_param, &speaker_id) == 0)
     {
       if (player_speaker_get_byid(&speaker, speaker_id) == 0)
-	DPRINTF(E_INFO, L_DACP, "DACP: '%s' reports volume %s -> speaker '%s'\n", key, value, speaker.name);
+	{
+	  DPRINTF(E_INFO, L_DACP, "DACP: '%s' reports volume %s -> speaker '%s'\n", key, value, speaker.name);
+	  known = &speaker;
+	}
       else
 	DPRINTF(E_INFO, L_DACP, "DACP: '%s' reports volume %s -> speaker '%" PRIu64 "'\n", key, value, speaker_id);
 
       player_volume_setabs_speaker(speaker_id, volume);
+
+      volume_report_pct(known, speaker_id, key, volume);
       return;
     }
 
   DPRINTF(E_INFO, L_DACP, "DACP: '%s' reports volume %s -> speaker '%s'\n", key, value, "(all)");
 
   player_volume_set(volume);
+
+  volume_report_pct(NULL, 0, key, volume);
 }
 
 static void
@@ -189,6 +229,8 @@ dacp_reply_volumeup(struct httpd_request *hreq)
 
   player_volume_setabs_speaker(speaker.id, volume);
 
+  volume_report_pct(&speaker, 0, "volumeup", volume);
+
   httpd_send_reply(hreq, HTTP_NOCONTENT, "No Content", HTTPD_SEND_NO_GZIP);
   return 0;
 }
@@ -210,6 +252,8 @@ dacp_reply_volumedown(struct httpd_request *hreq)
   DPRINTF(E_INFO, L_DACP, "DACP: '%s' reports volume %d -> speaker '%s'\n", "volumedown", volume, speaker.name);
 
   player_volume_setabs_speaker(speaker.id, volume);
+
+  volume_report_pct(&speaker, 0, "volumedown", volume);
 
   httpd_send_reply(hreq, HTTP_NOCONTENT, "No Content", HTTPD_SEND_NO_GZIP);
   return 0;
