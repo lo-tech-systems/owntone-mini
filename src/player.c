@@ -1857,6 +1857,24 @@ device_volume_cb(struct output_device *device, enum output_device_state status)
   commands_exec_end(cmdbase, 0);
 }
 
+// Answer to the level a mute or a hold put on the wire (0, or the device's own
+// level when the silence ends). Not part of a command (see
+// device_volume_echo_cb()): a failure goes to the streaming callback, success
+// hands the device back to it.
+static void
+device_level_edge_cb(struct output_device *device, enum output_device_state status)
+{
+  if (!device || status == OUTPUT_STATE_FAILED || status == OUTPUT_STATE_STOPPED)
+    {
+      DPRINTF(E_INFO, L_PLAYER, "Level edge: send to '%s' ended with state %d\n", device ? device->name : "(gone)", status);
+      device_streaming_cb(device, status);
+      return;
+    }
+
+  DPRINTF(E_DBG, L_PLAYER, "Level edge: '%s' accepted %d\n", device->name, device->volume_sent);
+  outputs_device_cb_set(device, device_streaming_cb);
+}
+
 static void
 device_flush_cb(struct output_device *device, enum output_device_state status)
 {
@@ -3685,7 +3703,7 @@ speaker_hold_set(void *arg, int *retval)
   group_id = outputs_device_group_id(device);
   if (!group_id)
     {
-      if (outputs_device_hold_set(device, param->held) == 0)
+      if (outputs_device_hold_set(device, param->held, "by request", device_level_edge_cb) == 0)
 	accepted++;
     }
   else
@@ -3697,7 +3715,7 @@ speaker_hold_set(void *arg, int *retval)
 	  if (!cur_gid || strcmp(cur_gid, group_id) != 0 || !cur->session)
 	    continue;
 
-	  if (outputs_device_hold_set(cur, param->held) == 0)
+	  if (outputs_device_hold_set(cur, param->held, "by request", device_level_edge_cb) == 0)
 	    accepted++;
 	}
     }
@@ -4012,6 +4030,13 @@ volume_echo_send_one(struct output_device *device, const char *why)
       DPRINTF(E_INFO, L_PLAYER, "Volume echo: not sending %d to %s '%s' (%s): %s\n",
               device->volume, why, device->name, volume_echo_role(device),
               device->session ? "still starting" : "no session");
+      return;
+    }
+
+  if (outputs_device_silent(device))
+    {
+      DPRINTF(E_INFO, L_PLAYER, "Volume echo: not sending %d to %s '%s' (%s): silent, level kept\n",
+              device->volume, why, device->name, volume_echo_role(device));
       return;
     }
 

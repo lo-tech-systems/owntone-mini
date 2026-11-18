@@ -46,6 +46,7 @@
 #include "owntone_config.h"
 #include "memstats.h"
 #include "db.h"
+#include "level_rules.h"
 
 extern struct output_definition output_raop;
 extern struct output_definition output_airplay;
@@ -2639,11 +2640,43 @@ outputs_device_volume_register(struct output_device *device, int absvol, int rel
   vol_adjust();
 }
 
+bool
+outputs_device_silent(struct output_device *device)
+{
+  return device->hold_kind == OUTPUT_HOLD_MUTE;
+}
+
+int
+outputs_device_level_due(struct output_device *device)
+{
+  return level_to_send(outputs_device_silent(device), device->volume);
+}
+
+int
+outputs_device_level_to_send(struct output_device *device)
+{
+  int level;
+
+  level = outputs_device_level_due(device);
+
+  // Every level sent, including the start and resync ones, so the player can
+  // tell the device confirming it from the device setting a level itself
+  device->volume_sent = level;
+  device->volume_sent_ms = monotonic_ms();
+  device->volume_answered = false;
+
+  return level;
+}
+
+bool
+outputs_device_wire_stale(struct output_device *device)
+{
+  return level_wire_stale(outputs_device_silent(device), device->volume, device->volume_sent);
+}
+
 int
 outputs_device_volume_set(struct output_device *device, output_status_cb cb)
 {
-  int ret;
-
   if (outputs[device->type]->disabled || !outputs[device->type]->device_volume_set)
     return -1;
 
@@ -2655,15 +2688,53 @@ outputs_device_volume_set(struct output_device *device, output_status_cb cb)
   if (device->stop_pending)
     return 0;
 
-  ret = outputs[device->type]->device_volume_set(device, callback_add(device, cb));
-  if (ret > 0)
-    {
-      device->volume_sent = device->volume;
-      device->volume_sent_ms = monotonic_ms();
-      device->volume_answered = false;
-    }
+  // A silent device keeps the level; nothing is sent until the silence ends.
+  // Returning before callback_add() leaves the device's callback as it is
+  if (outputs_device_silent(device))
+    return 0;
 
-  return ret; // We don't change device state just because of a failed volume change
+  // The builder records the level it puts on the wire. We don't change device
+  // state just because of a failed volume change
+  return outputs[device->type]->device_volume_set(device, callback_add(device, cb));
+}
+
+// Puts on the wire the level that starts or ends a silence (0, or the device's
+// own level). 1 when sent (cb is called with the answer), 0 when nothing was
+// sent (no session yet, still starting, or stopping), -1 when the backend
+// cannot send levels. A session still starting is left alone: its start's
+// callback must not be replaced, and the start's own level row, or the re-send
+// when it starts streaming, carries the level due. A stopping session is left
+// alone too: its stop's callback must reach the stop's report.
+static int
+silence_edge_send(struct output_device *device, output_status_cb cb)
+{
+  int ret;
+
+  if (outputs[device->type]->disabled || !outputs[device->type]->device_volume_set)
+    return -1;
+
+  if (!device->session || device->state < OUTPUT_STATE_CONNECTED || device->stop_pending)
+    return 0;
+
+  // Both backends send to any connected session that is not being torn down,
+  // so with the tests above a backend does not decline here; without them,
+  // callback_add() would replace a starting session's callback before the
+  // backend declined
+  ret = outputs[device->type]->device_volume_set(device, callback_add(device, cb));
+
+  return (ret > 0) ? 1 : 0;
+}
+
+// The reason a silence edge was not sent, for the log
+static const char *
+silence_edge_unsent(struct output_device *device, int ret)
+{
+  if (ret < 0)
+    return "the backend cannot send levels";
+  if (!device->session)
+    return "no session";
+
+  return device->stop_pending ? "stopping" : "still starting";
 }
 
 int
@@ -2688,9 +2759,11 @@ outputs_device_hold_kind(struct output_device *device)
 }
 
 int
-outputs_device_hold_set(struct output_device *device, bool held)
+outputs_device_hold_set(struct output_device *device, bool held, const char *why, output_status_cb cb)
 {
   enum output_hold_kind kind;
+  bool was_silent;
+  int ret;
 
   if (!device->session)
     return -1;
@@ -2700,28 +2773,75 @@ outputs_device_hold_set(struct output_device *device, bool held)
       if (device->hold_kind != OUTPUT_HOLD_NONE)
 	return 0; // Already held
 
-      // The only kind this build can hold
       kind = outputs_device_hold_kind(device);
-      if (kind != OUTPUT_HOLD_STREAM)
+      if (kind == OUTPUT_HOLD_NONE)
 	return -1;
 
-      if (!outputs[device->type]->device_hold_set || outputs[device->type]->device_hold_set(device, true) != 0)
-	return -1;
+      if (kind == OUTPUT_HOLD_STREAM)
+	{
+	  if (!outputs[device->type]->device_hold_set || outputs[device->type]->device_hold_set(device, true) != 0)
+	    return -1;
 
-      hold_kind_set(device, OUTPUT_HOLD_STREAM);
+	  hold_kind_set(device, OUTPUT_HOLD_STREAM);
+	  return 0;
+	}
+
+      // Held by mute: the kind is set first, so the send carries 0
+      was_silent = outputs_device_silent(device);
+      hold_kind_set(device, OUTPUT_HOLD_MUTE);
+      if (was_silent)
+	{
+	  DPRINTF(E_INFO, L_PLAYER, "Holding '%s' by mute (already silent, level %d kept)\n", device->name, device->volume);
+	  return 0;
+	}
+
+      ret = silence_edge_send(device, cb);
+      if (ret != 1)
+	{
+	  // Not silent, so not held: refused as not holdable
+	  hold_kind_set(device, OUTPUT_HOLD_NONE);
+	  DPRINTF(E_INFO, L_PLAYER, "Not holding '%s' by mute: 0 could not be sent (%s)\n", device->name, silence_edge_unsent(device, ret));
+	  return -1;
+	}
+
+      DPRINTF(E_INFO, L_PLAYER, "Holding '%s' by mute: 0 sent, keeping %d\n", device->name, device->volume);
       return 0;
     }
 
   // Ending a hold that is not in place changes nothing, on any backend
-  if (device->hold_kind == OUTPUT_HOLD_NONE)
+  kind = device->hold_kind;
+  if (kind == OUTPUT_HOLD_NONE)
     return 0;
 
-  if (outputs[device->type]->device_hold_set(device, false) != 0)
-    return -1;
+  if (kind == OUTPUT_HOLD_STREAM)
+    {
+      if (!outputs[device->type]->device_hold_set || outputs[device->type]->device_hold_set(device, false) != 0)
+	return -1;
 
-  // At once, although a buffered session stays held until its flush is
-  // answered: the backend reads the device's hold then
+      // At once, although a buffered session stays held until its flush is
+      // answered: the backend reads the device's hold then
+      hold_kind_set(device, OUTPUT_HOLD_NONE);
+      DPRINTF(E_INFO, L_PLAYER, "Hold of '%s' ended (%s)\n", device->name, why);
+      return 0;
+    }
+
+  // Held by mute: the kind is cleared first, so the send carries the level
   hold_kind_set(device, OUTPUT_HOLD_NONE);
+  if (outputs_device_silent(device))
+    {
+      DPRINTF(E_INFO, L_PLAYER, "Hold of '%s' ended (%s): still muted, nothing sent\n", device->name, why);
+      return 0;
+    }
+
+  ret = silence_edge_send(device, cb);
+  if (ret == 1)
+    DPRINTF(E_INFO, L_PLAYER, "Hold of '%s' ended (%s): %d sent\n", device->name, why, device->volume);
+  else if (ret == 0)
+    DPRINTF(E_INFO, L_PLAYER, "Hold of '%s' ended (%s): nothing sent now (%s), %d follows when it streams\n",
+	    device->name, why, silence_edge_unsent(device, ret), device->volume);
+  else
+    DPRINTF(E_INFO, L_PLAYER, "Hold of '%s' ended (%s): nothing sent (%s)\n", device->name, why, silence_edge_unsent(device, ret));
+
   return 0;
 }
 

@@ -244,8 +244,6 @@ struct raop_session
 
   union net_sockaddr naddr;
 
-  int volume;
-
   // device->offset_ms in samples (user config for correction of static
   // amplifier or DSP delays)
   int offset_samples;
@@ -2256,7 +2254,6 @@ session_make(struct output_device *rd, int callback_id, bool only_probe)
   CHECK_NULL(L_RAOP, rs->deferredev = evtimer_new(evbase_player, deferredev_cb, rs));
 
   rs->devname = strdup(rd->name);
-  rs->volume = rd->volume;
   rs->offset_samples = rd->offset_ms * rd->quality.sample_rate / 1000;
 
   rs->state = RAOP_STATE_STOPPED;
@@ -2725,11 +2722,12 @@ raop_volume_to_pct(struct output_device *device, const char *volstr)
 }
 
 static int
-raop_set_volume_internal(struct raop_session *rs, int volume, evrtsp_req_cb cb)
+raop_set_volume_internal(struct raop_session *rs, evrtsp_req_cb cb)
 {
   struct output_device *device;
   struct evbuffer *evbuf;
   float raop_volume;
+  int level;
   int ret;
 
   device = outputs_device_get(rs->device_id);
@@ -2748,7 +2746,11 @@ raop_set_volume_internal(struct raop_session *rs, int volume, evrtsp_req_cb cb)
       return -1;
     }
 
-  raop_volume = raop_volume_from_pct(volume, device);
+  // The level due on the wire (0 while the device is silent, else its own
+  // level), recorded as sent when the request is built. A request that cannot
+  // be sent fails the session in raop_set_volume_one()
+  level = outputs_device_level_to_send(device);
+  raop_volume = raop_volume_from_pct(level, device);
 
   /* Don't let locales get in the way here */
   /* We use -%d and -(int)raop_volume so -0.3 won't become 0.3 */
@@ -2766,17 +2768,6 @@ raop_set_volume_internal(struct raop_session *rs, int volume, evrtsp_req_cb cb)
     DPRINTF(E_LOG, L_RAOP, "Could not send SET_PARAMETER request for volume to '%s'\n", rs->devname);
 
   evbuffer_free(evbuf);
-
-  rs->volume = volume;
-
-  // Every level sent, including the start and resend ones, so the player can
-  // tell the device confirming it from the device setting a level itself
-  if (ret >= 0)
-    {
-      device->volume_sent = volume;
-      device->volume_sent_ms = outputs_monotonic_ms();
-      device->volume_answered = false;
-    }
 
   return ret;
 }
@@ -2826,7 +2817,7 @@ raop_set_volume_one(struct output_device *device, int callback_id)
   if (!rs || !(rs->state & RAOP_STATE_F_CONNECTED) || rs->state == RAOP_STATE_TEARDOWN)
     return 0;
 
-  ret = raop_set_volume_internal(rs, device->volume, raop_cb_set_volume);
+  ret = raop_set_volume_internal(rs, raop_cb_set_volume);
   if (ret < 0)
     {
       session_failure(rs);
@@ -3594,7 +3585,6 @@ static void
 raop_cb_startup_record(struct evrtsp_request *req, void *arg)
 {
   struct raop_session *rs = arg;
-  struct output_device *device;
   const char *param;
   int ret;
 
@@ -3626,13 +3616,9 @@ raop_cb_startup_record(struct evrtsp_request *req, void *arg)
 
   rs->state = RAOP_STATE_RECORD;
 
-  /* Set initial volume */
-  // The level may have changed since the session captured it at creation,
-  // typically because a client sets the volume right after enabling the
-  // output while the handshake is still running, so always send the
-  // device's current level.
-  device = outputs_device_get(rs->device_id);
-  raop_set_volume_internal(rs, device ? device->volume : rs->volume, raop_cb_startup_volume);
+  // Initial level: the level due now, so a change made while the handshake ran
+  // is included
+  raop_set_volume_internal(rs, raop_cb_startup_volume);
 
   return;
 
@@ -4991,21 +4977,20 @@ raop_write(struct output_buffer *obuf)
       rs->state = RAOP_STATE_STREAMING;
       rs->streaming_reported = false;
 
-      // Catches a volume set that arrived while the session was still
-      // starting (the RECORD response handler captures device->volume when
-      // it sends the startup volume, but a client commonly sets the volume
-      // right after enabling the output, before the handshake completes,
-      // and raop_set_volume_one() drops that set because the session is
-      // not yet connected). Re-sent here, once audio starts flowing.
+      // A level change, a mute or an unmute made while the session was still
+      // starting was not sent (raop_set_volume_one() declines then); the wire
+      // is brought to the level due now, once audio starts flowing.
       device = outputs_device_get(rs->device_id);
-      if (device && device->volume != rs->volume)
+      if (device && outputs_device_wire_stale(device))
 	{
-	  DPRINTF(E_INFO, L_RAOP, "Volume of '%s' changed during session start (%d -> %d), re-sending\n",
-	          rs->devname, rs->volume, device->volume);
+	  DPRINTF(E_INFO, L_RAOP, "Level on the wire for '%s' is stale (sent %d, due %d), re-sending\n",
+	          rs->devname, device->volume_sent, outputs_device_level_due(device));
 
 	  // Don't use session_failure() on error here - this loop is
 	  // iterating over raop_sessions, and session_failure() frees rs.
-	  ret = raop_set_volume_internal(rs, device->volume, raop_cb_set_volume);
+	  // The level was recorded as sent when the request was built; if it
+	  // could not be sent the session carries on with the wire as it was
+	  ret = raop_set_volume_internal(rs, raop_cb_set_volume);
 	  if (ret < 0)
 	    DPRINTF(E_WARN, L_RAOP, "Could not re-send volume to '%s'\n", rs->devname);
 	}

@@ -541,6 +541,24 @@ outputs_buffer_free(struct output_buffer *buffer);
 bool
 outputs_buffer_has_quality(struct output_buffer *buffer, struct media_quality *quality);
 
+// The level to put on the wire for the device now (0 while it is silent, else
+// its own level), recorded as sent. The only place a level sent to a device is
+// decided: the payload builders call it as they build the request.
+int
+outputs_device_level_to_send(struct output_device *device);
+
+// The level due on the wire now; records nothing
+int
+outputs_device_level_due(struct output_device *device);
+
+// True when the level last put on the wire is not the level due now
+bool
+outputs_device_wire_stale(struct output_device *device);
+
+// True while 0 is due on the wire in place of the device's own level
+bool
+outputs_device_silent(struct output_device *device);
+
 /* ---------------------------- Called by player ---------------------------- */
 
 // Ownership of *add is transferred, so don't address after calling. Instead you
@@ -583,11 +601,13 @@ outputs_device_volume_set(struct output_device *device, output_status_cb cb);
 int
 outputs_device_offset_set(struct output_device *device);
 
-// Holds the session of a device that paused itself, or ends the hold (see
-// device_hold_set). Returns 0 on success, negative if the device has no
-// session or its session cannot be held.
+// Holds the session of a device that paused itself, or ends the hold: a
+// buffered session is sent no audio, any other is sent 0 and keeps its own
+// level. why says what ended it, for the log; cb is given the answer to a
+// level sent for the hold. 0 on success, negative if the device has no session
+// or it cannot be held.
 int
-outputs_device_hold_set(struct output_device *device, bool held);
+outputs_device_hold_set(struct output_device *device, bool held, const char *why, output_status_cb cb);
 
 // The kind of hold the device's session would take now (OUTPUT_HOLD_NONE when
 // it has no session, is stopping, or cannot be held)

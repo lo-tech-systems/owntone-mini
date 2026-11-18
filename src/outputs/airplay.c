@@ -643,6 +643,8 @@ struct airplay_session
 
   union net_sockaddr naddr;
 
+  // The level sent when the device has gone: the level due when the session
+  // was made, then the last level put on the wire. Nothing else reads it.
   int volume;
 
   // device->offset_ms in samples (user config for correction of static
@@ -1634,28 +1636,27 @@ session_streaming_report(struct airplay_session *session)
   session_status(session);
 }
 
-// Catches a volume set that arrived while the session was still starting
-// (session_make() captures device->volume at session creation, but a client
-// commonly sets the volume right after enabling the output, before the
-// handshake completes, and airplay_set_volume_one() drops that set because
-// the session is not yet connected). Called once per CONNECTED->STREAMING
-// transition, so any such change is re-sent as soon as audio starts
-// flowing. The sequence completes through session_status(), which hands any
-// registered player callback the current state, the same as the streaming
-// report does.
+// Re-sends the level when the wire does not carry the level due now: a level
+// change, a mute or an unmute made while the session was still starting is not
+// sent then (airplay_set_volume_one() drops it because the session is not yet
+// connected), and the start's own level row was built before it. Called once
+// per CONNECTED->STREAMING transition, so the wire is put right as soon as
+// audio starts flowing. The sequence completes through session_status(), which
+// hands any registered player callback the current state, the same as the
+// streaming report does.
 static void
 session_volume_resync(struct airplay_session *session)
 {
   struct output_device *device;
 
   device = outputs_device_get(session->device_id);
-  if (!device || device->volume == session->volume)
+  if (!device || !outputs_device_wire_stale(device))
     return;
 
-  DPRINTF(E_INFO, L_AIRPLAY, "Volume of '%s' changed during session start (%d -> %d), re-sending\n",
-          session->devname, session->volume, device->volume);
+  DPRINTF(E_INFO, L_AIRPLAY, "Level on the wire for '%s' is stale (sent %d, due %d), re-sending\n",
+          session->devname, device->volume_sent, outputs_device_level_due(device));
 
-  // payload_make_set_volume() refreshes session->volume itself
+  // payload_make_set_volume() decides the level and records it
   sequence_start(AIRPLAY_SEQ_SEND_VOLUME, session, NULL, "volume_resync");
 }
 
@@ -2558,7 +2559,9 @@ session_make(struct output_device *device, int callback_id)
   session->anchor_retries_left = AIRPLAY_BUFFERED_ANCHOR_RETRIES_MAX;
 
   session->devname = strdup(device->name);
-  session->volume = device->volume;
+  // So a session made for a silent device whose record goes before the start
+  // row is built still sends 0
+  session->volume = outputs_device_level_due(device);
   session->offset_samples = device->offset_ms * device->quality.sample_rate / 1000;
   session->offset_ms = device->offset_ms;
 
@@ -2997,7 +3000,7 @@ airplay_set_volume_one(struct output_device *device, int callback_id)
   if (!session || !(session->state & AIRPLAY_STATE_F_CONNECTED))
     return 0;
 
-  session->volume = device->volume;
+  // payload_make_set_volume() decides the level and records it
   session->callback_id = callback_id;
 
   sequence_start(AIRPLAY_SEQ_SEND_VOLUME, session, NULL, "set_volume_one");
@@ -4261,22 +4264,14 @@ payload_make_set_volume(struct evrtsp_request *req, struct airplay_session *sess
   char volstr[32];
   int ret;
 
-  // The level may have changed since the session captured it at creation,
-  // typically because a client sets the volume right after enabling the
-  // output while the handshake is still running, so always send the
-  // device's current level.
+  // The level due on the wire, recorded as sent: 0 while the device is silent,
+  // its own level otherwise. It may have changed since the session was made,
+  // typically because a client sets the volume right after enabling the output
+  // while the handshake is still running. With the device gone, the level last
+  // put on the wire is sent again and nothing is recorded.
   device = outputs_device_get(session->device_id);
   if (device)
-    session->volume = device->volume;
-
-  // Every level sent, including the start and resync ones, so the player can
-  // tell the device confirming it from the device setting a level itself
-  if (device)
-    {
-      device->volume_sent = session->volume;
-      device->volume_sent_ms = monotonic_ms();
-      device->volume_answered = false;
-    }
+    session->volume = outputs_device_level_to_send(device);
 
   raop_volume = airplay_volume_from_pct(session->volume, session->devname);
 
@@ -4284,7 +4279,10 @@ payload_make_set_volume(struct evrtsp_request *req, struct airplay_session *sess
   /* We use -%d and -(int)raop_volume so -0.3 won't become 0.3 */
   snprintf(volstr, sizeof(volstr), "-%d.%06d", -(int)raop_volume, -(int)(1000000.0 * (raop_volume - (int)raop_volume)));
 
-  DPRINTF(E_INFO, L_AIRPLAY, "Sending volume %s (%d) to '%s'\n", volstr, session->volume, session->devname);
+  if (device && session->volume != device->volume)
+    DPRINTF(E_INFO, L_AIRPLAY, "Sending volume %s (%d) to '%s' (silent, keeping %d)\n", volstr, session->volume, session->devname, device->volume);
+  else
+    DPRINTF(E_INFO, L_AIRPLAY, "Sending volume %s (%d) to '%s'\n", volstr, session->volume, session->devname);
 
   ret = evbuffer_add_printf(req->output_buffer, "volume: %s\r\n", volstr);
   if (ret < 0)
