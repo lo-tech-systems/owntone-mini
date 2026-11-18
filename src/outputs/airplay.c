@@ -550,8 +550,8 @@ struct airplay_session
 
   // Per-session MediaRemote (MRP) state, allocated in session_make() when
   // wanted_metadata carries AIRPLAY_MD_WANTS_NOWPLAYING, freed in
-  // session_free(). NULL for every receiver that isn't an Apple TV
-  // advertising MetadataFeatures_3 - all MRP send paths must guard on this.
+  // session_free(). NULL for every receiver that doesn't advertise
+  // MetadataFeatures_3 - all MRP send paths must guard on this.
   struct airplay_mrp *mrp;
 
   // Set for a speaker whose own transport buttons (for example Pause) should
@@ -2463,9 +2463,12 @@ session_make(struct output_device *device, int callback_id)
   session->supports_setpeersx = extra->supports_setpeersx;
 
   // MRP state is only needed for receivers the wanted_metadata gate above
-  // (feature bit 50 + devtype + config) actually turned on for.
+  // (feature bit 50 + config) actually turned on for.
   if (session->wanted_metadata & AIRPLAY_MD_WANTS_NOWPLAYING)
-    session->mrp = airplay_mrp_new();
+    {
+      session->mrp = airplay_mrp_new();
+      DPRINTF(E_INFO, L_AIRPLAY, "'%s' gets the now-playing channel (it advertises it)\n", session->devname);
+    }
 
   // Buffered AirPlay 2 opt-in, derived from the device's selected output
   // mode. wants_buffered_kind is what response_handler_info_generic() checks
@@ -7957,9 +7960,7 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
   if (keyval_get(&features_kv, "MetadataFeatures_2"))
     extra->wanted_metadata |= AIRPLAY_MD_WANTS_TEXT;
   // MetadataFeatures_3 (bit 50) advertises the MediaRemote bplist channel.
-  // Only wanted for Apple TV class receivers, and devtype isn't known yet at
-  // this point in the function, so just remember the advertisement here and
-  // apply the devtype gate once it is (below).
+  // Remember it here; it is applied below, after the device config is read.
   if (keyval_get(&features_kv, "MetadataFeatures_3"))
     wants_nowplaying_features = true;
   if (keyval_get(&features_kv, "Authentication_8"))
@@ -8010,11 +8011,11 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
   else if (*p == '\0')
     DPRINTF(E_WARN, L_AIRPLAY, "AirPlay device '%s': am has no value\n", name);
 
-  // The MediaRemote now-playing channel is only meaningful to Apple TV class
-  // receivers; gate the bit-50 advertisement on devtype (now known) and let
-  // the per-device config veto it, mirroring the ptp_disable idiom above.
-  if (wants_nowplaying_features && airplay_is_appletv_device(extra->devtype)
-      && !(devcfg && cfg_getbool(devcfg, "nowplaying_disable")))
+  // The MediaRemote now-playing channel goes to every receiver that
+  // advertises it (bit 50), whatever its model: a receiver with a screen
+  // shows itself paused without it. The per-device config can veto it,
+  // mirroring the ptp_disable idiom above.
+  if (wants_nowplaying_features && !(devcfg && cfg_getbool(devcfg, "nowplaying_disable")))
     extra->wanted_metadata |= AIRPLAY_MD_WANTS_NOWPLAYING;
 
   // On by default for every speaker but an Apple TV or HomePod, which send

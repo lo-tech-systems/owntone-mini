@@ -28,7 +28,7 @@ current artwork once and then sends it in the way each receiver supports.
   artwork support.
 - **AirPlay 2 receivers.** The same kind of `SET_PARAMETER` artwork request is
   used for receivers that advertise artwork support.
-- **Apple TV.** Receivers that support it also get a now-playing update over
+- **Apple TV, HomePod and others.** Receivers that advertise it also get a now-playing update over
   the AirPlay control channel, with the artwork attached. The artwork is sent
   in a second push shortly after the track change. See
   [Now Playing on Apple TV](audio-outputs/airplay.md#now-playing-on-apple-tv).

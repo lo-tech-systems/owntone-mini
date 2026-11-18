@@ -87,8 +87,10 @@ the "don't show screensaver when playing music" setting works as expected.
 Legacy AirPlay metadata alone is accepted but ignored by current tvOS versions,
 which is why this dedicated path exists.
 
-This is automatic for Apple TV receivers that advertise support (AirPlay
-feature bit 50), and does not run for any other receiver type. To turn it off
+This is automatic for every receiver that advertises support (AirPlay feature
+bit 50), whatever its model: Apple TVs, HomePods, a HomePod with a screen, and
+Macs acting as receivers. A receiver with a screen that does not get it shows
+the stream as paused. To turn it off
 for a specific device, set `"nowplaying_disable": true` for it in the JSON settings
 file:
 

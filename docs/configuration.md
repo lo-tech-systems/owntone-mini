@@ -247,7 +247,7 @@ have the right JSON type to be read, otherwise the default applies.
 | `airplay2_disable` | boolean | `false` | `true`, `false` | Do not use AirPlay 2 for this speaker. It can still be used over AirPlay 1. |
 | `raop_disable` | boolean | `false` | `true`, `false` | Do not use AirPlay 1 (RAOP) for this speaker. It can still be used over AirPlay 2. |
 | `ptp_disable` | boolean | `false` | `true`, `false` | Do not use PTP clock sync with this AirPlay 2 speaker, so it falls back to NTP timing. |
-| `nowplaying_disable` | boolean | `false` | `true`, `false` | Do not request the now-playing metadata channel from this Apple TV class receiver. |
+| `nowplaying_disable` | boolean | `false` | `true`, `false` | Do not use the now-playing metadata channel with this receiver, even though it advertises it. |
 | `remote_commands` | boolean | `true` | `true`, `false` | Lets an AirPlay 2 speaker report its own buttons (for example Pause) and volume control on the [event channel](event-channel.md). Such a speaker only sends them to a sender that describes itself the way an iPhone does, so its sessions are set up with an iPhone's sender description and the list of commands the sender accepts. Set `false` to stop that for one speaker. Has no effect on Apple TVs and HomePods, which report their buttons without it. Read when the speaker is discovered. |
 | `nickname` | string | Not set | Any string | Name to show for the speaker instead of the one it announces. The key in `airplay_devices` must still be the announced name. |
 | `password` | string | Not set | Any string | Password for a password-protected speaker. |

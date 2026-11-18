@@ -123,6 +123,10 @@
   same start, and from then on until the daemon restarts. Each start logs
   which was sent, and about 3 seconds after a receiver becomes our clock
   peer, how many delay requests it has sent us
+- change: the now-playing channel (track details and whether it is playing)
+  goes to every receiver that advertises it, not only to Apple TVs. A receiver
+  with a screen that is not an Apple TV showed the stream as paused.
+  `nowplaying_disable` still turns it off for a device
 
 ## Version 1.5.0 - 2026-10-14
 
