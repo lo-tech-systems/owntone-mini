@@ -2797,13 +2797,9 @@ device_stop(struct output_device *device, output_status_cb cb, bool force)
   if (!device->session)
     return 0; // Device is already stopped, nothing to do
 
-  // The stop already handed to the backend reports for the device
-  if (device->phase == OUTPUT_PHASE_STOPPING && !force)
-    {
-      DPRINTF(E_DBG, L_PLAYER, "'%s' is already stopping\n", device->name);
-      return 0;
-    }
-
+  // The phase may already read stopping: the player sets it before the stop
+  // a deselect waited for is begun. A stop handed to the backend is the
+  // operation in flight, seen above
   operation_begin(device, OUTPUT_OP_STOP);
 
   id = callback_add(device, cb, true, &fresh);
