@@ -268,7 +268,7 @@ jsonapi_reply_settings_option_get(struct httpd_request *hreq)
   else if (strcmp(entry->config_key, "airplay_setpeers") == 0)
     {
       // Not written to the file by default, so report the mode airplay.c uses
-      config_get_str_copy("airplay_setpeers", "all", value, sizeof(value));
+      config_get_str_copy("airplay_setpeers", "auto", value, sizeof(value));
       json_object_object_add(jreply, "value", json_object_new_string(value));
     }
   else
@@ -378,9 +378,9 @@ jsonapi_reply_settings_option_put(struct httpd_request *hreq)
         }
       else if (strcmp(entry->config_key, "airplay_setpeers") == 0)
         {
-          if (strcmp(value, "all") != 0 && strcmp(value, "apple") != 0 && strcmp(value, "off") != 0)
+          if (strcmp(value, "auto") != 0 && strcmp(value, "all") != 0 && strcmp(value, "off") != 0)
             {
-              snprintf(errmsg, sizeof(errmsg), "Invalid airplay_setpeers: must be 'all', 'apple' or 'off'");
+              snprintf(errmsg, sizeof(errmsg), "Invalid airplay_setpeers: must be 'auto', 'all' or 'off'");
               DPRINTF(E_LOG, L_WEB, "%s\n", errmsg);
               jparse_free(request);
               return jsonapi_reply_error(hreq, HTTP_BADREQUEST, errmsg);

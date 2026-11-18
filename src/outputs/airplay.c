@@ -433,8 +433,9 @@ struct airplay_extra
   bool igl;
   // The speaker's remote_commands setting, see session->remote_commands
   bool remote_commands;
-  // Made by Apple, from the advertisement, see airplay_txt_is_apple()
-  bool apple;
+  // Advertises SupportsSetPeersExtendedMessage (features bit 52), see
+  // setpeersx_wanted()
+  bool supports_setpeersx;
 };
 
 struct airplay_master_session
@@ -737,8 +738,8 @@ struct airplay_session
   // if it has not been
   uint64_t ptpd_peer_added_ms;
 
-  // Copy of extra->apple, for the airplay_setpeers setting
-  bool apple;
+  // Copy of extra->supports_setpeersx, for the airplay_setpeers setting
+  bool supports_setpeersx;
   // Set once the receiver has accepted SETPEERSX, so the bare SETPEERS that
   // follows it in the start sequence is skipped
   bool setpeersx_accepted;
@@ -2459,7 +2460,7 @@ session_make(struct output_device *device, int callback_id)
   session->supports_encryption = extra->supports_encryption;
   session->devtype = extra->devtype;
   session->remote_commands = extra->remote_commands;
-  session->apple = extra->apple;
+  session->supports_setpeersx = extra->supports_setpeersx;
 
   // MRP state is only needed for receivers the wanted_metadata gate above
   // (feature bit 50 + devtype + config) actually turned on for.
@@ -4732,11 +4733,12 @@ setpeersx_refused_set(uint64_t device_id)
 
 // Apple receivers on current firmware ignore our clock after a bare SETPEERS
 // and keep announcing their own; they take ours from SETPEERSX, the form
-// Apple's own senders use. The airplay_setpeers setting decides who gets it:
-// "all" (every receiver that uses PTP), "apple" (Apple receivers only) or
-// "off" (none). A receiver that has refused it is sent SETPEERS. Read on
-// every start, so a change applies to the next session. Sets *why to the
-// reason when SETPEERSX is not wanted.
+// Apple's own senders use. A receiver says whether it takes it with features
+// bit 52 (SupportsSetPeersExtendedMessage). The airplay_setpeers setting
+// decides who gets it: "auto" (receivers that advertise the bit), "all"
+// (every receiver that uses PTP) or "off" (none). A receiver that has refused
+// it is sent SETPEERS. Read on every start, so a change applies to the next
+// session. Sets *why to the reason when SETPEERSX is not wanted.
 static bool
 setpeersx_wanted(struct airplay_session *session, const char **why)
 {
@@ -4748,22 +4750,25 @@ setpeersx_wanted(struct airplay_session *session, const char **why)
       return false;
     }
 
-  config_get_str_copy("airplay_setpeers", "all", value, sizeof(value));
+  config_get_str_copy("airplay_setpeers", "auto", value, sizeof(value));
+
+  if (strcmp(value, "all") == 0)
+    return true;
 
   if (strcmp(value, "off") == 0)
     {
       *why = "airplay_setpeers is off";
       return false;
     }
-  else if (strcmp(value, "apple") == 0 && !session->apple)
+
+  if (strcmp(value, "auto") != 0)
+    DPRINTF(E_WARN, L_AIRPLAY, "Unknown airplay_setpeers '%s', using 'auto'\n", value);
+
+  if (!session->supports_setpeersx)
     {
-      *why = "airplay_setpeers is apple and this is not an Apple receiver";
+      *why = "it does not advertise SETPEERSX support";
       return false;
     }
-  else if (strcmp(value, "apple") == 0)
-    return true;
-  else if (strcmp(value, "all") != 0)
-    DPRINTF(E_WARN, L_AIRPLAY, "Unknown airplay_setpeers '%s', using 'all'\n", value);
 
   return true;
 }
@@ -7807,27 +7812,6 @@ airplay_seen_device_forget(uint64_t id, int family)
     }
 }
 
-// Whether a receiver is made by Apple, from its advertisement: a type we
-// recognise (AirPort Express, Apple TV, HomePod), a model of an Apple product
-// family ("Mac" also covers MacBook and Mac mini) or the manufacturer
-static bool
-airplay_txt_is_apple(enum airplay_devtype devtype, const char *model, const char *manufacturer)
-{
-  const char *apple_models[] = { "AudioAccessory", "HomeAccessory", "AppleTV", "Mac", "iMac" };
-  size_t i;
-
-  if (devtype != AIRPLAY_DEV_OTHER)
-    return true;
-
-  for (i = 0; model && i < ARRAY_SIZE(apple_models); i++)
-    {
-      if (strncmp(model, apple_models[i], strlen(apple_models[i])) == 0)
-	return true;
-    }
-
-  return (manufacturer && strstr(manufacturer, "Apple"));
-}
-
 static void
 airplay_device_cb(const char *name, const char *type, const char *domain, const char *hostname, int family, const char *address, int port, struct keyval *txt)
 {
@@ -7982,6 +7966,8 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
     extra->supports_auth_setup = 1;
   if (keyval_get(&features_kv, "SupportsPTP") && !(devcfg && cfg_getbool(devcfg, "ptp_disable")) && !airplay_ptp_is_disabled)
     extra->use_ptp = 1;
+  if (keyval_get(&features_kv, "SupportsSetPeersExtendedMessage"))
+    extra->supports_setpeersx = true;
 
   // Whether the device claims buffered-audio support in its mDNS advertisement.
   // This claim is not trusted for the routing decision (some receivers set it
@@ -8023,8 +8009,6 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
     extra->devtype = AIRPLAY_DEV_HOMEPOD;
   else if (*p == '\0')
     DPRINTF(E_WARN, L_AIRPLAY, "AirPlay device '%s': am has no value\n", name);
-
-  extra->apple = airplay_txt_is_apple(extra->devtype, p, keyval_get(txt, "manufacturer"));
 
   // The MediaRemote now-playing channel is only meaningful to Apple TV class
   // receivers; gate the bit-50 advertisement on devtype (now known) and let

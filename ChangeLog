@@ -113,11 +113,12 @@
   address instead, our clock came from an address the receiver had not been
   told about, and the receiver ignored it. A timing peer that cannot be
   added is logged with the reason
-- new: AirPlay 2 receivers that use PTP are told about our clock with
-  `SETPEERSX`, the form Apple's own senders use, instead of `SETPEERS`. Apple
-  receivers on current firmware ignore our clock after `SETPEERS` and keep
-  announcing their own. Setting `airplay_setpeers`: `all` (default, every
-  such receiver), `apple` (Apple receivers only) or `off` (always
+- new: AirPlay 2 receivers that use PTP and advertise support for it in
+  their AirPlay features are told about our clock with `SETPEERSX`, the form
+  Apple's own senders use, instead of `SETPEERS`. Apple receivers on current
+  firmware ignore our clock after `SETPEERS` and keep announcing their own.
+  Setting `airplay_setpeers`: `auto` (default, receivers that advertise
+  `SETPEERSX` support), `all` (every such receiver) or `off` (always
   `SETPEERS`). A receiver that refuses `SETPEERSX` is sent `SETPEERS` in the
   same start, and from then on until the daemon restarts. Each start logs
   which was sent, and about 3 seconds after a receiver becomes our clock
