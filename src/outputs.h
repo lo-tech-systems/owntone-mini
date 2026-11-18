@@ -109,6 +109,18 @@ enum output_failure_reason
   OUTPUT_FAILURE_CAPACITY = 1,
 };
 
+// How a session whose device paused itself is held
+enum output_hold_kind
+{
+  OUTPUT_HOLD_NONE = 0,
+  // A buffered session: paused in place with a rate 0 anchor and sent no
+  // audio; the hold ends with a flush and a new start time
+  OUTPUT_HOLD_STREAM,
+  // 0 on the wire while audio is still sent; the hold ends by sending the
+  // device's own level
+  OUTPUT_HOLD_MUTE,
+};
+
 // Whether the level a speaker sets itself (its knob, buttons or app) is
 // followed through a UPnP renderer on the same device
 enum output_volume_follow
@@ -262,8 +274,11 @@ struct output_device
   int offset_ms;
 
   // The device paused itself and its session is held (see
-  // outputs_device_hold_set). Lives as long as the session.
+  // outputs_device_hold_set), and how. held is always
+  // hold_kind != OUTPUT_HOLD_NONE: both are set only by hold_kind_set() in
+  // outputs.c. Both end with the session.
   bool held;
+  enum output_hold_kind hold_kind;
 
   // Address
   char *v4_address;
@@ -416,14 +431,17 @@ struct output_definition
   // cache a per-sync-packet offset need to implement this.
   int (*device_offset_set)(struct output_device *device);
 
-  // Hold a session whose device paused itself (no audio is sent to it), or end
-  // the hold, which restarts it at the live position. Synchronous: any wire
-  // requests run on their own. Optional: returns negative if the session
-  // cannot be held.
+  // Hold a buffered session whose device paused itself (it is paused in place
+  // and sent no audio), or end the hold, which restarts it at the live
+  // position. Synchronous: any wire requests run on their own. Called only for
+  // a session device_hold_kind gives OUTPUT_HOLD_STREAM.
   int (*device_hold_set)(struct output_device *device, bool held);
 
-  // Whether device_hold_set would accept the device's session now. Optional.
-  bool (*device_holdable)(struct output_device *device);
+  // The kind of hold the device's session would take now: OUTPUT_HOLD_STREAM
+  // (device_hold_set does it), OUTPUT_HOLD_MUTE (the level path does it) or
+  // OUTPUT_HOLD_NONE when it cannot be held. Optional: without it nothing is
+  // held.
+  enum output_hold_kind (*device_hold_kind)(struct output_device *device);
 
   // Request a change of quality from the device
   int (*device_quality_set)(struct output_device *device, struct media_quality *quality, int callback_id);
@@ -570,6 +588,11 @@ outputs_device_offset_set(struct output_device *device);
 // session or its session cannot be held.
 int
 outputs_device_hold_set(struct output_device *device, bool held);
+
+// The kind of hold the device's session would take now (OUTPUT_HOLD_NONE when
+// it has no session, is stopping, or cannot be held)
+enum output_hold_kind
+outputs_device_hold_kind(struct output_device *device);
 
 // Whether the device has a session that can be held
 bool

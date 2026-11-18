@@ -2194,6 +2194,14 @@ heap_trim_deferred_cb(void *arg)
   DPRINTF(E_DBG, L_PLAYER, "Trimmed heap after last session ended\n");
 }
 
+// The only writer of hold_kind and held, so held always says hold_kind != NONE
+static void
+hold_kind_set(struct output_device *device, enum output_hold_kind kind)
+{
+  device->hold_kind = kind;
+  device->held = (kind != OUTPUT_HOLD_NONE);
+}
+
 void
 outputs_device_session_remove(uint64_t device_id, void *session)
 {
@@ -2203,7 +2211,9 @@ outputs_device_session_remove(uint64_t device_id, void *session)
   if (device && device->session == session)
     {
       device->session = NULL;
-      device->held = false;
+      if (device->hold_kind != OUTPUT_HOLD_NONE)
+	DPRINTF(E_INFO, L_PLAYER, "Hold of '%s' ended with its session\n", device->name);
+      hold_kind_set(device, OUTPUT_HOLD_NONE);
       device->stop_pending = 0;
 
       // A backend switch that was asked for while the session ran is made now
@@ -2668,31 +2678,57 @@ outputs_device_offset_set(struct output_device *device)
   return outputs[device->type]->device_offset_set(device);
 }
 
+enum output_hold_kind
+outputs_device_hold_kind(struct output_device *device)
+{
+  if (outputs[device->type]->disabled || !outputs[device->type]->device_hold_kind || !device->session || device->stop_pending)
+    return OUTPUT_HOLD_NONE;
+
+  return outputs[device->type]->device_hold_kind(device);
+}
+
 int
 outputs_device_hold_set(struct output_device *device, bool held)
 {
-  int ret;
-
-  if (outputs[device->type]->disabled || !outputs[device->type]->device_hold_set)
-    return -1;
+  enum output_hold_kind kind;
 
   if (!device->session)
     return -1;
 
-  ret = outputs[device->type]->device_hold_set(device, held);
-  if (ret == 0)
-    device->held = held;
+  if (held)
+    {
+      if (device->hold_kind != OUTPUT_HOLD_NONE)
+	return 0; // Already held
 
-  return ret;
+      // The only kind this build can hold
+      kind = outputs_device_hold_kind(device);
+      if (kind != OUTPUT_HOLD_STREAM)
+	return -1;
+
+      if (!outputs[device->type]->device_hold_set || outputs[device->type]->device_hold_set(device, true) != 0)
+	return -1;
+
+      hold_kind_set(device, OUTPUT_HOLD_STREAM);
+      return 0;
+    }
+
+  // Ending a hold that is not in place changes nothing, on any backend
+  if (device->hold_kind == OUTPUT_HOLD_NONE)
+    return 0;
+
+  if (outputs[device->type]->device_hold_set(device, false) != 0)
+    return -1;
+
+  // At once, although a buffered session stays held until its flush is
+  // answered: the backend reads the device's hold then
+  hold_kind_set(device, OUTPUT_HOLD_NONE);
+  return 0;
 }
 
 bool
 outputs_device_holdable(struct output_device *device)
 {
-  if (outputs[device->type]->disabled || !outputs[device->type]->device_holdable || !device->session || device->stop_pending)
-    return false;
-
-  return outputs[device->type]->device_holdable(device);
+  return outputs_device_hold_kind(device) != OUTPUT_HOLD_NONE;
 }
 
 int

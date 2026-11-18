@@ -8635,29 +8635,34 @@ hold_nowplaying_send(struct airplay_session *session, bool paused)
                  paused ? "POST /command (NowPlayingInfo update, hold)" : "POST /command (NowPlayingInfo update, hold end)");
 }
 
+// The kind of hold the session can take now: a buffered session in CONNECTED
+// or STREAMING is paused in place and sent no audio; anything else, and a
+// session that is stopping, cannot be held.
+static enum output_hold_kind
+airplay_device_hold_kind(struct output_device *device)
+{
+  struct airplay_session *session = device->session;
+
+  if (!session || session->stopping ||
+      (session->state != AIRPLAY_STATE_CONNECTED && session->state != AIRPLAY_STATE_STREAMING))
+    return OUTPUT_HOLD_NONE;
+
+  return session->buffered_mode ? OUTPUT_HOLD_STREAM : OUTPUT_HOLD_NONE;
+}
+
 // Holds or ends the hold of a buffered session whose receiver paused itself.
 // While held it is sent no audio (see buffered_frame_send) and a connected
 // session is not promoted. Ending the hold of a streaming session flushes it
 // and re-anchors it (see response_handler_flush_resume); a connected one is
 // promoted by the next write. A TV proxy leader with its audio suppressed
 // carries no audio, so only its MediaRemote state changes. Returns 0, or -1
-// when the session cannot be held (not buffered, or not connected or
-// streaming, or stopping).
-static bool
-airplay_device_holdable(struct output_device *device)
-{
-  struct airplay_session *session = device->session;
-
-  return session && session->buffered_mode && !session->stopping &&
-         (session->state == AIRPLAY_STATE_CONNECTED || session->state == AIRPLAY_STATE_STREAMING);
-}
-
+// when the session cannot be held this way.
 static int
 airplay_device_hold_set(struct output_device *device, bool held)
 {
   struct airplay_session *session = device->session;
 
-  if (!airplay_device_holdable(device))
+  if (airplay_device_hold_kind(device) != OUTPUT_HOLD_STREAM)
     return -1;
 
   if (held)
@@ -9253,7 +9258,7 @@ struct output_definition output_airplay =
   .device_volume_set = airplay_set_volume_one,
   .device_offset_set = airplay_set_offset_one,
   .device_hold_set = airplay_device_hold_set,
-  .device_holdable = airplay_device_holdable,
+  .device_hold_kind = airplay_device_hold_kind,
   .device_volume_to_pct = airplay_volume_to_pct,
   .write = airplay_write,
   .metadata_prepare = airplay_metadata_prepare,
