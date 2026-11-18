@@ -193,6 +193,7 @@ The state of what the row plays. For an output on its own that is its own connec
 | `state` | string | `"stopped"` (no connection), `"startup"` (connecting), `"connected"` (connected, audio not flowing yet), `"streaming"`, `"failed"`, or `"password"` (the device wants a PIN or password) |
 | `failure` | string | Why the last start failed: `"capacity"` if the buffered-encode budget was used up, otherwise `"none"` |
 | `held` | boolean | `true` while the output is held with `hold` (see [Update an output](#update-an-output)): it paused itself and is sent no audio. For a group it is `true` when every speaker of the group that has a session is held. Cleared when the hold ends or the session ends |
+| `holdable` | boolean | `true` if `hold` would be accepted now: the output, or a speaker of its group that plays audio, has a connected or streaming buffered AirPlay 2 session |
 
 An output that is selected is not necessarily streaming: `selected` says what
 was asked for, `session.state` what the device is doing. When playback starts

@@ -2902,6 +2902,32 @@ speaker_group_held(struct output_device *device)
   return held > 0;
 }
 
+// Whether a hold of the row would be accepted: a member of its group that
+// carries audio has a session that can be held
+static bool
+speaker_group_holdable(struct output_device *device)
+{
+  struct output_device *cur;
+  const char *group_id;
+
+  group_id = outputs_device_group_id(device);
+  if (!group_id)
+    return outputs_device_holdable(device);
+
+  for (cur = outputs_list(); cur; cur = cur->next)
+    {
+      const char *cur_gid = outputs_device_group_id(cur);
+
+      if (!cur_gid || strcmp(cur_gid, group_id) != 0 || cur->tv_proxy_audio_suppress)
+	continue;
+
+      if (outputs_device_holdable(cur))
+	return true;
+    }
+
+  return false;
+}
+
 static void
 device_to_speaker_info(struct player_speaker_info *spk, struct output_device *device, uint32_t index)
 {
@@ -2945,6 +2971,7 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
   spk->state = device->state;
   spk->last_failure = device->last_failure;
   spk->held = speaker_group_held(device);
+  spk->holdable = speaker_group_holdable(device);
 
   row = outputs_device_row(device);
   spk->row_id = row->id;

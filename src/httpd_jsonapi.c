@@ -560,6 +560,7 @@ speaker_session_to_json(struct player_speaker_info *spk)
   json_object_object_add(session, "failure",
                          json_object_new_string(spk->last_failure == OUTPUT_FAILURE_CAPACITY ? "capacity" : "none"));
   json_object_object_add(session, "held", json_object_new_boolean(spk->held));
+  json_object_object_add(session, "holdable", json_object_new_boolean(spk->holdable));
 
   return session;
 }

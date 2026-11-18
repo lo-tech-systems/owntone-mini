@@ -400,6 +400,9 @@ struct output_definition
   // cannot be held.
   int (*device_hold_set)(struct output_device *device, bool held);
 
+  // Whether device_hold_set would accept the device's session now. Optional.
+  bool (*device_holdable)(struct output_device *device);
+
   // Request a change of quality from the device
   int (*device_quality_set)(struct output_device *device, struct media_quality *quality, int callback_id);
 
@@ -543,6 +546,10 @@ outputs_device_offset_set(struct output_device *device);
 // session or its session cannot be held.
 int
 outputs_device_hold_set(struct output_device *device, bool held);
+
+// Whether the device has a session that can be held
+bool
+outputs_device_holdable(struct output_device *device);
 
 int
 outputs_device_volume_to_pct(struct output_device *device, const char *value);

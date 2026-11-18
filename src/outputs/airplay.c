@@ -7880,13 +7880,21 @@ hold_nowplaying_send(struct airplay_session *session, bool paused)
 // carries no audio, so only its MediaRemote state changes. Returns 0, or -1
 // when the session cannot be held (not buffered, or not connected or
 // streaming).
+static bool
+airplay_device_holdable(struct output_device *device)
+{
+  struct airplay_session *session = device->session;
+
+  return session && session->buffered_mode &&
+         (session->state == AIRPLAY_STATE_CONNECTED || session->state == AIRPLAY_STATE_STREAMING);
+}
+
 static int
 airplay_device_hold_set(struct output_device *device, bool held)
 {
   struct airplay_session *session = device->session;
 
-  if (!session || !session->buffered_mode ||
-      (session->state != AIRPLAY_STATE_CONNECTED && session->state != AIRPLAY_STATE_STREAMING))
+  if (!airplay_device_holdable(device))
     return -1;
 
   if (held)
@@ -8463,6 +8471,7 @@ struct output_definition output_airplay =
   .device_volume_set = airplay_set_volume_one,
   .device_offset_set = airplay_set_offset_one,
   .device_hold_set = airplay_device_hold_set,
+  .device_holdable = airplay_device_holdable,
   .device_volume_to_pct = airplay_volume_to_pct,
   .write = airplay_write,
   .metadata_prepare = airplay_metadata_prepare,

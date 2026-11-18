@@ -2549,6 +2549,15 @@ outputs_device_hold_set(struct output_device *device, bool held)
   return ret;
 }
 
+bool
+outputs_device_holdable(struct output_device *device)
+{
+  if (outputs[device->type]->disabled || !outputs[device->type]->device_holdable || !device->session)
+    return false;
+
+  return outputs[device->type]->device_holdable(device);
+}
+
 int
 outputs_device_volume_to_pct(struct output_device *device, const char *volume)
 {
