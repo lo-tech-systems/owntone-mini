@@ -179,12 +179,6 @@ struct output_device
   // candidate_store() on re-advertisement. The housekeeping timer frees the
   // candidate once the grace period expires without a new advertisement.
   unsigned removal_candidate:1;
-  // Set when the device itself asked to stop (a receiver-side pause command,
-  // e.g. an Apple TV entering standby) and we deselected it in response;
-  // cleared whenever the device is selected again. Surfaced in the JSON
-  // outputs listing so a supervisor can tell an intentional zero-output
-  // state from a fault it should repair.
-  unsigned paused_by_device:1;
 
   // Credentials if relevant
   const char *password;
@@ -557,6 +551,10 @@ outputs_device_display_name(struct output_device *device);
 
 const char *
 outputs_device_group_id(struct output_device *device);
+
+// The device the outputs list shows for a device (see outputs.c). Player thread.
+struct output_device *
+outputs_device_row(struct output_device *device);
 
 uint32_t
 outputs_device_supported_modes(struct output_device *device);

@@ -40,29 +40,24 @@
 #include "owntone_config.h"
 #include "airplay_events.h"
 #include "commands.h"
+#include "evchan.h"
 #include "misc.h"
 #include "logger.h"
-#include "player.h"
 #include "pair_ap/pair.h"
 #include "plist_wrap.h"
 
 #define RTSP_VERSION "RTSP/1.0"
 
-enum airplay_events
-{
-  AIRPLAY_EVENT_UNKNOWN,
-  AIRPLAY_EVENT_PLAY,
-  AIRPLAY_EVENT_PAUSE,
-  AIRPLAY_EVENT_NEXT,
-  AIRPLAY_EVENT_PREV,
-};
-
 struct airplay_events_client
 {
   char *name;
   // The output device this event channel belongs to, so a command sent by
-  // the device (e.g. pause) can be applied to that output alone
+  // the device (e.g. pause) can be reported against that output alone
   uint64_t device_id;
+  // The output row this device is listed as, and its name: what a command is
+  // reported under (the same as the device unless it is a hidden group member)
+  uint64_t row_id;
+  char *row_name;
   int fd;
   struct event *listener;
   struct pair_cipher_context *cipher_ctx;
@@ -94,6 +89,8 @@ struct listen_args
 {
   char *name;
   uint64_t device_id;
+  uint64_t row_id;
+  char *row_name;
   char *address;
   unsigned short port;
   uint8_t *key;
@@ -135,6 +132,7 @@ client_free(struct airplay_events_client *client)
   evbuffer_free(client->pending);
 
   free(client->name);
+  free(client->row_name);
   pair_cipher_free(client->cipher_ctx);
 
   free(client);
@@ -160,15 +158,17 @@ client_remove(struct airplay_events_client *client)
 }
 
 static int
-client_add(const char *name, uint64_t device_id, int fd, const uint8_t *key, size_t key_len)
+client_add(const char *name, uint64_t device_id, uint64_t row_id, const char *row_name, int fd, const uint8_t *key, size_t key_len)
 {
   struct airplay_events_client *client;
 
   CHECK_NULL(L_AIRPLAY, client = calloc(1, sizeof(struct airplay_events_client)));
   client->fd = -1; // Not yet owned; see client_free()
   client->device_id = device_id;
+  client->row_id = row_id;
 
   CHECK_NULL(L_AIRPLAY, client->name = strdup(name));
+  CHECK_NULL(L_AIRPLAY, client->row_name = strdup(row_name));
   CHECK_NULL(L_AIRPLAY, client->incoming = evbuffer_new());
   CHECK_NULL(L_AIRPLAY, client->pending = evbuffer_new());
 
@@ -289,7 +289,7 @@ body_find(uint8_t **body, size_t *body_len, uint8_t *in, size_t in_len)
 }
 
 static int
-rtsp_parse(enum airplay_events *event, uint8_t *in, size_t in_len)
+rtsp_parse(char **verb, uint8_t *in, size_t in_len)
 {
   uint8_t *body;
   size_t body_len;
@@ -340,15 +340,7 @@ rtsp_parse(enum airplay_events *event, uint8_t *in, size_t in_len)
 
   DPRINTF(E_INFO, L_AIRPLAY, "Received event type '%s', value '%s'\n", type, value);
 
-  if (strcmp(value, "paus") == 0)
-    *event = AIRPLAY_EVENT_PAUSE;
-  else if (strcmp(value, "play") == 0)
-    *event = AIRPLAY_EVENT_PLAY;
-  else if (strcmp(value, "nitm") == 0)
-    *event = AIRPLAY_EVENT_NEXT;
-  else if (strcmp(value, "pitm") == 0)
-    *event = AIRPLAY_EVENT_PREV;
-  else
+  if (strcmp(value, "paus") != 0 && strcmp(value, "play") != 0 && strcmp(value, "nitm") != 0 && strcmp(value, "pitm") != 0)
     {
       // Receivers send command values we have no handling for, and the value
       // on its own rarely says what was meant by it. Dump the whole event: it
@@ -360,12 +352,12 @@ rtsp_parse(enum airplay_events *event, uint8_t *in, size_t in_len)
       DPRINTF(E_LOG, L_AIRPLAY, "Unhandled media remote command '%s', full event follows:\n%s\n",
               value, xml ? xml : "(could not render event plist)");
       free(xml);
-
-      *event = AIRPLAY_EVENT_UNKNOWN;
     }
 
+  // The caller owns the verb
+  *verb = value;
+
   free(type);
-  free(value);
   plist_free(request);
   return 0;
 
@@ -379,42 +371,14 @@ rtsp_parse(enum airplay_events *event, uint8_t *in, size_t in_len)
 
 /* --------------------------- Message handling ----------------------------- */
 
+// Thread: airplay events. A receiver's command is reported to the local
+// supervisor and never acted on here; the supervisor decides what a pause or
+// play from a device means for the outputs.
 static void
-handle_event(struct airplay_events_client *client, enum airplay_events event)
+handle_event(struct airplay_events_client *client, const char *verb)
 {
-  struct player_status status;
-
-  player_get_status(&status);
-
-  // PLAY and PAUSE are honoured literally, not as a blind toggle. Receivers
-  // send unsolicited 'play' while we are already playing (observed from an
-  // Apple TV's now-playing service right after artwork is delivered), and a
-  // toggle turns that into a pause of a healthy stream.
-  //
-  // A pause from a device is also not a request to pause everything: it says
-  // that this receiver wants to stop taking audio (an Apple TV entering
-  // standby, say). So it deselects that output alone -- the equivalent of
-  // toggling it off -- and playback continues on any remaining outputs. For
-  // a live pipe source the player keeps running even if this was the last
-  // output, so the source keeps being consumed and a later re-enable joins a
-  // running stream. player_speaker_disable_by_device() marks the output as
-  // paused_by_device in the outputs listing so a supervisor can tell this
-  // state apart from a fault.
-  switch (event)
-    {
-      case AIRPLAY_EVENT_PLAY:
-	if (status.status != PLAY_PLAYING)
-	  player_playback_start();
-	break;
-      case AIRPLAY_EVENT_PAUSE:
-	if (client->device_id)
-	  player_speaker_disable_by_device(client->device_id);
-	else if (status.status == PLAY_PLAYING)
-	  player_playback_pause();
-	break;
-      default:
-	return;
-    }
+  if (evchan_event_receiver_command(client->row_id, client->device_id, client->row_name, verb) < 0)
+    DPRINTF(E_DBG, L_AIRPLAY, "Receiver command '%s' from '%s' not reported, no event channel\n", verb, client->name);
 }
 
 static int
@@ -462,7 +426,7 @@ static void
 incoming_cb(int fd, short what, void *arg)
 {
   struct airplay_events_client *client = arg;
-  enum airplay_events event;
+  char *verb = NULL;
   uint8_t *plain;
   size_t plain_len;
   int ret;
@@ -491,7 +455,7 @@ incoming_cb(int fd, short what, void *arg)
   plain = evbuffer_pullup(client->pending, -1);
   plain_len = evbuffer_get_length(client->pending);
 
-  ret = rtsp_parse(&event, plain, plain_len);
+  ret = rtsp_parse(&verb, plain, plain_len);
   if (ret < 0) // A message type we don't know about, so ignore
     {
       evbuffer_drain(client->pending, -1);
@@ -505,7 +469,8 @@ incoming_cb(int fd, short what, void *arg)
 
   evbuffer_drain(client->pending, -1);
 
-  handle_event(client, event);
+  handle_event(client, verb);
+  free(verb);
 
   ret = respond(client);
   if (ret < 0)
@@ -556,7 +521,7 @@ listen_exec(void *arg, int *retval)
 
   // client_add() takes ownership of fd on both success and failure, closing
   // it itself if it fails, so it must not also be closed here.
-  ret = client_add(args->name, args->device_id, fd, args->key, args->key_len);
+  ret = client_add(args->name, args->device_id, args->row_id, args->row_name, fd, args->key, args->key_len);
   if (ret < 0)
     goto out;
 
@@ -564,6 +529,7 @@ listen_exec(void *arg, int *retval)
 
  out:
   free(args->name);
+  free(args->row_name);
   free(args->address);
   free(args->key);
 
@@ -577,7 +543,7 @@ listen_exec(void *arg, int *retval)
 // session. Returns 0 if the connection was handed over, the outcome of the
 // connection itself is logged by the events thread.
 int
-airplay_events_listen(const char *name, uint64_t device_id, const char *address, unsigned short port, const uint8_t *key, size_t key_len)
+airplay_events_listen(const char *name, uint64_t device_id, uint64_t row_id, const char *row_name, const char *address, unsigned short port, const uint8_t *key, size_t key_len)
 {
   struct listen_args *args;
   int ret;
@@ -587,17 +553,20 @@ airplay_events_listen(const char *name, uint64_t device_id, const char *address,
 
   CHECK_NULL(L_AIRPLAY, args = calloc(1, sizeof(struct listen_args)));
   CHECK_NULL(L_AIRPLAY, args->name = strdup(name));
+  CHECK_NULL(L_AIRPLAY, args->row_name = strdup(row_name));
   CHECK_NULL(L_AIRPLAY, args->address = strdup(address));
   CHECK_NULL(L_AIRPLAY, args->key = malloc(key_len));
   memcpy(args->key, key, key_len);
   args->key_len = key_len;
   args->device_id = device_id;
+  args->row_id = row_id;
   args->port = port;
 
   ret = commands_exec_async(cmdbase, listen_exec, args);
   if (ret < 0)
     {
       free(args->name);
+      free(args->row_name);
       free(args->address);
       free(args->key);
       free(args);

@@ -5356,6 +5356,7 @@ response_handler_setup_session(struct evrtsp_request *req, struct airplay_sessio
   plist_t response;
   plist_t item;
   uint64_t uintval;
+  struct output_device *row;
   int ret;
   if (req->response_code == RTSP_UNAUTHORIZED)
     {
@@ -5401,7 +5402,12 @@ response_handler_setup_session(struct evrtsp_request *req, struct airplay_sessio
 
   // Reverse connection, used to receive playback events from device. It is made
   // by the events thread, nothing here waits for it
-  ret = airplay_events_listen(session->devname, session->device_id, session->address, session->events_port, session->shared_secret, session->shared_secret_len);
+  // A command is reported under the output row that stands for the device, which
+  // is not the device itself for a hidden HomePod or the second speaker of a pair
+  row = outputs_device_get(session->device_id);
+  row = row ? outputs_device_row(row) : NULL;
+  ret = airplay_events_listen(session->devname, session->device_id, row ? row->id : session->device_id,
+                              row ? outputs_device_display_name(row) : session->devname, session->address, session->events_port, session->shared_secret, session->shared_secret_len);
   if (ret < 0)
     {
       DPRINTF(E_WARN, L_AIRPLAY, "Could not hand over the events connection to '%s' (port %u), proceeding anyway\n", session->devname, session->events_port);

@@ -743,6 +743,33 @@ outputs_device_group_id(struct output_device *device)
   return meta ? meta->group_id : NULL;
 }
 
+// The device the outputs list shows for a device: the device itself when it has a
+// row of its own, else the visible device of its group (the Apple TV in front of
+// HomePods, the first speaker of a stereo pair).
+struct output_device *
+outputs_device_row(struct output_device *device)
+{
+  struct output_device *cur;
+  const char *group_id;
+
+  if (!outputs_device_is_hidden(device))
+    return device;
+
+  group_id = outputs_device_group_id(device);
+  if (!group_id)
+    return device;
+
+  for (cur = outputs_device_list; cur; cur = cur->next)
+    {
+      const char *cur_gid = outputs_device_group_id(cur);
+
+      if (cur != device && !outputs_device_is_hidden(cur) && cur_gid && strcmp(cur_gid, group_id) == 0)
+	return cur;
+    }
+
+  return device;
+}
+
 bool
 outputs_device_tv_proxy_followers_streaming(struct output_device *leader)
 {

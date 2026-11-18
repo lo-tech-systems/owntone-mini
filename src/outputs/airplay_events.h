@@ -5,7 +5,7 @@
 #define __AIRPLAY_EVENTS_H__
 
 int
-airplay_events_listen(const char *name, uint64_t device_id, const char *address, unsigned short port, const uint8_t *key, size_t key_len);
+airplay_events_listen(const char *name, uint64_t device_id, uint64_t row_id, const char *row_name, const char *address, unsigned short port, const uint8_t *key, size_t key_len);
 
 int
 airplay_events_init(void);
