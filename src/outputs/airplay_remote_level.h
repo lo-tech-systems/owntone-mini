@@ -20,6 +20,24 @@
 #define __AIRPLAY_REMOTE_LEVEL_H__
 
 #include <math.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+
+// Whether value is a number rather than a NaN, judged from its bits. The
+// release builds use -Ofast, whose -ffinite-math-only lets the compiler
+// assume no value is ever a NaN: isnan() is then always false and a
+// comparison that a NaN would fail can be rewritten as one it passes, so
+// neither can be used to catch one.
+static inline bool
+airplay_remote_level_is_number(double value)
+{
+  uint64_t bits;
+
+  memcpy(&bits, &value, sizeof(bits));
+  return (bits & UINT64_C(0x7ff0000000000000)) != UINT64_C(0x7ff0000000000000)
+         || (bits & UINT64_C(0x000fffffffffffff)) == 0;
+}
 
 // An AirPlay 2 receiver that reports a turn of its own volume control on the
 // event channel (command "dvlc") gives its level as a fraction of its range,
@@ -37,7 +55,7 @@ airplay_remote_level_db(double fraction)
 {
   double steps;
 
-  if (!(fraction > 0.0))
+  if (!airplay_remote_level_is_number(fraction) || !(fraction > 0.0))
     return -144.0;
 
   steps = floor(fraction * 100.0 + 0.001);

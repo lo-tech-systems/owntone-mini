@@ -378,9 +378,10 @@ modern_command_verb(plist_t request)
 }
 
 // *level is the "volume" a command carries (a "dvlc" reporting the
-// receiver's own level), or NAN when it carries none
+// receiver's own level), and *has_level says whether it carries one that is
+// a number. A flag and not a NaN, which the release builds cannot test for
 static int
-rtsp_parse(char **verb, double *level, uint8_t *in, size_t in_len)
+rtsp_parse(char **verb, double *level, bool *has_level, uint8_t *in, size_t in_len)
 {
   uint8_t *body;
   size_t body_len;
@@ -391,7 +392,8 @@ rtsp_parse(char **verb, double *level, uint8_t *in, size_t in_len)
   bool known;
   int ret;
 
-  *level = NAN;
+  *level = 0.0;
+  *has_level = false;
 
   DHEXDUMP(E_DBG, L_AIRPLAY, in, in_len, "Incoming event\n");
 
@@ -456,11 +458,14 @@ rtsp_parse(char **verb, double *level, uint8_t *in, size_t in_len)
 
   item = plist_dict_get_item(request, "volume");
   if (item && plist_get_node_type(item) == PLIST_REAL)
-    plist_get_real_val(item, level);
+    {
+      plist_get_real_val(item, level);
+      *has_level = airplay_remote_level_is_number(*level);
+    }
 
   known = strcmp(value, "paus") == 0 || strcmp(value, "play") == 0 || strcmp(value, "plps") == 0 ||
           strcmp(value, "nitm") == 0 || strcmp(value, "pitm") == 0 ||
-          (strcmp(value, "dvlc") == 0 && !isnan(*level));
+          (strcmp(value, "dvlc") == 0 && *has_level);
   if (!known)
     {
       // Receivers send command values we have no handling for, and the value
@@ -516,9 +521,9 @@ handle_volume(struct airplay_events_client *client, double level)
 // play from a device means for the outputs. A volume the receiver reports is
 // handled by handle_volume().
 static void
-handle_event(struct airplay_events_client *client, const char *verb, double level)
+handle_event(struct airplay_events_client *client, const char *verb, double level, bool has_level)
 {
-  if (strcmp(verb, "dvlc") == 0 && !isnan(level))
+  if (strcmp(verb, "dvlc") == 0 && has_level)
     {
       handle_volume(client, level);
       return;
@@ -575,6 +580,7 @@ incoming_cb(int fd, short what, void *arg)
   struct airplay_events_client *client = arg;
   char *verb;
   double level;
+  bool has_level;
   uint8_t *plain;
   size_t plain_len;
   size_t msg_len;
@@ -621,7 +627,7 @@ incoming_cb(int fd, short what, void *arg)
 	}
 
       verb = NULL;
-      ret = rtsp_parse(&verb, &level, plain, msg_len);
+      ret = rtsp_parse(&verb, &level, &has_level, plain, msg_len);
 
       evbuffer_drain(client->pending, msg_len);
 
@@ -630,7 +636,7 @@ incoming_cb(int fd, short what, void *arg)
       // a remoteConrolSessionCreate) can stop it answering us
       if (ret == 0)
 	{
-	  handle_event(client, verb, level);
+	  handle_event(client, verb, level, has_level);
 	  free(verb);
 	}
 

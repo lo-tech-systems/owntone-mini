@@ -31,6 +31,7 @@
 
 #include <math.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -131,6 +132,20 @@ whole_steps(void)
   case_end();
 }
 
+// A quiet NaN, made from its bits at run time: a NaN constant is undefined
+// under -ffinite-math-only (part of -Ofast), and the compiler may drop the
+// code that uses one, the rest of the program with it
+static double
+not_a_number(void)
+{
+  volatile uint64_t bits = UINT64_C(0x7ff8000000000000);
+  uint64_t copy = bits;
+  double value;
+
+  memcpy(&value, &copy, sizeof(value));
+  return value;
+}
+
 static void
 ends(void)
 {
@@ -138,7 +153,10 @@ ends(void)
   // Silent
   CHECK(db_is(0.0, -144.0));
   CHECK(db_is(-0.2, -144.0));
-  CHECK(db_is(NAN, -144.0));
+  CHECK(db_is(not_a_number(), -144.0));
+  CHECK(!airplay_remote_level_is_number(not_a_number()));
+  CHECK(airplay_remote_level_is_number(0.0));
+  CHECK(airplay_remote_level_is_number(0.5));
   CHECK(level_of(0.0) == 0);
   // Still playing, however quietly
   CHECK(db_is(0.004, -29.7));
