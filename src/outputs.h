@@ -210,7 +210,8 @@ struct output_device
   unsigned requires_auth:1;
   // Set when a session start ended in OUTPUT_STATE_PASSWORD (the device has
   // just asked for a PIN or password); cleared when a later start or
-  // authorize completes with any other state.
+  // authorize completes with any other state, when the user selects or
+  // deselects the device again, and when the wait runs its time.
   unsigned pin_pending:1;
   unsigned v6_disabled:1;
   unsigned prevent_playback:1;
@@ -309,6 +310,9 @@ struct output_device
   // Restarts a selected device whose session failed; exists only while armed
   // (see the player). Its argument is a heap copy of the device id
   struct event *resurrect_ev;
+  // Ends the wait for a PIN; exists only while armed (see the player). Its
+  // argument is a heap copy of the device id
+  struct event *pin_wait_ev;
 
   // The last level sent to the device and when (monotonic ms, 0 if never), so
   // a level the device then reports can be told apart from one it set itself,

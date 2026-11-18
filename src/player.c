@@ -124,6 +124,12 @@
 // with Homepods and ATV4's dropping connections, so it is also a workaround.
 #define PLAYER_SPEAKER_RESURRECT_TIME 5
 
+// A device that asked for a PIN waits this many seconds for it, about as long
+// as a receiver keeps the PIN on its screen. A wait that ends with an
+// operation in flight is looked at again after the shorter time
+#define PLAYER_PIN_WAIT_TIME 120
+#define PLAYER_PIN_WAIT_RECHECK_TIME 10
+
 // A TV proxy group leader (the Apple TV) that drops its session is
 // reconnected after this many seconds, for at most this many consecutive
 // attempts.
@@ -1793,6 +1799,68 @@ resurrect_cancel(struct output_device *device)
   device->resurrect_ev = NULL;
 }
 
+static void
+pin_wait_arm(struct output_device *device, int seconds);
+
+// The wait for a PIN has run its time. The timer is built as the resurrect
+// timer is: a copy of the device id, freed when it fires, when the wait ends
+// and with the device
+static void
+pin_wait_cb(int fd, short what, void *arg)
+{
+  uint64_t *id = arg;
+  struct output_device *device;
+
+  device = outputs_device_get(*id);
+  if (!device)
+    return;
+
+  event_free(device->pin_wait_ev);
+  device->pin_wait_ev = NULL;
+  free(id);
+
+  if (!device->pin_pending)
+    return;
+
+  device_request(device, OUTPUT_REQ_PIN_EXPIRED, false, false);
+  if (device->pin_pending)
+    {
+      // An operation is in flight, whose report decides
+      pin_wait_arm(device, PLAYER_PIN_WAIT_RECHECK_TIME);
+      return;
+    }
+
+  DPRINTF(E_INFO, L_PLAYER, "'%s' no longer waits for a PIN: none was given in %d s\n", device->name, PLAYER_PIN_WAIT_TIME);
+  status_update(player_state, LISTENER_SPEAKER);
+}
+
+static void
+pin_wait_arm(struct output_device *device, int seconds)
+{
+  struct timeval tv = { seconds, 0 };
+  uint64_t *id;
+
+  if (!device->pin_wait_ev)
+    {
+      CHECK_NULL(L_PLAYER, id = malloc(sizeof(*id)));
+      *id = device->id;
+      CHECK_NULL(L_PLAYER, device->pin_wait_ev = evtimer_new(evbase_player, pin_wait_cb, id));
+    }
+
+  evtimer_add(device->pin_wait_ev, &tv);
+}
+
+static void
+pin_wait_cancel(struct output_device *device)
+{
+  if (!device->pin_wait_ev)
+    return;
+
+  free(event_get_callback_arg(device->pin_wait_ev));
+  event_free(device->pin_wait_ev);
+  device->pin_wait_ev = NULL;
+}
+
 // The handlers below hold what a backend report means to the player. Every
 // callback given to outputs leads to device_report(), which moves the device's
 // phase by the phase rule and then calls the handler for what reported: the
@@ -2484,10 +2552,17 @@ flags_apply(struct output_device *device, const struct output_phase_result *res)
     device->upgrade_after_probe = 1;
   if (res->clear_upgrade_after_probe)
     device->upgrade_after_probe = 0;
+  // Each PIN asked for gets the whole wait
   if (res->set_pin_pending)
-    device->pin_pending = 1;
+    {
+      device->pin_pending = 1;
+      pin_wait_arm(device, PLAYER_PIN_WAIT_TIME);
+    }
   if (res->clear_pin_pending)
-    device->pin_pending = 0;
+    {
+      device->pin_pending = 0;
+      pin_wait_cancel(device);
+    }
   if (res->clear_then_select)
     device->then_select = 0;
 
@@ -2723,6 +2798,8 @@ device_request(struct output_device *device, enum output_request req, bool expli
 
   if (req == OUTPUT_REQ_SELECT && device->pin_pending && !explicit_request)
     DPRINTF(E_INFO, L_PLAYER, "Not starting '%s': it waits for a PIN\n", device->name);
+  else if (res.clear_pin_pending && req != OUTPUT_REQ_PIN_EXPIRED)
+    DPRINTF(E_INFO, L_PLAYER, "The PIN '%s' asked for is stale: the user asked for it again\n", device->name);
 
   // A device no longer wanted is not brought back
   if (req == OUTPUT_REQ_DESELECT && !device->selected)
@@ -3795,9 +3872,10 @@ speaker_group_start(struct output_device *device, bool explicit_request)
 }
 
 // Stops the device and every member of its group, through the phase rule (a
-// start in flight runs on and is stopped once it has ended)
+// start in flight runs on and is stopped once it has ended). explicit_request:
+// the user asked for it
 static void
-speaker_group_stop(struct output_device *device)
+speaker_group_stop(struct output_device *device, bool explicit_request)
 {
   struct output_device *cur;
   const char *group_id;
@@ -3805,7 +3883,7 @@ speaker_group_stop(struct output_device *device)
   group_id = outputs_device_group_id(device);
   if (!group_id)
     {
-      device_request(device, OUTPUT_REQ_DESELECT, false, false);
+      device_request(device, OUTPUT_REQ_DESELECT, explicit_request, false);
       return;
     }
 
@@ -3816,7 +3894,7 @@ speaker_group_stop(struct output_device *device)
       if (!cur_gid || strcmp(cur_gid, group_id) != 0)
         continue;
 
-      device_request(cur, OUTPUT_REQ_DESELECT, false, false);
+      device_request(cur, OUTPUT_REQ_DESELECT, explicit_request, false);
     }
 }
 
@@ -4162,7 +4240,7 @@ speaker_disable(void *arg, int *retval)
   speaker_group_deselect(device);
   device->tv_proxy_start_direct = 0;
 
-  speaker_group_stop(device);
+  speaker_group_stop(device, true);
 
   *retval = 0;
   return COMMAND_END;

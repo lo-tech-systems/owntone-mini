@@ -360,9 +360,30 @@ test_request_table(void)
   check_request("automatic select of a device waiting for a PIN: ignored",
     IN(.phase = P(PASSWORD), .pin_pending = true, .playing = true), OUTPUT_REQ_SELECT,
     WANT(.phase = P(PASSWORD), .mid_phase = P(PASSWORD)));
-  check_request("the user's select of a device waiting for a PIN: a new PIN start",
+  check_request("the user's select of a device waiting for a PIN: the old PIN is stale, a new PIN start",
     IN(.phase = P(PASSWORD), .pin_pending = true, .playing = true, .explicit_request = true), OUTPUT_REQ_SELECT,
-    WANT(.phase = P(CONNECTING), .mid_phase = P(PASSWORD), .next_op = O(START), .announce = true));
+    WANT(.phase = P(CONNECTING), .mid_phase = P(PASSWORD), .next_op = O(START), .clear_pin_pending = true, .announce = true));
+  check_request("the user's select during an authorise: the PIN being checked stands",
+    IN(.phase = P(CONNECTING), .op = O(AUTHORIZE), .pin_pending = true, .playing = true, .explicit_request = true), OUTPUT_REQ_SELECT,
+    WANT(.phase = P(CONNECTING), .mid_phase = P(CONNECTING)));
+  check_request("the user's deselect of a device waiting for a PIN ends the wait",
+    IN(.phase = P(PASSWORD), .pin_pending = true, .explicit_request = true), OUTPUT_REQ_DESELECT,
+    WANT(.phase = P(STOPPED), .mid_phase = P(STOPPED), .clear_pin_pending = true, .announce = true));
+  check_request("an automatic deselect leaves the wait",
+    IN(.phase = P(PASSWORD), .pin_pending = true), OUTPUT_REQ_DESELECT,
+    WANT(.phase = P(PASSWORD), .mid_phase = P(PASSWORD)));
+  check_request("the wait for a PIN runs its time",
+    IN(.phase = P(PASSWORD), .pin_pending = true), OUTPUT_REQ_PIN_EXPIRED,
+    WANT(.phase = P(STOPPED), .mid_phase = P(STOPPED), .clear_pin_pending = true, .announce = true));
+  check_request("the wait runs its time on a stopped device: only the flag goes",
+    IN(.phase = P(STOPPED), .pin_pending = true), OUTPUT_REQ_PIN_EXPIRED,
+    WANT(.phase = P(STOPPED), .mid_phase = P(STOPPED), .clear_pin_pending = true, .announce = true));
+  check_request("the wait runs its time during an authorise: left to its report",
+    IN(.phase = P(CONNECTING), .op = O(AUTHORIZE), .pin_pending = true, .then_select = true), OUTPUT_REQ_PIN_EXPIRED,
+    WANT(.phase = P(CONNECTING), .mid_phase = P(CONNECTING)));
+  check_request("the wait running its time on a device not waiting moves nothing",
+    IN(.phase = P(PASSWORD)), OUTPUT_REQ_PIN_EXPIRED,
+    WANT(.phase = P(PASSWORD), .mid_phase = P(PASSWORD)));
   check_request("backend change while connecting",
     IN(.phase = P(CONNECTING), .op = O(START), .selected = true, .playing = true, .backend_changes = true), OUTPUT_REQ_MODE_SWITCH,
     WANT(.phase = P(STOPPING), .mid_phase = P(STOPPING), .set_stop_after_start = true, .set_restart_after_stop = true, .announce = true));
@@ -473,7 +494,7 @@ test_pin_never_automatic(void)
 		fail_combo("a new operation in the wrong phase", &in, report, &out);
 	    }
 
-	  for (req = OUTPUT_REQ_SELECT; req <= OUTPUT_REQ_MODE_SWITCH; req++)
+	  for (req = OUTPUT_REQ_SELECT; req <= OUTPUT_REQ_PIN_EXPIRED; req++)
 	    {
 	      in = combo(phase, op, bits, true);
 	      in.backend_changes = bits & 128;
@@ -686,7 +707,7 @@ h_request(int i)
   bool explicit_request = h_rand(2);
   bool ignored;
 
-  req = (enum output_request)h_rand(4);
+  req = (enum output_request)h_rand(5);
 
   in = d->st;
   in.playing = h_playing;
@@ -1003,12 +1024,21 @@ test_sequences(void)
   seq_check("deselect during the authorise", &d, "connecting+pin,stopped");
 
   // Nothing automatic starts a device that waits for a PIN; the user's own
-  // select does
+  // select does, and the PIN it waited for is stale
   seq_pin_device(&d, false);
   seq_request(&d, OUTPUT_REQ_SELECT, false);
   seq_check("automatic select of a PIN device", &d, "");
   seq_request(&d, OUTPUT_REQ_SELECT, true);
-  seq_check("user's select of a PIN device", &d, "connecting+pin");
+  seq_check("user's select of a PIN device", &d, "connecting");
+
+  // The wait runs its time: stopped, with no PIN pending, so an automatic
+  // select starts it again
+  seq_pin_device(&d, false);
+  seq_request(&d, OUTPUT_REQ_PIN_EXPIRED, false);
+  seq_check("the wait for a PIN ran its time", &d, "stopped");
+  d.in.selected = true;
+  seq_request(&d, OUTPUT_REQ_SELECT, false);
+  seq_check("automatic select after the wait", &d, "stopped,connecting");
 
   // A deselect while connecting: stopping at once, the start runs on and is
   // stopped once it has a session, then stopped

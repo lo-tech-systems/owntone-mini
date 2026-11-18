@@ -64,6 +64,9 @@ enum output_request
   OUTPUT_REQ_DESELECT,
   OUTPUT_REQ_AUTHORIZE,
   OUTPUT_REQ_MODE_SWITCH,
+  // The wait for a PIN has run its time; the PIN on the receiver is taken
+  // as gone
+  OUTPUT_REQ_PIN_EXPIRED,
 };
 
 struct output_phase_input
@@ -86,7 +89,8 @@ struct output_phase_input
   bool upgrade_after_probe;
   bool then_select;
   bool pin_pending;
-  // Requests only: a select a user asked for, not an automatic one
+  // Requests only: a select or deselect a user asked for, not an automatic
+  // one
   bool explicit_request;
   // Mode switch only: the effective backend would change
   bool backend_changes;

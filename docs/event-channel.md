@@ -156,6 +156,7 @@ Sequences a client should expect for one output:
 | Wrong PIN without `selected` | `password` with `pin_invalid`; the next enable shows a new PIN |
 | Right PIN with `selected: true` | `connecting` (the pairing); `stopped` with `pin_pending` false (pairing done); `connecting`; `connected`; `streaming` |
 | Pairing with a PIN timed out | `password` with `timeout`, `pin_pending` true and `selected` false; nothing is started, and the next enable shows a new PIN |
+| No PIN given within 2 minutes of the request, or the output disabled while it waits | `stopped` with `pin_pending` false. Enabling the output while it waits sends a new PIN start: `connecting` with `pin_pending` false |
 | Established session fails | `failed` with `lost` (or the receiver's reason); the output is not deselected; a later `connecting` if the speaker is brought back |
 | Hold or resume, mute or unmute | the same `state` with the new `held` or `muted` |
 | Mode change to the other protocol while playing | `stopping`; `stopped`; `connecting`; `connected`; `streaming` |

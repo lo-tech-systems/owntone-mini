@@ -24,6 +24,8 @@
 //  - a device waiting for a PIN is never started by anything automatic, since
 //    a new PIN start replaces the PIN on the receiver's screen; only the
 //    user's own select, or the select that came with the PIN, starts it
+//  - a wait for a PIN ends when it runs its time or when the user selects or
+//    deselects the device again: either makes the PIN asked for stale
 //  - a stop is never cut short: a deselect while connecting lets the start
 //    run on and stops it once it has a session
 //  - after every report, a selected device with no session and no operation
@@ -77,6 +79,19 @@ static bool
 selected_after(const struct output_phase_input *in, const struct output_phase_result *out)
 {
   return in->selected && !out->deselect;
+}
+
+// The device no longer waits for a PIN. One with an operation in flight is
+// left to that operation's report
+static void
+pin_wait_end(const struct output_phase_input *in, struct output_phase_result *out)
+{
+  if (!in->pin_pending || in->op != OUTPUT_OP_NONE)
+    return;
+
+  out->clear_pin_pending = true;
+  if (in->phase == OUTPUT_PHASE_PASSWORD)
+    reach(out, OUTPUT_PHASE_STOPPED);
 }
 
 // The stop has ended (or the start a deselect was waiting for ended with no
@@ -404,6 +419,15 @@ output_phase_on_request(const struct output_phase_input *in, enum output_request
 	    case OUTPUT_PHASE_STREAMING:
 	      break;
 	  }
+
+	// The user's select replaces the PIN asked for: the start shows a new
+	// one
+	if (in->pin_pending && out->next_op != OUTPUT_OP_NONE)
+	  out->clear_pin_pending = true;
+	break;
+
+      case OUTPUT_REQ_PIN_EXPIRED:
+	pin_wait_end(in, out);
 	break;
 
       case OUTPUT_REQ_DESELECT:
@@ -431,6 +455,9 @@ output_phase_on_request(const struct output_phase_input *in, enum output_request
 	    case OUTPUT_PHASE_STOPPED:
 	    case OUTPUT_PHASE_FAILED:
 	    case OUTPUT_PHASE_PASSWORD:
+	      // The user switching it off ends the wait for a PIN
+	      if (in->explicit_request)
+		pin_wait_end(in, out);
 	      break;
 	  }
 	break;

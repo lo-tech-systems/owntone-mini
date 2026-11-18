@@ -173,7 +173,7 @@ curl -X PUT "http://localhost:3689/api/metadata" \
 | `has_password` | boolean | `true` if the output advertises password protection |
 | `requires_auth` | boolean | `true` if the output currently requires authorization |
 | `needs_auth_key` | boolean | `true` if the server does not have a valid stored auth key |
-| `pin_pending` | boolean | `true` if the last attempt to enable the output stopped because the device wants a PIN or password. Submit it with `pin` in [Update an output](#update-an-output). Cleared when a later activation attempt gets past that step. For an Apple TV enabled with `include_tv: false` it is true while any of its HomePods is waiting for one |
+| `pin_pending` | boolean | `true` if the last attempt to enable the output stopped because the device wants a PIN or password. Submit it with `pin` in [Update an output](#update-an-output). Cleared when a later activation attempt gets past that step, when the output is enabled or disabled again, and 2 minutes after the PIN was asked for if none was given. For an Apple TV enabled with `include_tv: false` it is true while any of its HomePods is waiting for one |
 | `volume` | integer | Output volume in percent. While the output is muted, or held by sending it 0, it is the level the speaker returns to |
 | `muted` | boolean | `true` while the output is muted with `muted` (see [Update an output](#update-an-output)): it is sent 0 and keeps `volume` |
 | `offset_ms` | integer | Timing offset in milliseconds |

@@ -219,6 +219,10 @@
 - fix: a log message longer than 2 KB is no longer cut short. A receiver's
   `GET /info` reply at debug level, which runs to several KB, is logged whole
   (up to 16 KB), its model and OS version included
+- fix: an output that asked for a PIN no longer reads as waiting for one
+  forever. The wait ends after 2 minutes, or when the output is enabled or
+  disabled again (enabling it shows a new PIN). Until then it is not started
+  automatically, as before
 - fix: background work scheduled for later and still waiting at shutdown is
   freed, so a leak checker no longer reports it
 
