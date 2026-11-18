@@ -18,13 +18,6 @@ Nice=-12
 # Allow the process to lock its pages in RAM (mlockall(), done once it has
 # dropped root) so the audio threads don't stall on page faults under
 # memory pressure.
-#
-# Locked pages can't be swapped out, so once locked, MemorySwapMax below is
-# not usable headroom for this process -- MemoryMax is the effective
-# ceiling. Separately, many Raspberry Pi kernels boot with the memory
-# cgroup controller disabled, in which case neither MemoryMax nor
-# MemorySwapMax is enforced at all; mlockall() itself doesn't depend on
-# that controller.
 LimitMEMLOCK=infinity
 
 # Bounds glibc to two malloc heaps so freed memory consolidates and can be
@@ -41,21 +34,6 @@ Environment=MALLOC_ARENA_MAX=2
 # 64-bit; a smaller effective value there only trims more eagerly (harmless).
 Environment=MALLOC_MMAP_THRESHOLD_=131072
 Environment=MALLOC_TRIM_THRESHOLD_=131072
-
-# Constrain the upper limit of memory/swap that can be used; this prevents 
-# the server from consuming all system memory (in event of a bug or a runaway
-# request) that would hang/freeze low resource and headless (ie 
-# RPi) machines
-#
-# systemd will kill the process in such an event but would be auto-restarted as
-# per 'Restart' directive below
-#
-# Values derived from obersvations on rpi3 under load - limits are >50% above
-# seen high watermarks 
-# 
-# https://www.freedesktop.org/software/systemd/man/systemd.resource-control.html
-MemoryMax=256M
-MemorySwapMax=32M
 
 # Restart, but set a limit so we don't restart indefinitely. Unfortunately,
 # systemd also applies the start limits to manual restarts, so that's why the
