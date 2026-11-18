@@ -446,31 +446,60 @@ logger_write_with_label_sync(int severity, int domain, const char *content)
   free(line);
 }
 
+// A message longer than the stack buffer is rendered into one of its own,
+// so a long debug dump (a receiver's /info plist runs to several KB) is
+// logged whole up to this size, and cut with "..." beyond it
+#define LOGGER_MESSAGE_MAX 16384
+
 static void
 vlogger_writer(int severity, int domain, const char *fmt, va_list args, int sync)
 {
   va_list ap;
-  char content[2048];
+  char stackbuf[2048];
+  char *content = stackbuf;
+  size_t size = sizeof(stackbuf);
+  char *longbuf = NULL;
   int ret;
 
   va_copy(ap, args);
-  ret = vsnprintf(content, sizeof(content), fmt, ap);
+  ret = vsnprintf(stackbuf, sizeof(stackbuf), fmt, ap);
+  va_end(ap);
+
+  if (ret >= (int)sizeof(stackbuf))
+    {
+      size = (ret < LOGGER_MESSAGE_MAX) ? (size_t)ret + 1 : LOGGER_MESSAGE_MAX;
+      longbuf = malloc(size);
+      if (longbuf)
+	{
+	  va_copy(ap, args);
+	  vsnprintf(longbuf, size, fmt, ap);
+	  va_end(ap);
+	  content = longbuf;
+	}
+      else
+	size = sizeof(stackbuf);
+    }
+
   if (ret < 0)
     strcpy(content, "(LOGGING SKIPPED - error printing log message)\n");
-  else if (ret >= sizeof(content))
-    strcpy(content + sizeof(content) - 8, "...\n");
-  va_end(ap);
+  else if ((size_t)ret >= size)
+    strcpy(content + size - 8, "...\n");
 
   ret = repeat_count(content);
   if (ret == LOGGER_REPEAT_MAX)
     strcpy(content, "(LOGGING SKIPPED - above log message is repeating)\n");
   else if (ret > LOGGER_REPEAT_MAX)
-    return;
+    {
+      free(longbuf);
+      return;
+    }
 
   if (sync)
     logger_write_with_label_sync(severity, domain, content);
   else
     logger_write_with_label(severity, domain, content);
+
+  free(longbuf);
 }
 
 static void
