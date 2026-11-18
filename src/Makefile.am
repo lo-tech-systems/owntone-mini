@@ -77,10 +77,11 @@ owntone_SOURCES = main.c \
 	outputs_group_flags.h \
 	output_failure.h \
 	output_phase.c output_phase.h \
+	outputs_callbacks.h \
 	ptpd.c ptpd.h \
 	outputs/plist_wrap.h
 
-TESTS = airplay_anchor_test output_failure_test output_phase_test airplay_remote_level_test evchan_proto_test level_rules_test tv_proxy_mode_test speakers_summary_test upnp_parse_test upnp_sub_test worker_test
+TESTS = airplay_anchor_test output_failure_test output_phase_test outputs_callbacks_test airplay_remote_level_test evchan_proto_test level_rules_test tv_proxy_mode_test speakers_summary_test upnp_parse_test upnp_sub_test worker_test
 # upnp_http_check is run by hand against tools/upnp_fake_renderer.py
 check_PROGRAMS = $(TESTS) upnp_http_check
 airplay_anchor_test_SOURCES = outputs/tests/airplay_anchor_test.c outputs/airplay_anchor.c outputs/airplay_anchor.h
@@ -92,6 +93,7 @@ level_rules_test_SOURCES = outputs/tests/level_rules_test.c level_rules.c level_
 tv_proxy_mode_test_SOURCES =outputs/tests/tv_proxy_mode_test.c outputs_group_flags.h
 output_failure_test_SOURCES = outputs/tests/output_failure_test.c output_failure.h
 output_phase_test_SOURCES = outputs/tests/output_phase_test.c output_phase.c output_phase.h output_failure.h
+outputs_callbacks_test_SOURCES = outputs/tests/outputs_callbacks_test.c outputs_callbacks.h
 speakers_summary_test_SOURCES =outputs/tests/speakers_summary_test.c speakers_summary.h
 upnp_parse_test_SOURCES = outputs/tests/upnp_parse_test.c upnp_parse.c upnp_parse.h
 upnp_sub_test_SOURCES = outputs/tests/upnp_sub_test.c upnp_sub.c upnp_sub.h

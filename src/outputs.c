@@ -41,6 +41,7 @@
 #include "transcode.h"
 #include "worker.h"
 #include "outputs.h"
+#include "outputs_callbacks.h"
 #include "outputs_group_flags.h"
 #include "listener.h"
 #include "owntone_config.h"
@@ -99,7 +100,9 @@ static struct output_definition *outputs[] = {
 // (value is in seconds)
 #define OUTPUTS_STOP_TIMEOUT 10
 
-#define OUTPUTS_MAX_CALLBACKS 64
+// Three per device for thirty devices: a report waiting to be dispatched, a
+// level send and an operation
+#define OUTPUTS_MAX_CALLBACKS 96
 
 // A step on the player thread that takes this long (in milliseconds) delays the
 // audio of outputs that are already playing, so it is logged at the normal level
@@ -114,19 +117,6 @@ static struct output_definition *outputs[] = {
 // spins nor floods the log
 #define OUTPUTS_BUILD_RETRY_WAIT_SEC 2
 #define OUTPUTS_BUILD_RETRY_MAX 5
-
-struct outputs_callback_register
-{
-  output_status_cb cb;
-  struct output_device *device;
-
-  // We have received the callback with the result from the backend
-  bool ready;
-
-  // We store a device_id to avoid the risk of dangling device pointer
-  uint64_t device_id;
-  enum output_device_state state;
-};
 
 struct output_quality_subscription
 {
@@ -1333,63 +1323,55 @@ callback_get(struct output_device *device)
   return NULL;
 }
 
-static void
-callback_remove(struct output_device *device)
-{
-  int callback_id;
-
-  if (!device)
-    return;
-
-  for (callback_id = 0; callback_id < ARRAY_SIZE(outputs_cb_register); callback_id++)
-    {
-      if (outputs_cb_register[callback_id].device == device)
-	{
-	  DPRINTF(E_DBG, L_PLAYER, "Removing callback to %p, id %d\n", outputs_cb_register[callback_id].cb, callback_id);
-	  memset(&outputs_cb_register[callback_id], 0, sizeof(struct outputs_callback_register));
-	}
-    }
-}
-
+// Takes a slot for a report the backend will make for this device (see
+// outputs_callbacks_add). *fresh tells callback_settle() whether the slot was
+// taken for this call or reused
 static int
-callback_add(struct output_device *device, output_status_cb cb)
+callback_add(struct output_device *device, output_status_cb cb, bool op_slot, bool *fresh)
 {
+  enum outputs_callback_add_case how;
   int callback_id;
+  int conflict;
+
+  *fresh = false;
 
   if (!cb)
     return -1;
 
-  // We will replace any previously registered callbacks, since that's what the
-  // player expects
-  callback_remove(device);
-
-  // Find a free slot in the queue
-  for (callback_id = 0; callback_id < ARRAY_SIZE(outputs_cb_register); callback_id++)
+  callback_id = outputs_callbacks_add(outputs_cb_register, ARRAY_SIZE(outputs_cb_register), cb, device, device->id, device->op_gen, op_slot, &how, &conflict);
+  switch (how)
     {
-      if (outputs_cb_register[callback_id].cb == NULL)
+      case OUTPUTS_CALLBACK_FULL:
+	DPRINTF(E_LOG, L_PLAYER, "Bug! Output callback queue is full (%d)\n", OUTPUTS_MAX_CALLBACKS);
+	return -1;
+      case OUTPUTS_CALLBACK_SECOND_OP:
+	DPRINTF(E_LOG, L_PLAYER, "Bug! Second operation registered for '%s' while one is in flight (slot %d, gen %u, now %u)\n",
+		device->name, conflict, outputs_cb_register[conflict].gen, device->op_gen);
+	break;
+      default:
 	break;
     }
 
-  if (callback_id == ARRAY_SIZE(outputs_cb_register))
-    {
-      DPRINTF(E_LOG, L_PLAYER, "Output callback queue is full! (size is %d)\n", OUTPUTS_MAX_CALLBACKS);
-      return -1;
-    }
+  *fresh = (how != OUTPUTS_CALLBACK_IN_PLACE);
 
-  outputs_cb_register[callback_id].cb = cb;
-  outputs_cb_register[callback_id].device = device; // Don't dereference this later, it might become invalid!
-
-  DPRINTF(E_DBG, L_PLAYER, "Registered callback to %p with id %d (device %p, %s)\n", cb, callback_id, device, device->name);
-
-  int active = 0;
-  for (int i = 0; i < ARRAY_SIZE(outputs_cb_register); i++)
-    if (outputs_cb_register[i].cb)
-      active++;
-
-  DPRINTF(E_DBG, L_PLAYER, "Number of active callbacks: %d\n", active);
+  DPRINTF(E_DBG, L_PLAYER, "Registered callback to %p with id %d (device %p, %s, %s)\n", cb, callback_id, device, device->name,
+	  *fresh ? "new slot" : "slot reused");
 
   return callback_id;
-};
+}
+
+// After the backend call: ret > 0 means the backend took the id (taken is
+// forced for the calls that always take it)
+static void
+callback_settle(struct output_device *device, int callback_id, bool fresh, bool taken)
+{
+  int released;
+
+  released = outputs_callbacks_settle(outputs_cb_register, ARRAY_SIZE(outputs_cb_register), device->id, callback_id, fresh, taken);
+  if (released)
+    DPRINTF(E_DBG, L_PLAYER, "Released %d callback slot(s) of '%s' (id %d %s)\n", released, device->name, callback_id,
+	    taken ? "taken by the backend" : "not taken");
+}
 
 static void
 deferred_cb(int fd, short what, void *arg)
@@ -2328,6 +2310,15 @@ outputs_cb(int callback_id, uint64_t device_id, enum output_device_state state)
       return;
     }
 
+  // An id held across a gap with no session, such as a start's retry, may
+  // have been given up and taken by another device since
+  if (!outputs_callbacks_owner(outputs_cb_register, ARRAY_SIZE(outputs_cb_register), callback_id, device_id))
+    {
+      DPRINTF(E_WARN, L_PLAYER, "Report for device %" PRIu64 " on callback %d, which belongs to device %" PRIu64 "; dropped\n",
+	      device_id, callback_id, outputs_cb_register[callback_id].reg_device_id);
+      return;
+    }
+
   DPRINTF(E_DBG, L_PLAYER, "Callback request received, id is %i\n", callback_id);
 
   outputs_cb_register[callback_id].ready = true;
@@ -2520,6 +2511,8 @@ outputs_device_deselect(struct output_device *device)
 int
 outputs_device_start(struct output_device *device, output_status_cb cb, bool only_probe)
 {
+  bool fresh;
+  int id;
   int ret;
 
   if (outputs[device->type]->disabled || !outputs[device->type]->device_start || !outputs[device->type]->device_probe)
@@ -2563,17 +2556,21 @@ outputs_device_start(struct output_device *device, output_status_cb cb, bool onl
         device->tv_proxy_audio_suppress = config_get_bool("tv_proxy_leader_audio_suppress", true);
     }
 
+  id = callback_add(device, cb, true, &fresh);
   if (only_probe)
-    ret = outputs[device->type]->device_probe(device, callback_add(device, cb));
+    ret = outputs[device->type]->device_probe(device, id);
   else
-    ret = outputs[device->type]->device_start(device, callback_add(device, cb));
+    ret = outputs[device->type]->device_start(device, id);
+  callback_settle(device, id, fresh, ret > 0);
 
-  return device_state_update(device, ret);;
+  return device_state_update(device, ret);
 }
 
 int
 outputs_device_stop(struct output_device *device, output_status_cb cb)
 {
+  bool fresh;
+  int id;
   int ret;
 
   if (outputs[device->type]->disabled || !outputs[device->type]->device_stop)
@@ -2589,7 +2586,9 @@ outputs_device_stop(struct output_device *device, output_status_cb cb)
       return 0;
     }
 
-  ret = outputs[device->type]->device_stop(device, callback_add(device, cb));
+  id = callback_add(device, cb, true, &fresh);
+  ret = outputs[device->type]->device_stop(device, id);
+  callback_settle(device, id, fresh, ret > 0);
   if (ret > 0)
     device->stop_pending = 1;
 
@@ -2599,6 +2598,9 @@ outputs_device_stop(struct output_device *device, output_status_cb cb)
 int
 outputs_device_stop_delayed(struct output_device *device, output_status_cb cb)
 {
+  bool fresh;
+  int id;
+
   if (outputs[device->type]->disabled || !outputs[device->type]->device_stop)
     return -1;
 
@@ -2608,7 +2610,9 @@ outputs_device_stop_delayed(struct output_device *device, output_status_cb cb)
   if (device->stop_pending)
     return 0; // A stop is already running
 
-  outputs[device->type]->device_cb_set(device, callback_add(device, cb));
+  id = callback_add(device, cb, false, &fresh);
+  outputs[device->type]->device_cb_set(device, id);
+  callback_settle(device, id, fresh, true);
 
   event_add(device->stop_timer, &outputs_stop_timeout);
 
@@ -2618,6 +2622,8 @@ outputs_device_stop_delayed(struct output_device *device, output_status_cb cb)
 int
 outputs_device_flush(struct output_device *device, output_status_cb cb)
 {
+  bool fresh;
+  int id;
   int ret;
 
   if (outputs[device->type]->disabled || !outputs[device->type]->device_flush)
@@ -2629,7 +2635,9 @@ outputs_device_flush(struct output_device *device, output_status_cb cb)
   if (device->stop_pending)
     return 0; // Stopping, a flush would take the stop's report
 
-  ret = outputs[device->type]->device_flush(device, callback_add(device, cb));
+  id = callback_add(device, cb, false, &fresh);
+  ret = outputs[device->type]->device_flush(device, id);
+  callback_settle(device, id, fresh, ret > 0);
 
   return ret; // We don't change device state just because of a failed flush
 }
@@ -2683,6 +2691,10 @@ outputs_device_wire_stale(struct output_device *device)
 int
 outputs_device_volume_set(struct output_device *device, output_status_cb cb)
 {
+  bool fresh;
+  int id;
+  int ret;
+
   if (outputs[device->type]->disabled || !outputs[device->type]->device_volume_set)
     return -1;
 
@@ -2700,8 +2712,13 @@ outputs_device_volume_set(struct output_device *device, output_status_cb cb)
     return 0;
 
   // The builder records the level it puts on the wire. We don't change device
-  // state just because of a failed volume change
-  return outputs[device->type]->device_volume_set(device, callback_add(device, cb));
+  // state just because of a failed volume change. A level the backend does
+  // not send leaves the device's other slots as they were
+  id = callback_add(device, cb, false, &fresh);
+  ret = outputs[device->type]->device_volume_set(device, id);
+  callback_settle(device, id, fresh, ret > 0);
+
+  return ret;
 }
 
 // Puts on the wire the level that starts or ends a silence (0, or the device's
@@ -2714,6 +2731,8 @@ outputs_device_volume_set(struct output_device *device, output_status_cb cb)
 static int
 silence_edge_send(struct output_device *device, output_status_cb cb)
 {
+  bool fresh;
+  int id;
   int ret;
 
   if (outputs[device->type]->disabled || !outputs[device->type]->device_volume_set)
@@ -2723,10 +2742,11 @@ silence_edge_send(struct output_device *device, output_status_cb cb)
     return 0;
 
   // Both backends send to any connected session that is not being torn down,
-  // so with the tests above a backend does not decline here; without them,
-  // callback_add() would replace a starting session's callback before the
-  // backend declined
-  ret = outputs[device->type]->device_volume_set(device, callback_add(device, cb));
+  // so with the tests above a backend does not decline here; if one did, the
+  // slot taken for it is given up and a starting session keeps its own
+  id = callback_add(device, cb, false, &fresh);
+  ret = outputs[device->type]->device_volume_set(device, id);
+  callback_settle(device, id, fresh, ret > 0);
   if (ret <= 0)
     return 0;
 
@@ -2919,12 +2939,16 @@ outputs_device_volume_to_pct(struct output_device *device, const char *volume)
 int
 outputs_device_quality_set(struct output_device *device, struct media_quality *quality, output_status_cb cb)
 {
+  bool fresh;
+  int id;
   int ret;
 
   if (outputs[device->type]->disabled || !outputs[device->type]->device_quality_set)
     return -1;
 
-  ret = outputs[device->type]->device_quality_set(device, quality, callback_add(device, cb));
+  id = callback_add(device, cb, false, &fresh);
+  ret = outputs[device->type]->device_quality_set(device, quality, id);
+  callback_settle(device, id, fresh, ret > 0);
 
   return device_state_update(device, ret);
 }
@@ -2932,6 +2956,8 @@ outputs_device_quality_set(struct output_device *device, struct media_quality *q
 int
 outputs_device_authorize(struct output_device *device, const char *pin, output_status_cb cb)
 {
+  bool fresh;
+  int id;
   int ret;
 
   if (outputs[device->type]->disabled || !outputs[device->type]->device_authorize)
@@ -2940,7 +2966,9 @@ outputs_device_authorize(struct output_device *device, const char *pin, output_s
   if (device->session)
     return 0; // We are already connected to the device - no auth required
 
-  ret = outputs[device->type]->device_authorize(device, pin, callback_add(device, cb));
+  id = callback_add(device, cb, true, &fresh);
+  ret = outputs[device->type]->device_authorize(device, pin, id);
+  callback_settle(device, id, fresh, ret > 0);
 
   return device_state_update(device, ret); // If ret < 0 then we couldn't reach the speaker
 }
@@ -2948,6 +2976,9 @@ outputs_device_authorize(struct output_device *device, const char *pin, output_s
 void
 outputs_device_cb_set(struct output_device *device, output_status_cb cb)
 {
+  bool fresh;
+  int id;
+
   if (outputs[device->type]->disabled || !outputs[device->type]->device_cb_set)
     return;
 
@@ -2957,7 +2988,11 @@ outputs_device_cb_set(struct output_device *device, output_status_cb cb)
   if (device->stop_pending)
     return; // The stop's report must reach the stop's callback
 
-  outputs[device->type]->device_cb_set(device, callback_add(device, cb));
+  // The backend always takes the id, so the device's slots that are not
+  // ready can no longer be reported to
+  id = callback_add(device, cb, false, &fresh);
+  outputs[device->type]->device_cb_set(device, id);
+  callback_settle(device, id, fresh, true);
 }
 
 void
