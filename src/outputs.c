@@ -1060,6 +1060,22 @@ effective_candidate_apply(struct output_device *canonical)
   if (!candidate || candidate->removal_candidate)
     return;
 
+  // A session runs on the backend it started on, reading that candidate's
+  // extra_device_info, so the type and the extra must not change under it.
+  // The switch is made by outputs_device_session_remove() once the session
+  // is gone; the canonical keeps the running backend's fields until then.
+  if (canonical->session && canonical->type != etype)
+    {
+      if (!canonical->backend_switch_pending)
+        DPRINTF(E_INFO, L_PLAYER, "Deferring switch of '%s' output backend (%s -> %s) until its session ends\n",
+                canonical->name, outputs_name(canonical->type), candidate->type_name);
+
+      canonical->backend_switch_pending = 1;
+      return;
+    }
+
+  canonical->backend_switch_pending = 0;
+
   // Log backend switches before overwriting canonical->type (skip on first apply
   // where canonical->name is NULL because it has not been set yet)
   if (canonical->name && canonical->type != etype)
@@ -1113,9 +1129,11 @@ effective_candidate_apply(struct output_device *canonical)
   canonical->relvol        = candidate->relvol;
   canonical->resurrect     = candidate->resurrect;
 
-  // Borrow extra_device_info only when the session is gone (safe to switch)
-  if (!canonical->session)
-    canonical->extra_device_info = candidate->extra_device_info;
+  // Borrowed from the candidate, and always changed together with the type.
+  // With a session the type is unchanged (see above) and a same-type
+  // candidate is refreshed in place while a session runs (candidate_store),
+  // so this is the pointer the session already reads.
+  canonical->extra_device_info = candidate->extra_device_info;
 
   // Update canonical's own address copies
   free(canonical->v4_address);
@@ -2089,16 +2107,25 @@ heap_trim_deferred_cb(void *arg)
 }
 
 void
-outputs_device_session_remove(uint64_t device_id)
+outputs_device_session_remove(uint64_t device_id, void *session)
 {
   struct output_device *device;
 
   device = outputs_device_get(device_id);
-  if (device)
+  if (device && device->session == session)
     {
       device->session = NULL;
       device->held = false;
+
+      // A backend switch that was asked for while the session ran is made now
+      // that the session is gone, so the next start uses the new candidate's
+      // extra_device_info
+      if (device->backend_switch_pending)
+        effective_candidate_apply(device);
     }
+  else if (device && device->session)
+    DPRINTF(E_LOG, L_PLAYER, "Bug! Session %p of '%s' ended while its device's session is %p, which is kept\n",
+            session, device->name, device->session);
 
   // With no sessions left, give the allocator a chance to hand pages back to
   // the system instead of holding onto this session's high-water mark. The

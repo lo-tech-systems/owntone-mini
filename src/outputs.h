@@ -195,6 +195,10 @@ struct output_device
   // candidate_store() on re-advertisement. The housekeeping timer frees the
   // candidate once the grace period expires without a new advertisement.
   unsigned removal_candidate:1;
+  // Set when the effective backend changed while a session was running (the
+  // session keeps the backend it started on); the switch is made when the
+  // session is removed.
+  unsigned backend_switch_pending:1;
 
   // Credentials if relevant
   const char *password;
@@ -468,8 +472,10 @@ outputs_step_time_log(int domain, const char *what, const char *name, uint64_t s
 int
 outputs_device_session_add(uint64_t device_id, void *session);
 
+// Clears the device's session if it is still the one given; a session that
+// another has replaced is left alone
 void
-outputs_device_session_remove(uint64_t device_id);
+outputs_device_session_remove(uint64_t device_id, void *session);
 
 // Updates a device's learned buffered-transport capability bitmask and
 // recomputes supported_modes to include it. Called by a backend after

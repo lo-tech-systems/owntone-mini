@@ -1945,7 +1945,7 @@ session_cleanup(struct airplay_session *session)
 	s->next = session->next;
     }
 
-  outputs_device_session_remove(session->device_id);
+  outputs_device_session_remove(session->device_id, session);
 
   session_free(session);
 }

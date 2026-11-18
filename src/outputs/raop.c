@@ -2029,7 +2029,7 @@ session_cleanup(struct raop_session *rs)
 	s->next = rs->next;
     }
 
-  outputs_device_session_remove(rs->device_id);
+  outputs_device_session_remove(rs->device_id, rs);
 
   session_free(rs);
 }

@@ -100,6 +100,12 @@
   as the end of the stop, while the session was still alive. What followed
   the stop, such as a switch of backend, then ran on a live session. The
   stop now reports only once the session is closed
+- fix: a device keeps the backend its session started on. A switch of
+  backend asked for while a session runs (a mode change, or the other
+  protocol appearing or disappearing) is made once the session has ended,
+  so a session can no longer be started with the other backend's device
+  details, and a session that ends no longer clears the registration of a
+  newer session on the same device
 
 ## Version 1.5.0 - 2026-10-14
 
