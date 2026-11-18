@@ -360,6 +360,16 @@ rtsp_parse(char **verb, double *level, uint8_t *in, size_t in_len)
       plist_get_string_val(item, &value);
     }
 
+  // A receiver that has been told we take its commands may ask for a separate
+  // remote control session, as an iPhone opens one. Its commands reach us on
+  // this connection without it, so none is opened; the request is answered.
+  // The misspelling is the receiver's.
+  if (type && strcmp(type, "remoteConrolSessionCreate") == 0)
+    {
+      DPRINTF(E_INFO, L_AIRPLAY, "Receiver asked for a remote control session, which is not opened\n");
+      goto error;
+    }
+
   // Some receivers send the command as a number instead of a four letter value
   if (!value)
     value = modern_command_verb(request);
@@ -533,12 +543,7 @@ incoming_cb(int fd, short what, void *arg)
   plain_len = evbuffer_get_length(client->pending);
 
   ret = rtsp_parse(&verb, &level, plain, plain_len);
-  if (ret < 0) // A message type we don't know about, so ignore
-    {
-      evbuffer_drain(client->pending, -1);
-      return;
-    }
-  else if (ret == 1)
+  if (ret == 1)
     {
       DPRINTF(E_SPAM, L_AIRPLAY, "Incomplete RTSP event message, waiting for more data\n");
       return;
@@ -546,8 +551,14 @@ incoming_cb(int fd, short what, void *arg)
 
   evbuffer_drain(client->pending, -1);
 
-  handle_event(client, verb, level);
-  free(verb);
+  // A message we cannot use is still answered: the receiver waits for the
+  // answer to every request it sends, and one left unanswered (for example a
+  // remoteConrolSessionCreate) can stop it answering us
+  if (ret == 0)
+    {
+      handle_event(client, verb, level);
+      free(verb);
+    }
 
   ret = respond(client);
   if (ret < 0)

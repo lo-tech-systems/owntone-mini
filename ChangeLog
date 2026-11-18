@@ -83,6 +83,10 @@
   resume): the turn was read as the speaker's answer to that level, which
   then looked like a volume scale that is not ours. Only the first report
   after a level is sent is now taken as the answer
+- fix: every request a receiver sends on its events connection is answered,
+  including one the daemon cannot use. A speaker left waiting for an answer
+  (to a request for a remote control session) stopped answering the daemon,
+  and its session failed
 
 ## Version 1.5.0 - 2026-10-14
 
