@@ -2830,6 +2830,20 @@ raop_set_volume_one(struct output_device *device, int callback_id)
   return 1;
 }
 
+// An AirPlay 1 session has no buffered mode, so a session that is connected
+// or streaming, and not stopping, is held by sending it 0 while its audio
+// keeps flowing
+static enum output_hold_kind
+raop_device_hold_kind(struct output_device *device)
+{
+  struct raop_session *rs = device->session;
+
+  if (!rs || rs->stopping || (rs->state != RAOP_STATE_CONNECTED && rs->state != RAOP_STATE_STREAMING))
+    return OUTPUT_HOLD_NONE;
+
+  return OUTPUT_HOLD_MUTE;
+}
+
 // Recomputes the cached offset for a live session from the device's current
 // offset_ms. No RTSP request needed; the next sync packet picks it up.
 static int
@@ -5156,6 +5170,7 @@ struct output_definition output_raop =
   .device_free_extra = raop_device_free_extra,
   .device_volume_set = raop_set_volume_one,
   .device_offset_set = raop_set_offset_one,
+  .device_hold_kind = raop_device_hold_kind,
   .device_volume_to_pct = raop_volume_to_pct,
   .write = raop_write,
   .metadata_prepare = raop_metadata_prepare,

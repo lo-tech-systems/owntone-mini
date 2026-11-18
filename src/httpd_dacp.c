@@ -24,13 +24,15 @@
  * AirPlay receivers discover the sender's classic remote-control identity
  * (the DACP-ID header we send them) and browse mDNS for a matching
  * "iTunes_Ctrl_<DACP-ID>" _dacp._tcp service to learn where to send that
- * control protocol's HTTP requests. The one we actually care about is a
+ * control protocol's HTTP requests. The ones we act on are a
  * volume change made on the receiver itself (e.g. with an Apple TV remote
  * or a HomePod's own controls), reported via a setproperty request or a
- * volumeup/volumedown request. This module implements just enough of the
- * protocol to receive and log those requests and apply the resulting
- * volume to the player; nothing else of DACP (now playing, queue browsing,
- * playback control, etc) is implemented.
+ * volumeup/volumedown request, and a receiver's own pause, play and
+ * play/pause, which are reported to the supervisor as its commands. This
+ * module implements just enough of the protocol to receive and log those
+ * requests, apply the resulting volume to the player and pass the commands
+ * on; nothing else of DACP (now playing, queue browsing, playback control,
+ * etc) is implemented.
  */
 
 #ifdef HAVE_CONFIG_H
@@ -283,6 +285,61 @@ dacp_reply_volumedown(struct httpd_request *hreq)
 }
 
 
+/* -------------------------------- TRANSPORT --------------------------------- */
+
+static const struct { const char *request; const char *verb; } dacp_transport_verbs[] =
+  {
+    { "pause",      "paus" },
+    { "play",       "play" },
+    { "playpause",  "plps" },
+    { "mutetoggle", "mute" },
+  };
+
+// A receiver's own pause, play or play/pause (and mute toggle) is reported
+// with the word an AirPlay 2 receiver uses for it; nothing is paused or
+// resumed here
+static int
+dacp_reply_transport(struct httpd_request *hreq)
+{
+  struct player_speaker_info speaker;
+  const char *request;
+  const char *verb = NULL;
+  size_t i;
+
+  if (speaker_get(&speaker, hreq) < 0)
+    {
+      httpd_send_error(hreq, HTTP_BADREQUEST, "Bad Request");
+      return -1;
+    }
+
+  request = strrchr(hreq->path, '/');
+  request = request ? request + 1 : hreq->path;
+
+  for (i = 0; i < ARRAY_SIZE(dacp_transport_verbs); i++)
+    {
+      if (strcmp(request, dacp_transport_verbs[i].request) == 0)
+	{
+	  verb = dacp_transport_verbs[i].verb;
+	  break;
+	}
+    }
+
+  // The handler table only routes the requests listed above here
+  if (!verb)
+    {
+      httpd_send_error(hreq, HTTP_BADREQUEST, "Bad Request");
+      return -1;
+    }
+
+  DPRINTF(E_INFO, L_DACP, "DACP: '%s' from speaker '%s', reported as %s\n", request, speaker.name, verb);
+
+  receiver_command_post(&speaker, verb);
+
+  httpd_send_reply(hreq, HTTP_NOCONTENT, "No Content", HTTPD_SEND_NO_GZIP);
+  return 0;
+}
+
+
 /* --------------------------------- CATCH-ALL -------------------------------- */
 
 // Anything else under /ctrl-int/ (session setup, now-playing polling, queue
@@ -300,6 +357,7 @@ static struct httpd_uri_map dacp_handlers[] =
     { HTTPD_METHOD_GET | HTTPD_METHOD_POST, "^/ctrl-int/[[:digit:]]+/setproperty$", dacp_reply_setproperty },
     { HTTPD_METHOD_GET | HTTPD_METHOD_POST, "^/ctrl-int/[[:digit:]]+/volumeup$",    dacp_reply_volumeup },
     { HTTPD_METHOD_GET | HTTPD_METHOD_POST, "^/ctrl-int/[[:digit:]]+/volumedown$",  dacp_reply_volumedown },
+    { HTTPD_METHOD_GET | HTTPD_METHOD_POST, "^/ctrl-int/[[:digit:]]+/(pause|play|playpause|mutetoggle)$", dacp_reply_transport },
     { HTTPD_METHOD_GET | HTTPD_METHOD_POST, "^/ctrl-int/",                          dacp_reply_notfound },
 
     { 0, NULL, NULL }
