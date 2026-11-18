@@ -151,8 +151,15 @@ static void (*outputs_flush_done)(void);
 // Told of every phase change, see outputs_device_phase_set()
 static void (*outputs_phase_announce)(struct output_device *device);
 
-// Where the report of a delayed stop goes, see outputs_stop_cb_set()
+// Where the report of a delayed stop, or of the stop of a device being
+// removed, goes, see outputs_stop_cb_set()
 static output_status_cb outputs_stop_report;
+
+// The slot a report being dispatched came from, for the callback to read: the
+// device that registered it, and whether the slot carries the device's
+// current operation generation. Player thread only
+static uint64_t outputs_report_device;
+static bool outputs_report_current;
 static struct event *outputs_deferredev;
 static struct timeval outputs_stop_timeout = { OUTPUTS_STOP_TIMEOUT, 0 };
 
@@ -1352,6 +1359,18 @@ outputs_stop_cb_set(output_status_cb cb)
   outputs_stop_report = cb;
 }
 
+uint64_t
+outputs_report_device_id(void)
+{
+  return outputs_report_device;
+}
+
+bool
+outputs_report_current_gen(void)
+{
+  return outputs_report_current;
+}
+
 // Whether a report of the device waits in a slot to be dispatched
 static bool
 callback_report_waiting(uint64_t device_id)
@@ -1363,52 +1382,6 @@ callback_report_waiting(uint64_t device_id)
       return true;
 
   return false;
-}
-
-// The phase a backend report puts the device in, before the player hears it.
-// While a stop is out only a report made once the session is gone moves the
-// phase, so an answer that was already waiting cannot open the device to
-// registrations the stop's report needs kept out. A probe ends with a startup
-// report and no session
-static void
-report_phase_set(struct output_device *device, enum output_device_state state)
-{
-  enum output_phase phase;
-
-  if (device->phase == OUTPUT_PHASE_STOPPING && device->session)
-    return;
-
-  switch (state)
-    {
-      case OUTPUT_STATE_STARTUP:
-      case OUTPUT_STATE_CONNECTED:
-      case OUTPUT_STATE_STREAMING:
-	if (!device->session)
-	  {
-	    // The session the report was made by has gone since; a failure
-	    // already shown stays
-	    if (device->phase == OUTPUT_PHASE_FAILED || device->phase == OUTPUT_PHASE_PASSWORD)
-	      return;
-	    phase = OUTPUT_PHASE_STOPPED;
-	  }
-	else if (state == OUTPUT_STATE_STARTUP)
-	  phase = OUTPUT_PHASE_CONNECTING;
-	else
-	  phase = (state == OUTPUT_STATE_CONNECTED) ? OUTPUT_PHASE_CONNECTED : OUTPUT_PHASE_STREAMING;
-	break;
-      case OUTPUT_STATE_FAILED:
-	phase = OUTPUT_PHASE_FAILED;
-	break;
-      case OUTPUT_STATE_PASSWORD:
-	phase = OUTPUT_PHASE_PASSWORD;
-	break;
-      case OUTPUT_STATE_STOPPED:
-      default:
-	phase = OUTPUT_PHASE_STOPPED;
-	break;
-    }
-
-  outputs_device_phase_set(device, phase);
 }
 
 static void
@@ -1504,6 +1477,7 @@ deferred_cb(int fd, short what, void *arg)
   output_status_cb cb;
   enum output_device_state state;
   uint64_t reg_device_id;
+  uint32_t gen;
   bool flush_done;
   int callback_id;
 
@@ -1516,6 +1490,7 @@ deferred_cb(int fd, short what, void *arg)
 	  cb = outputs_cb_register[callback_id].cb;
 	  state = outputs_cb_register[callback_id].state;
 	  reg_device_id = outputs_cb_register[callback_id].reg_device_id;
+	  gen = outputs_cb_register[callback_id].gen;
 
 	  // Whatever the report, the device has answered: a flush waits for it
 	  // no longer. The flush ends after the callback has run
@@ -1538,8 +1513,9 @@ deferred_cb(int fd, short what, void *arg)
 	    }
 	  else if (device)
 	    {
+	      // The phase is the player's to move, from this report and the
+	      // operation it belongs to
 	      device->state = state;
-	      report_phase_set(device, state);
 
 	      // Handle deferred candidate cleanup after a session ends.
 	      if (!device->session)
@@ -1575,6 +1551,9 @@ deferred_cb(int fd, short what, void *arg)
 
 	  DPRINTF(E_DBG, L_PLAYER, "Making deferred callback to %p, id was %d\n", cb, callback_id);
 
+	  outputs_report_device = reg_device_id;
+	  outputs_report_current = device && (gen == device->op_gen);
+
 	  cb(device, state);
 
 	  if (flush_done && outputs_flush_done)
@@ -1597,18 +1576,6 @@ stop_timer_cb(int fd, short what, void *arg)
   struct output_device *device = arg;
 
   outputs_device_stop(device, outputs_stop_report);
-}
-
-static void
-device_stop_cb(struct output_device *device, enum output_device_state state)
-{
-  if (device)
-    device->state = state;
-
-  if (state == OUTPUT_STATE_FAILED)
-    DPRINTF(E_WARN, L_PLAYER, "Failed to stop device\n");
-  else
-    DPRINTF(E_INFO, L_PLAYER, "Device stopped properly\n");
 }
 
 static enum transcode_profile
@@ -2339,10 +2306,10 @@ outputs_device_session_remove(uint64_t device_id, void *session)
       device->wake_sent_ms = 0;
 
       // A report made as the session ended sets the phase when it is
-      // dispatched. A start dropping its session between two attempts goes on
-      // connecting, and a failure stays shown; otherwise the device is
-      // stopped
-      if (!callback_report_waiting(device->id) && device->phase != OUTPUT_PHASE_CONNECTING
+      // dispatched, and an operation in flight (a start dropping its session
+      // between two attempts, a stop) ends with its own report. A failure
+      // stays shown; otherwise the device is stopped
+      if (device->op == OUTPUT_OP_NONE && !callback_report_waiting(device->id)
 	  && device->phase != OUTPUT_PHASE_FAILED && device->phase != OUTPUT_PHASE_PASSWORD)
 	outputs_device_phase_set(device, OUTPUT_PHASE_STOPPED);
 
@@ -2507,6 +2474,9 @@ outputs_buffer_has_quality(struct output_buffer *buffer, struct media_quality *q
 
 /* ---------------------------- Called by player ---------------------------- */
 
+static int
+device_stop(struct output_device *device, output_status_cb cb, bool force);
+
 struct output_device *
 outputs_device_add(struct output_device *add, bool new_deselect)
 {
@@ -2592,9 +2562,11 @@ outputs_device_remove(struct output_device *remove)
 
   // Device stop should be able to handle that we invalidate the device, even
   // if it is an async stop. It might call outputs_device_session_remove(), but
-  // that just won't do anything since the id will be unknown.
+  // that just won't do anything since the id will be unknown. The device is
+  // going, so its session is stopped whatever is in flight on it, and the
+  // report reaches the player as a report for a device that has gone.
   if (remove->session)
-    outputs_device_stop(remove, device_stop_cb);
+    device_stop(remove, outputs_stop_report, true);
 
   prev = NULL;
   for (device = outputs_device_list; device; device = device->next)
@@ -2654,8 +2626,26 @@ outputs_device_deselect(struct output_device *device)
   vol_adjust();
 }
 
+// Records that an operation begins on the device: the generation its callback
+// slot is stamped with moves on, so a report of an earlier operation moves no
+// phase
+static void
+operation_begin(struct output_device *device, enum output_op op)
+{
+  device->op_gen++;
+  device->op = op;
+  device->op_started_ms = monotonic_ms();
+}
+
+// The backend did not take the operation: nothing is in flight
+static void
+operation_not_begun(struct output_device *device)
+{
+  device->op = OUTPUT_OP_NONE;
+}
+
 int
-outputs_device_start(struct output_device *device, output_status_cb cb, bool only_probe)
+outputs_device_start(struct output_device *device, output_status_cb cb, bool only_probe, bool explicit_request)
 {
   bool fresh;
   int id;
@@ -2664,8 +2654,41 @@ outputs_device_start(struct output_device *device, output_status_cb cb, bool onl
   if (outputs[device->type]->disabled || !outputs[device->type]->device_start || !outputs[device->type]->device_probe)
     return -1;
 
+  // One operation at a time: a start asked for while one is in flight is
+  // composed with it
+  switch (device->op)
+    {
+      case OUTPUT_OP_STOP:
+	if (!device->restart_after_stop)
+	  DPRINTF(E_INFO, L_PLAYER, "'%s' will start again once it has stopped\n", device->name);
+	device->restart_after_stop = 1;
+	return 0;
+      case OUTPUT_OP_PROBE:
+	if (!only_probe)
+	  device->upgrade_after_probe = 1;
+	return 0;
+      case OUTPUT_OP_START:
+      case OUTPUT_OP_AUTHORIZE:
+	return 0;
+      case OUTPUT_OP_NONE:
+	break;
+    }
+
   if (device->session)
     return 0; // Device is already running, nothing to do
+
+  // A start replaces the PIN on the receiver's screen, so a device waiting for
+  // one is started only by the user's own select
+  if (device->pin_pending && !explicit_request)
+    {
+      DPRINTF(E_INFO, L_PLAYER, "Not starting '%s': it waits for a PIN\n", device->name);
+      return 0;
+    }
+
+  // A backend switch asked for while a start was in flight is made before
+  // the next start
+  if (device->backend_switch_pending)
+    effective_candidate_apply(device);
 
   // An Apple TV left out of its HomePod group is given no session, whoever
   // asks; the group start paths skip it before getting here
@@ -2702,6 +2725,8 @@ outputs_device_start(struct output_device *device, output_status_cb cb, bool onl
         device->tv_proxy_audio_suppress = config_get_bool("tv_proxy_leader_audio_suppress", true);
     }
 
+  operation_begin(device, only_probe ? OUTPUT_OP_PROBE : OUTPUT_OP_START);
+
   id = callback_add(device, cb, true, &fresh);
   if (only_probe)
     ret = outputs[device->type]->device_probe(device, id);
@@ -2709,13 +2734,21 @@ outputs_device_start(struct output_device *device, output_status_cb cb, bool onl
     ret = outputs[device->type]->device_start(device, id);
   callback_settle(device, id, fresh, ret > 0);
   if (ret > 0)
-    outputs_device_phase_set(device, OUTPUT_PHASE_CONNECTING);
+    {
+      outputs_device_phase_set(device, OUTPUT_PHASE_CONNECTING);
+      return ret;
+    }
 
-  return device_state_update(device, ret);
+  // The caller decides what a start that failed at once means to the phase
+  operation_not_begun(device);
+  if (ret < 0)
+    device->state = OUTPUT_STATE_FAILED;
+
+  return ret;
 }
 
-int
-outputs_device_stop(struct output_device *device, output_status_cb cb)
+static int
+device_stop(struct output_device *device, output_status_cb cb, bool force)
 {
   bool fresh;
   int id;
@@ -2724,23 +2757,61 @@ outputs_device_stop(struct output_device *device, output_status_cb cb)
   if (outputs[device->type]->disabled || !outputs[device->type]->device_stop)
     return -1;
 
+  // One operation at a time. A start runs on and is stopped once it has
+  // ended, unless the device is going
+  switch (device->op)
+    {
+      case OUTPUT_OP_START:
+      case OUTPUT_OP_PROBE:
+	if (force)
+	  {
+	    // The start's report is not wanted: the device is going
+	    outputs_callbacks_settle(outputs_cb_register, ARRAY_SIZE(outputs_cb_register), device->id, -1, false, true);
+	    break;
+	  }
+	if (!device->stop_after_start)
+	  DPRINTF(E_INFO, L_PLAYER, "'%s' will stop once its start ends\n", device->name);
+	device->stop_after_start = 1;
+	device->upgrade_after_probe = 0;
+	outputs_device_phase_set(device, OUTPUT_PHASE_STOPPING);
+	return 0;
+      case OUTPUT_OP_STOP:
+	DPRINTF(E_DBG, L_PLAYER, "'%s' is already stopping\n", device->name);
+	return 0;
+      case OUTPUT_OP_AUTHORIZE:
+      case OUTPUT_OP_NONE:
+	break;
+    }
+
   if (!device->session)
     return 0; // Device is already stopped, nothing to do
 
   // The stop already handed to the backend reports for the device
-  if (device->phase == OUTPUT_PHASE_STOPPING)
+  if (device->phase == OUTPUT_PHASE_STOPPING && !force)
     {
       DPRINTF(E_DBG, L_PLAYER, "'%s' is already stopping\n", device->name);
       return 0;
     }
 
+  operation_begin(device, OUTPUT_OP_STOP);
+
   id = callback_add(device, cb, true, &fresh);
   ret = outputs[device->type]->device_stop(device, id);
   callback_settle(device, id, fresh, ret > 0);
   if (ret > 0)
-    outputs_device_phase_set(device, OUTPUT_PHASE_STOPPING);
+    {
+      outputs_device_phase_set(device, OUTPUT_PHASE_STOPPING);
+      return ret;
+    }
 
+  operation_not_begun(device);
   return device_state_update(device, ret);
+}
+
+int
+outputs_device_stop(struct output_device *device, output_status_cb cb)
+{
+  return device_stop(device, cb, false);
 }
 
 int
@@ -2755,8 +2826,8 @@ outputs_device_stop_delayed(struct output_device *device, output_status_cb cb)
   if (!device->session)
     return 0; // Device is already stopped, nothing to do
 
-  if (device->phase == OUTPUT_PHASE_STOPPING)
-    return 0; // A stop is already running
+  if (device->phase == OUTPUT_PHASE_STOPPING || device->op != OUTPUT_OP_NONE)
+    return 0; // A stop is already running, or an operation reports for the device
 
   id = callback_add(device, cb, false, &fresh);
   outputs[device->type]->device_cb_set(device, id);
@@ -2780,8 +2851,8 @@ outputs_device_flush(struct output_device *device, output_status_cb cb)
   if (!device->session)
     return 0; // Nothing to flush
 
-  if (device->phase == OUTPUT_PHASE_STOPPING)
-    return 0; // Stopping, a flush would take the stop's report
+  if (device->phase == OUTPUT_PHASE_STOPPING || device->op != OUTPUT_OP_NONE)
+    return 0; // Stopping or starting, a flush would take the operation's report
 
   id = callback_add(device, cb, false, &fresh);
   ret = outputs[device->type]->device_flush(device, id);
@@ -2849,9 +2920,10 @@ outputs_device_volume_set(struct output_device *device, output_status_cb cb)
   if (!device->session)
     return 0; // Device isn't active
 
-  // Stopping: the level stays in device->volume for the next start, and a
-  // registration now would take the stop's report
-  if (device->phase == OUTPUT_PHASE_STOPPING)
+  // Stopping or starting: the level stays in device->volume for the start's
+  // level row or the next start, and a registration now would take the
+  // operation's report
+  if (device->phase == OUTPUT_PHASE_STOPPING || device->op != OUTPUT_OP_NONE)
     return 0;
 
   // A silent device keeps the level; nothing is sent until the silence ends.
@@ -2886,7 +2958,7 @@ silence_edge_send(struct output_device *device, output_status_cb cb)
   if (outputs[device->type]->disabled || !outputs[device->type]->device_volume_set)
     return -1;
 
-  if (!device->session || device->state < OUTPUT_STATE_CONNECTED || device->phase == OUTPUT_PHASE_STOPPING)
+  if (!device->session || device->op != OUTPUT_OP_NONE || device->state < OUTPUT_STATE_CONNECTED || device->phase == OUTPUT_PHASE_STOPPING)
     return 0;
 
   // Both backends send to any connected session that is not being torn down,
@@ -2933,7 +3005,8 @@ outputs_device_offset_set(struct output_device *device)
 enum output_hold_kind
 outputs_device_hold_kind(struct output_device *device)
 {
-  if (outputs[device->type]->disabled || !outputs[device->type]->device_hold_kind || !device->session || device->phase == OUTPUT_PHASE_STOPPING)
+  if (outputs[device->type]->disabled || !outputs[device->type]->device_hold_kind || !device->session || device->phase == OUTPUT_PHASE_STOPPING
+      || device->op != OUTPUT_OP_NONE)
     return OUTPUT_HOLD_NONE;
 
   return outputs[device->type]->device_hold_kind(device);
@@ -3114,17 +3187,32 @@ outputs_device_authorize(struct output_device *device, const char *pin, output_s
   if (device->session)
     return 0; // We are already connected to the device - no auth required
 
+  // A start between its attempts still holds the report it will make
+  if (device->op != OUTPUT_OP_NONE)
+    return 0;
+
+  operation_begin(device, OUTPUT_OP_AUTHORIZE);
+
   id = callback_add(device, cb, true, &fresh);
   ret = outputs[device->type]->device_authorize(device, pin, id);
   callback_settle(device, id, fresh, ret > 0);
   if (ret > 0)
-    outputs_device_phase_set(device, OUTPUT_PHASE_CONNECTING);
+    {
+      outputs_device_phase_set(device, OUTPUT_PHASE_CONNECTING);
+      return ret;
+    }
 
-  return device_state_update(device, ret); // If ret < 0 then we couldn't reach the speaker
+  // If ret < 0 then we couldn't reach the speaker; the caller decides what
+  // that means to the phase
+  operation_not_begun(device);
+  if (ret < 0)
+    device->state = OUTPUT_STATE_FAILED;
+
+  return ret;
 }
 
-void
-outputs_device_cb_set(struct output_device *device, output_status_cb cb)
+static void
+callback_set(struct output_device *device, output_status_cb cb, bool op_slot)
 {
   bool fresh;
   int id;
@@ -3135,14 +3223,31 @@ outputs_device_cb_set(struct output_device *device, output_status_cb cb)
   if (!device->session)
     return;
 
-  if (device->phase == OUTPUT_PHASE_STOPPING)
-    return; // The stop's report must reach the stop's callback
-
   // The backend always takes the id, so the device's slots that are not
   // ready can no longer be reported to
-  id = callback_add(device, cb, false, &fresh);
+  id = callback_add(device, cb, op_slot, &fresh);
   outputs[device->type]->device_cb_set(device, id);
   callback_settle(device, id, fresh, true);
+}
+
+void
+outputs_device_cb_set(struct output_device *device, output_status_cb cb)
+{
+  // The stop's report must reach the stop's callback, and an operation's
+  // report the operation's
+  if (device->phase == OUTPUT_PHASE_STOPPING || device->op != OUTPUT_OP_NONE)
+    return;
+
+  callback_set(device, cb, false);
+}
+
+void
+outputs_device_op_cb_set(struct output_device *device, output_status_cb cb)
+{
+  if (device->op == OUTPUT_OP_NONE)
+    return;
+
+  callback_set(device, cb, true);
 }
 
 void
@@ -3245,16 +3350,23 @@ outputs_device_mode_set(struct output_device *device, enum output_mode mode)
 
   device->preferred_mode = mode;
 
-  // If no session is active apply immediately; otherwise the caller must stop
-  // the session first and call outputs_device_candidate_apply() in the callback.
-  if (!device->session)
+  // With nothing running or in flight the switch is made at once
+  if (!device->session && device->op == OUTPUT_OP_NONE)
     {
       effective_candidate_apply(device);
       return 0;
     }
 
-  // Return 1 only when the effective backend would actually change
-  return (effective_type_resolve(device) != device->type) ? 1 : 0;
+  // Otherwise it is made once the session has gone (see
+  // outputs_device_session_remove()) or before the next start, and 1 tells
+  // the caller to stop the session and start the device again
+  if (effective_type_resolve(device) == device->type)
+    return 0;
+
+  if (!device->backend_switch_pending)
+    DPRINTF(E_INFO, L_PLAYER, "Deferring switch of '%s' output backend until its session ends\n", device->name);
+  device->backend_switch_pending = 1;
+  return 1;
 }
 
 void
@@ -3384,46 +3496,6 @@ outputs_device_protocol_remove(struct output_device *canonical, struct output_de
   effective_candidate_apply(canonical);
   output_group_refresh();
   return 0;
-}
-
-// The return value will be the number of devices we need to wait for, either
-// because they are starting or shutting down. The return value is only negative
-// if we don't have to wait, i.e. all the selected devices failed immediately.
-int
-outputs_start(output_status_cb started_cb, output_status_cb stopped_cb, bool only_probe)
-{
-  struct output_device *device;
-  int pending = 0;
-  int ret;
-
-  for (device = outputs_device_list; device; device = device->next)
-    {
-      if (device->selected)
-	continue;
-
-      ret = outputs_device_stop(device, stopped_cb);
-      if (ret > 0)
-	pending += ret;
-    }
-
-  ret = 0; // We don't care about devices that returned an error on stop
-  for (device = outputs_device_list; device; device = device->next)
-    {
-      if (!device->selected)
-	continue;
-
-      // Followers are hidden members of a TV proxy group; the player starts
-      // them itself once the group leader's (the Apple TV's) probe succeeds,
-      // so skip them here. An Apple TV left out of its group gets no session.
-      if (outputs_device_is_tv_proxy_follower(device) || outputs_device_tv_proxy_excluded(device))
-	continue;
-
-      ret = outputs_device_start(device, started_cb, only_probe);
-      if (ret > 0)
-	pending += ret;
-    }
-
-  return (pending > 0) ? pending : ret;
 }
 
 int

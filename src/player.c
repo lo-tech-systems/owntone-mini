@@ -1717,22 +1717,33 @@ static struct output_device *
 tv_proxy_leader_of(struct output_device *follower);
 static void
 tv_proxy_leader_start(struct output_device *follower);
-static void
-tv_proxy_leader_restart_cb(struct output_device *device, enum output_device_state status);
 static bool
 speaker_group_sibling_held(struct output_device *device);
 static void
+device_op_cb(struct output_device *device, enum output_device_state status);
+static void
 device_streaming_cb(struct output_device *device, enum output_device_state status);
+static void
+device_volume_cb(struct output_device *device, enum output_device_state status);
+static void
+device_flush_cb(struct output_device *device, enum output_device_state status);
+static void
+device_level_edge_cb(struct output_device *device, enum output_device_state status);
+static void
+device_volume_echo_cb(struct output_device *device, enum output_device_state status);
+static int
+device_start(struct output_device *device, bool only_probe, bool explicit_request);
 
-// The handlers below hold what a backend report means to the player. Each
-// callback given to outputs is a thin wrapper that calls one of them and then
-// ends its command or tells the clients, as the callback always did. A handler
-// takes the value the command holds so far (0 when there is none) and returns
-// the value it stands for.
+// The handlers below hold what a backend report means to the player. Every
+// callback given to outputs leads to device_report(), which moves the device's
+// phase by the phase rule and then calls the handler for what reported: the
+// operation that ended, or the level, flush or session the report came from.
+// A handler takes the value the command holds so far (0 when there is none)
+// and returns the value it stands for.
 
 // A report while the device streams, or while it is idle with a session: a
-// failure is recovered from where it can be, a step towards streaming hands the
-// device back to this handler's callback
+// failure is recovered from where it can be, streaming starts the members of a
+// TV proxy group that wait for it
 static int
 handle_streaming(struct output_device *device, enum output_device_state status, int retval)
 {
@@ -1794,14 +1805,18 @@ handle_streaming(struct output_device *device, enum output_device_state status, 
 	              outputs_device_display_name(leader));
 
 	      leader->tv_proxy_start_direct = 1;
-	      outputs_device_start(leader, device_streaming_cb, false);
+	      device_start(leader, false, false);
 	    }
 	  else if (leader->session && !sibling_up && leader->tv_proxy_audio_suppress)
 	    {
 	      DPRINTF(E_LOG, L_PLAYER, "TV proxy: followers of '%s' are gone, restarting the Apple TV directly\n",
 	              outputs_device_display_name(leader));
 
-	      outputs_device_stop(leader, tv_proxy_leader_restart_cb);
+	      // The control-only session is stopped, and the start that follows
+	      // the stop is a direct one
+	      leader->tv_proxy_start_direct = 1;
+	      leader->restart_after_stop = 1;
+	      outputs_device_stop(leader, device_op_cb);
 	    }
 	}
 
@@ -1834,7 +1849,6 @@ handle_streaming(struct output_device *device, enum output_device_state status, 
   else
     {
       DPRINTF(E_DBG, L_PLAYER, "Callback from %s device %s to device_streaming_cb (status %d)\n", device->type_name, device->name, status);
-      outputs_device_cb_set(device, device_streaming_cb);
 
       if (status == OUTPUT_STATE_STREAMING)
 	{
@@ -1849,76 +1863,38 @@ handle_streaming(struct output_device *device, enum output_device_state status, 
   return retval;
 }
 
-static void
-device_streaming_cb(struct output_device *device, enum output_device_state status)
-{
-  handle_streaming(device, status, 0);
-
-  // We don't do this in the other cb's because they are triggered by a command
-  // and thus the update should be done as part of the command completion (which
-  // can better determine which type of listener event to use)
-  status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
-}
-
 // The answer to a level sent by a volume command
 static int
 handle_volume(struct output_device *device, enum output_device_state status, int retval)
 {
-  if (!device)
-    {
-      DPRINTF(E_LOG, L_PLAYER, "Output device disappeared before command completion!\n");
-      goto out;
-    }
-  else if (status == OUTPUT_STATE_FAILED)
-    {
-      DPRINTF(E_LOG, L_PLAYER, "The %s device '%s' failed during execution of volume command\n", device->type_name, device->name);
-      goto out;
-    }
+  if (status == OUTPUT_STATE_FAILED)
+    DPRINTF(E_LOG, L_PLAYER, "The %s device '%s' failed during execution of volume command\n", device->type_name, device->name);
+  else
+    DPRINTF(E_DBG, L_PLAYER, "Callback from %s device %s to device_volume_cb (status %d)\n", device->type_name, device->name, status);
 
-  DPRINTF(E_DBG, L_PLAYER, "Callback from %s device %s to device_volume_cb (status %d)\n", device->type_name, device->name, status);
-
-  outputs_device_cb_set(device, device_streaming_cb);
-
- out:
   // If a failure occurred when setting the volume, and we also don't have other
-  // active sessions, then we suspend playback (but not for live pipe sources)
-  if (outputs_sessions_count() == 0
-      && (!pb_session.playing_now || pb_session.playing_now->data_kind != DATA_KIND_PIPE))
+  // active sessions, then we suspend playback (but not for live pipe sources,
+  // and not when nothing plays)
+  if (outputs_sessions_count() == 0 && pb_session.playing_now && pb_session.playing_now->data_kind != DATA_KIND_PIPE)
     pb_suspend();
 
   return retval;
 }
 
-static void
-device_volume_cb(struct output_device *device, enum output_device_state status)
-{
-  commands_exec_end(cmdbase, handle_volume(device, status, 0));
-}
-
 // Answer to the level a mute or a hold put on the wire (0, or the device's own
-// level when the silence ends). Not part of a command (see
-// device_volume_echo_cb()): a failure goes to the streaming handler, success
-// hands the device back to it.
+// level when the silence ends). Not part of a command; a failure is the
+// streaming handler's, as it would have been had the send not been made
 static int
 handle_level_edge(struct output_device *device, enum output_device_state status, int retval)
 {
-  if (!device || status == OUTPUT_STATE_FAILED || status == OUTPUT_STATE_STOPPED)
+  if (status == OUTPUT_STATE_FAILED || status == OUTPUT_STATE_STOPPED)
     {
-      DPRINTF(E_INFO, L_PLAYER, "Level edge: send to '%s' ended with state %d\n", device ? device->name : "(gone)", status);
-      device_streaming_cb(device, status);
-      return retval;
+      DPRINTF(E_INFO, L_PLAYER, "Level edge: send to '%s' ended with state %d\n", device->name, status);
+      return handle_streaming(device, status, retval);
     }
 
   DPRINTF(E_DBG, L_PLAYER, "Level edge: '%s' accepted %d\n", device->name, device->volume_sent);
-  outputs_device_cb_set(device, device_streaming_cb);
-
   return retval;
-}
-
-static void
-device_level_edge_cb(struct output_device *device, enum output_device_state status)
-{
-  handle_level_edge(device, status, 0);
 }
 
 // A flushed device's answer. The command, if any, ends when the last device it
@@ -1926,12 +1902,7 @@ device_level_edge_cb(struct output_device *device, enum output_device_state stat
 static int
 handle_flush(struct output_device *device, enum output_device_state status, int retval)
 {
-  if (!device)
-    {
-      DPRINTF(E_LOG, L_PLAYER, "Output device disappeared before flush completion!\n");
-      return retval;
-    }
-  else if (status == OUTPUT_STATE_FAILED)
+  if (status == OUTPUT_STATE_FAILED)
     {
       DPRINTF(E_LOG, L_PLAYER, "The %s device '%s' failed during execution of flush command\n", device->type_name, device->name);
       return retval;
@@ -1952,17 +1923,19 @@ handle_flush(struct output_device *device, enum output_device_state status, int 
   return retval;
 }
 
+// Clients are told of a change to a device: its phase, its selection, its
+// PIN state, its hold or its mute
 static void
-device_flush_cb(struct output_device *device, enum output_device_state status)
+speaker_announce(struct output_device *device)
 {
-  handle_flush(device, status, 0);
+  status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
 }
 
-// A device's phase changed: clients are told, as for any report
+// A device's phase changed: clients are told, once per change
 static void
 phase_announce_cb(struct output_device *device)
 {
-  status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
+  speaker_announce(device);
 }
 
 // The last device a playback flush waited for has reported
@@ -1993,67 +1966,14 @@ flush_command_wait(int *retval)
   return COMMAND_PENDING;
 }
 
-// A stopped device's report
+// A stop that ended. A start the device was asked for meanwhile, or that a
+// backend-changing mode switch wants, follows by the phase rule
 static int
 handle_shutdown(struct output_device *device, enum output_device_state status, int retval)
 {
-  if (!device)
-    {
-      DPRINTF(E_WARN, L_PLAYER, "Output device disappeared before shutdown completion!\n");
-
-      if (retval != -2)
-	retval = -1;
-      return retval;
-    }
-
   DPRINTF(E_DBG, L_PLAYER, "Callback from %s device %s to device_shutdown_cb (status %d)\n", device->type_name, device->name, status);
 
   return retval;
-}
-
-static void
-device_shutdown_cb(struct output_device *device, enum output_device_state status)
-{
-  commands_exec_end(cmdbase, handle_shutdown(device, status, commands_exec_returnvalue(cmdbase)));
-}
-
-// Completes the stop of an audio-suppressed TV proxy leader whose followers
-// have all dropped (see device_streaming_cb()'s FAILED handling). The stop
-// tears down the control-only session; once it is gone we start a fresh one,
-// direct if no follower is around to wait for, otherwise the normal proxied
-// path re-derives whatever is appropriate (it will come back suppressed only
-// if a follower is actually streaming again).
-static int
-handle_tv_proxy_leader_restart(struct output_device *device, enum output_device_state status, int retval)
-{
-  if (!device)
-    return retval;
-
-  if (device->session)
-    {
-      // Stop did not complete (yet); leave the device on its normal callback
-      // rather than trying to start it on top of a live session.
-      outputs_device_cb_set(device, device_streaming_cb);
-      return retval;
-    }
-
-  if (!device->selected || player_state != PLAY_PLAYING)
-    return retval;
-
-  if (!outputs_device_tv_proxy_followers_streaming(device))
-    device->tv_proxy_start_direct = 1;
-
-  outputs_device_start(device, device_streaming_cb, false);
-
-  status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
-
-  return retval;
-}
-
-static void
-tv_proxy_leader_restart_cb(struct output_device *device, enum output_device_state status)
-{
-  handle_tv_proxy_leader_restart(device, status, 0);
 }
 
 // Starts the hidden followers of a TV proxy group once the leader (the Apple
@@ -2119,7 +2039,7 @@ tv_proxy_followers_start(struct output_device *leader)
       DPRINTF(E_INFO, L_PLAYER, "TV proxy: Apple TV '%s' up, starting follower '%s'\n",
               outputs_device_display_name(leader), outputs_device_display_name(cur));
 
-      ret = outputs_device_start(cur, device_streaming_cb, false);
+      ret = device_start(cur, false, false);
       if (ret < 0)
 	{
 	  DPRINTF(E_WARN, L_PLAYER, "TV proxy: could not start follower '%s'\n", outputs_device_display_name(cur));
@@ -2138,7 +2058,7 @@ tv_proxy_followers_start(struct output_device *leader)
   if (!leader->session)
     {
       leader->tv_proxy_start_direct = 1;
-      ret = outputs_device_start(leader, device_streaming_cb, false);
+      ret = device_start(leader, false, false);
       if (ret < 0)
 	DPRINTF(E_WARN, L_PLAYER, "TV proxy: could not start Apple TV '%s' directly\n", outputs_device_display_name(leader));
     }
@@ -2226,7 +2146,7 @@ tv_proxy_leader_start(struct output_device *follower)
   DPRINTF(E_INFO, L_PLAYER, "TV proxy: follower '%s' streaming, starting Apple TV '%s'\n",
           outputs_device_display_name(follower), outputs_device_display_name(leader));
 
-  ret = outputs_device_start(leader, device_streaming_cb, false);
+  ret = device_start(leader, false, false);
   if (ret < 0)
     DPRINTF(E_WARN, L_PLAYER, "TV proxy: could not start Apple TV '%s'\n", outputs_device_display_name(leader));
 }
@@ -2279,11 +2199,11 @@ speaker_member_returned(void *arg, int *retval)
   return COMMAND_END;
 }
 
-// Applies a start or probe result to the device. Returns the command return
-// value the result stands for (0, -1, -2 or -3); retval is the value the
-// command holds so far
+// A start or a probe that ended. The phase rule has already deselected a
+// failed start and recorded a PIN the receiver asks for. Returns -2 for a PIN
+// asked for, -1 for a failure, else retval
 static int
-device_activate_apply(struct output_device *device, enum output_device_state status, int retval)
+handle_activate(struct output_device *device, enum output_device_state status, int retval)
 {
   DPRINTF(E_DBG, L_PLAYER, "Callback from %s device %s to device_activate_cb (status %d)\n", device->type_name, device->name, status);
 
@@ -2291,30 +2211,23 @@ device_activate_apply(struct output_device *device, enum output_device_state sta
     {
       DPRINTF(E_LOG, L_PLAYER, "The %s device '%s' requires a valid PIN or password\n", device->type_name, device->name);
 
-      device->pin_pending = 1;
-      outputs_device_deselect(device);
       device->tv_proxy_followers_deferred = 0;
-
       return -2;
     }
 
   if (status == OUTPUT_STATE_FAILED)
     {
-      DPRINTF(E_LOG, L_PLAYER, "The %s device '%s' failed to activate\n", device->type_name, device->name);
+      DPRINTF(E_LOG, L_PLAYER, "The %s device '%s' failed to activate (%s)\n", device->type_name, device->name,
+	      output_failure_name(device->last_failure));
 
-      outputs_device_deselect(device);
       device->tv_proxy_followers_deferred = 0;
-
-      if (device->last_failure == OUTPUT_FAILURE_CAPACITY)
-	return -3;
-      if (retval != -2)
-	return -1;
-      return retval;
+      return -1;
     }
 
-  // Any status other than the two handled above is a step towards (or the
-  // completion of) a successful activation, so a PIN is no longer pending.
-  device->pin_pending = 0;
+  // A device deselected while it started is being stopped: nothing waits for
+  // it
+  if (!device->selected)
+    return retval;
 
   // Any status reaching here other than PASSWORD/FAILED means the leader
   // cleared pairing - a probe completes with a startup-range status, a real
@@ -2326,9 +2239,9 @@ device_activate_apply(struct output_device *device, enum output_device_state sta
   // playing the followers start here directly.
   tv_proxy_followers_start(device);
 
-  // If we were just probing or doing device verification this is a no-op, since
-  // there is no session any more
-  outputs_device_cb_set(device, device_streaming_cb);
+  // A start that ended streaming does what streaming does
+  if (status == OUTPUT_STATE_STREAMING)
+    retval = handle_streaming(device, status, retval);
 
   // A member back in a held group: its siblings' hold is ended once no
   // command is waiting (see speaker_member_returned())
@@ -2350,36 +2263,397 @@ device_activate_apply(struct output_device *device, enum output_device_state sta
   return retval;
 }
 
-static void
-device_activate_cb(struct output_device *device, enum output_device_state status)
+// An authorise that ended: the PIN paired, or the receiver refused it (or the
+// pairing timed out). What follows is the phase rule's
+static int
+handle_authorize(struct output_device *device, enum output_device_state status, int retval)
 {
-  int retval;
-
-  retval = commands_exec_returnvalue(cmdbase);
-  if (!device)
-    {
-      DPRINTF(E_WARN, L_PLAYER, "Output device disappeared during activation!\n");
-
-      if (retval != -2)
-	retval = -1;
-    }
+  if (status == OUTPUT_STATE_PASSWORD || status == OUTPUT_STATE_FAILED)
+    DPRINTF(E_LOG, L_PLAYER, "The PIN for '%s' did not pair it (%s)\n", device->name, output_failure_name(device->last_failure));
   else
-    retval = device_activate_apply(device, status, retval);
+    DPRINTF(E_INFO, L_PLAYER, "'%s' paired with the PIN\n", device->name);
 
-  commands_exec_end(cmdbase, retval);
+  return retval;
 }
 
-// Result of a start made while the player is already playing a pipe, with no
-// command waiting for it
-static void
-device_join_cb(struct output_device *device, enum output_device_state status)
+static int
+handle_volume_echo(struct output_device *device, enum output_device_state status, int retval);
+
+
+/* ---------------- The one way a speaker report is handled ----------------- */
+
+// Every operation on a speaker (a start, a probe, a stop, an authorise) and
+// every level, flush or session report reaches device_report(). It moves the
+// device's phase and flags by the phase rule (output_phase.c), runs the
+// handler for what reported, begins the operation the rule asks for, and has
+// clients told of each change. No speaker command waits for a report.
+
+// Where a report arrived: the callback of the operation in flight, or one of
+// the callbacks a device with no operation reports to
+enum report_kind
 {
-  if (device)
-    device_activate_apply(device, status, 0);
-  else
-    DPRINTF(E_WARN, L_PLAYER, "Output device disappeared during activation!\n");
+  REPORT_OP,
+  REPORT_STREAMING,
+  REPORT_VOLUME,
+  REPORT_FLUSH,
+  REPORT_LEVEL_EDGE,
+  REPORT_VOLUME_ECHO,
+};
+
+static const char *
+op_name(enum output_op op)
+{
+  switch (op)
+    {
+      case OUTPUT_OP_PROBE:     return "probe";
+      case OUTPUT_OP_START:     return "start";
+      case OUTPUT_OP_STOP:      return "stop";
+      case OUTPUT_OP_AUTHORIZE: return "authorise";
+      default:                  return "none";
+    }
+}
+
+static enum output_report
+report_of(enum output_device_state status)
+{
+  switch (status)
+    {
+      case OUTPUT_STATE_STARTUP:   return OUTPUT_REPORT_STARTUP;
+      case OUTPUT_STATE_CONNECTED: return OUTPUT_REPORT_CONNECTED;
+      case OUTPUT_STATE_STREAMING: return OUTPUT_REPORT_STREAMING;
+      case OUTPUT_STATE_FAILED:    return OUTPUT_REPORT_FAILED;
+      case OUTPUT_STATE_PASSWORD:  return OUTPUT_REPORT_PASSWORD;
+      default:                     return OUTPUT_REPORT_STOPPED;
+    }
+}
+
+// The facts the phase rule reads, from the device as it is now
+static void
+phase_input_fill(struct output_phase_input *in, struct output_device *device)
+{
+  memset(in, 0, sizeof(*in));
+  in->phase = device->phase;
+  in->op = device->op;
+  in->selected = device->selected;
+  in->playing = (player_state == PLAY_PLAYING);
+  in->has_session = (device->session != NULL);
+  in->stop_after_start = device->stop_after_start;
+  in->restart_after_stop = device->restart_after_stop;
+  in->upgrade_after_probe = device->upgrade_after_probe;
+  in->then_select = device->then_select;
+  in->pin_pending = device->pin_pending;
+}
+
+// Whether a start the phase rule asks for after a report is left to another
+// path: an Apple TV left out of its group gets no session; a TV proxy
+// follower is started by its leader's chain, unless the leader is selected and
+// waits for no PIN; a leader whose followers are not streaming is started by
+// them once one streams, unless the start follows its own stop (a restart).
+// ended is the operation whose end asks for the start
+static bool
+start_left_to_others(struct output_device *device, enum output_op ended)
+{
+  struct output_device *leader;
+
+  if (outputs_device_tv_proxy_excluded(device) || device->tv_proxy_followers_deferred)
+    return true;
+
+  if (outputs_device_is_tv_proxy_follower(device))
+    {
+      leader = tv_proxy_leader_of(device);
+      return !leader || !leader->selected || leader->pin_pending;
+    }
+
+  if (outputs_device_is_tv_proxy_leader(device) && ended != OUTPUT_OP_STOP && !device->tv_proxy_start_direct
+      && !outputs_device_tv_proxy_followers_streaming(device))
+    return true;
+
+  return false;
+}
+
+// The flags, the reason and the selection a phase rule result asks for
+static void
+flags_apply(struct output_device *device, const struct output_phase_result *res)
+{
+  if (res->set_stop_after_start && !device->stop_after_start)
+    DPRINTF(E_INFO, L_PLAYER, "'%s' will stop once its start ends\n", device->name);
+  if (res->set_restart_after_stop && !device->restart_after_stop)
+    DPRINTF(E_INFO, L_PLAYER, "'%s' will start again once it has stopped\n", device->name);
+
+  if (res->set_stop_after_start)
+    device->stop_after_start = 1;
+  if (res->clear_stop_after_start)
+    device->stop_after_start = 0;
+  if (res->set_restart_after_stop)
+    device->restart_after_stop = 1;
+  if (res->clear_restart_after_stop)
+    device->restart_after_stop = 0;
+  if (res->set_upgrade_after_probe)
+    device->upgrade_after_probe = 1;
+  if (res->clear_upgrade_after_probe)
+    device->upgrade_after_probe = 0;
+  if (res->set_pin_pending)
+    device->pin_pending = 1;
+  if (res->clear_pin_pending)
+    device->pin_pending = 0;
+  if (res->clear_then_select)
+    device->then_select = 0;
+
+  if (res->reason != OUTPUT_FAILURE_NONE)
+    device->last_failure = res->reason;
+
+  if (res->deselect && device->selected)
+    outputs_device_deselect(device);
+}
+
+static void
+operation_failed_at_once(struct output_device *device, enum output_op op);
+
+// Begins the operation the phase rule asked for
+static void
+operation_start(struct output_device *device, enum output_op op, bool explicit_request)
+{
+  switch (op)
+    {
+      case OUTPUT_OP_START:
+      case OUTPUT_OP_PROBE:
+	device_start(device, op == OUTPUT_OP_PROBE, explicit_request);
+	break;
+      case OUTPUT_OP_STOP:
+	outputs_device_stop(device, device_op_cb);
+	break;
+      default:
+	break;
+    }
+}
+
+// Sets the phase the event reached, then begins the next operation, which
+// sets its own phase. Each phase change is announced as it is made; a change
+// of selection or PIN state with no phase change is announced here
+static void
+result_phases_apply(struct output_device *device, const struct output_phase_result *res, enum output_op next, bool explicit_request)
+{
+  enum output_phase reached = res->mid_phase;
+  bool announced;
+
+  // A request can move the phase with no operation (a deselect while
+  // connecting, a select that takes it back); with none begun the phase is the
+  // one the event reached
+  if (next == OUTPUT_OP_NONE && res->next_op == OUTPUT_OP_NONE)
+    reached = res->phase;
+
+  announced = outputs_device_phase_set(device, reached);
+
+  if (next != OUTPUT_OP_NONE)
+    {
+      operation_start(device, next, explicit_request);
+      announced = announced || (device->phase != reached);
+    }
+
+  if (res->announce && !announced)
+    speaker_announce(device);
+}
+
+// Applies one report to a device: in is the rule's input, filled from the
+// device and the report's slot
+static void
+report_apply(struct output_device *device, enum output_device_state status, struct output_phase_input *in, enum report_kind kind)
+{
+  struct output_phase_result res;
+  enum output_op op = in->op;
+  enum output_op next;
+  bool current = in->report_current_gen;
+  bool ended;
+
+  in->report_reason = (status == OUTPUT_STATE_FAILED || status == OUTPUT_STATE_PASSWORD) ? device->last_failure : OUTPUT_FAILURE_NONE;
+  output_phase_on_report(in, report_of(status), &res);
+
+  DPRINTF(E_DBG, L_PLAYER, "'%s' %s -> %s (op %s, gen %u%s)\n", device->name, output_phase_name(in->phase), output_phase_name(res.phase),
+	  op_name(op), device->op_gen, current ? "" : ", older operation");
+  if (!current)
+    DPRINTF(E_DBG, L_PLAYER, "Report %d from an older operation of '%s' moves nothing\n", status, device->name);
+
+  ended = current && res.clear_op && (op != OUTPUT_OP_NONE);
+
+  flags_apply(device, &res);
+  if (res.clear_op)
+    device->op = OUTPUT_OP_NONE;
+
+  next = res.next_op;
+  if ((next == OUTPUT_OP_START || next == OUTPUT_OP_PROBE) && start_left_to_others(device, ended ? op : OUTPUT_OP_NONE))
+    {
+      DPRINTF(E_DBG, L_PLAYER, "'%s' is not started after its report: it is started another way\n", device->name);
+      next = OUTPUT_OP_NONE;
+    }
+
+  result_phases_apply(device, &res, next, false);
+
+  // The session's next report reaches the session's callback; a report that
+  // was one step of an operation gives the operation a new slot
+  if (device->session && device->op == OUTPUT_OP_NONE)
+    outputs_device_cb_set(device, device_streaming_cb);
+  else if (current && kind == REPORT_OP && device->session && device->op == op && !ended)
+    outputs_device_op_cb_set(device, device_op_cb);
+
+  if (ended)
+    {
+      switch (op)
+	{
+	  case OUTPUT_OP_START:
+	  case OUTPUT_OP_PROBE:
+	    handle_activate(device, status, 0);
+	    break;
+	  case OUTPUT_OP_STOP:
+	    handle_shutdown(device, status, 0);
+	    break;
+	  case OUTPUT_OP_AUTHORIZE:
+	    handle_authorize(device, status, 0);
+	    break;
+	  default:
+	    break;
+	}
+    }
+  else if (current || kind == REPORT_FLUSH)
+    {
+      switch (kind)
+	{
+	  case REPORT_STREAMING:
+	    handle_streaming(device, status, 0);
+	    break;
+	  case REPORT_VOLUME:
+	    handle_volume(device, status, 0);
+	    break;
+	  case REPORT_FLUSH:
+	    handle_flush(device, status, 0);
+	    break;
+	  case REPORT_LEVEL_EDGE:
+	    handle_level_edge(device, status, 0);
+	    break;
+	  case REPORT_VOLUME_ECHO:
+	    handle_volume_echo(device, status, 0);
+	    break;
+	  case REPORT_OP:
+	    break;
+	}
+    }
+
+  // A start that ends after playback stopped or paused missed that flush; it
+  // is flushed now, and its delayed stop follows the flush's answer
+  if (ended && (op == OUTPUT_OP_START || op == OUTPUT_OP_PROBE) && device->session && device->op == OUTPUT_OP_NONE
+      && player_state != PLAY_PLAYING)
+    {
+      DPRINTF(E_INFO, L_PLAYER, "'%s' started after playback stopped, flushing it\n", device->name);
+      outputs_device_flush(device, device_flush_cb);
+    }
+}
+
+static void
+device_report(struct output_device *device, enum output_device_state status, enum report_kind kind)
+{
+  struct output_phase_input in;
+
+  if (!device)
+    {
+      DPRINTF(E_WARN, L_PLAYER, "Report for device %" PRIu64 " which has gone\n", outputs_report_device_id());
+      status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
+      return;
+    }
+
+  phase_input_fill(&in, device);
+  in.report_current_gen = outputs_report_current_gen();
+  report_apply(device, status, &in, kind);
 
   status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
+}
+
+// A start or an authorise the backend refused at once ends as if it had
+// reported a failure
+static void
+operation_failed_at_once(struct output_device *device, enum output_op op)
+{
+  struct output_phase_input in;
+
+  if (device->last_failure == OUTPUT_FAILURE_NONE)
+    device->last_failure = OUTPUT_FAILURE_UNREACHABLE;
+
+  DPRINTF(E_WARN, L_PLAYER, "Could not begin the %s of '%s' (%s)\n", op_name(op), device->name, output_failure_name(device->last_failure));
+
+  phase_input_fill(&in, device);
+  in.phase = OUTPUT_PHASE_CONNECTING;
+  in.op = op;
+  in.report_current_gen = true;
+  report_apply(device, OUTPUT_STATE_FAILED, &in, REPORT_OP);
+}
+
+// Starts or probes the device with the operation callback. A start the user
+// asked for is explicit, which is what lets a device waiting for a PIN start
+static int
+device_start(struct output_device *device, bool only_probe, bool explicit_request)
+{
+  int ret;
+
+  ret = outputs_device_start(device, device_op_cb, only_probe, explicit_request);
+  if (ret < 0)
+    operation_failed_at_once(device, only_probe ? OUTPUT_OP_PROBE : OUTPUT_OP_START);
+
+  return ret;
+}
+
+// A request for the device through the phase rule: its flags, its phases and
+// the operation the rule begins. The caller has selected or deselected it
+static void
+device_request(struct output_device *device, enum output_request req, bool explicit_request, bool backend_changes)
+{
+  struct output_phase_input in;
+  struct output_phase_result res;
+
+  phase_input_fill(&in, device);
+  in.explicit_request = explicit_request;
+  in.backend_changes = backend_changes;
+  output_phase_on_request(&in, req, &res);
+
+  if (req == OUTPUT_REQ_SELECT && device->pin_pending && !explicit_request)
+    DPRINTF(E_INFO, L_PLAYER, "Not starting '%s': it waits for a PIN\n", device->name);
+
+  flags_apply(device, &res);
+  result_phases_apply(device, &res, res.next_op, explicit_request);
+}
+
+static void
+device_op_cb(struct output_device *device, enum output_device_state status)
+{
+  device_report(device, status, REPORT_OP);
+}
+
+static void
+device_streaming_cb(struct output_device *device, enum output_device_state status)
+{
+  device_report(device, status, REPORT_STREAMING);
+}
+
+static void
+device_volume_cb(struct output_device *device, enum output_device_state status)
+{
+  device_report(device, status, REPORT_VOLUME);
+  commands_exec_end(cmdbase, 0);
+}
+
+static void
+device_flush_cb(struct output_device *device, enum output_device_state status)
+{
+  device_report(device, status, REPORT_FLUSH);
+}
+
+static void
+device_level_edge_cb(struct output_device *device, enum output_device_state status)
+{
+  device_report(device, status, REPORT_LEVEL_EDGE);
+}
+
+static void
+device_volume_echo_cb(struct output_device *device, enum output_device_state status)
+{
+  device_report(device, status, REPORT_VOLUME_ECHO);
 }
 
 /* ------------------------- Internal playback routines --------------------- */
@@ -2507,7 +2781,7 @@ static void
 pb_abort(void)
 {
   // Immediate stop of all outputs
-  outputs_stop(device_streaming_cb);
+  outputs_stop(device_op_cb);
   outputs_metadata_purge();
 
   pb_session_stop();
@@ -2697,45 +2971,63 @@ playback_abort(void *arg, int *retval)
 }
 
 // With nothing selected and nothing started, start the first speaker that may be
-// chosen automatically. Takes and returns the result of the start that preceded
-// it, which is the result of the last attempt made here if there is one.
-static int
-outputs_autoselect(output_status_cb cb, int ret)
+// chosen automatically
+static void
+outputs_autoselect(void)
 {
   struct output_device *device;
 
   for (device = outputs_list(); device; device = device->next)
     {
-      if (device->selected || outputs_priority(device) == 0 || device->session)
+      if (device->selected || outputs_priority(device) == 0 || device->session || device->op != OUTPUT_OP_NONE)
 	continue;
 
-      ret = outputs_device_start(device, cb, false);
-      if (ret < 0)
-	continue;
+      outputs_device_select(device, -1);
+      device_request(device, OUTPUT_REQ_SELECT, false, false);
+      if (device->op == OUTPUT_OP_NONE)
+	{
+	  outputs_device_deselect(device);
+	  continue;
+	}
 
       DPRINTF(E_LOG, L_PLAYER, "Autoselected %s device '%s'\n", device->type_name, device->name);
-      outputs_device_select(device, -1);
       break;
     }
-
-  return ret;
 }
 
-// A live pipe plays from the moment it opens and drains at the live rate, with
-// or without speakers. The selected speakers are started here, with callbacks
-// that hold no command, and each joins the running stream as it comes up
+// Brings the speakers in line with their selection: a deselected speaker with
+// a session or an operation in flight is stopped, a selected one is started
+// (joined to the stream that plays, or probed when nothing plays), each
+// through the phase rule. TV proxy followers wait for their leader's chain and
+// an Apple TV left out of its group gets no session. Nothing waits for them
 static void
-pb_outputs_join(void)
+speakers_join(void)
 {
-  int ret;
+  struct output_device *device;
+  bool any = false;
 
-  ret = outputs_start(device_join_cb, device_streaming_cb, false);
-  if (ret < 0)
-    DPRINTF(E_WARN, L_PLAYER, "All selected speakers failed to start\n");
+  for (device = outputs_list(); device; device = device->next)
+    {
+      if (!device->selected && (device->session || device->op != OUTPUT_OP_NONE))
+	device_request(device, OUTPUT_REQ_DESELECT, false, false);
+    }
 
-  // autoselect also applies in non-error cases (if no devices were selected)
-  if (speaker_autoselect && outputs_sessions_count() == 0 && ret <= 0)
-    outputs_autoselect(device_join_cb, ret);
+  for (device = outputs_list(); device; device = device->next)
+    {
+      if (!device->selected)
+	continue;
+
+      if (outputs_device_is_tv_proxy_follower(device) || outputs_device_tv_proxy_excluded(device))
+	continue;
+
+      device_request(device, OUTPUT_REQ_SELECT, false, false);
+      if (device->session || device->op != OUTPUT_OP_NONE)
+	any = true;
+    }
+
+  // autoselect also applies if no devices were selected
+  if (speaker_autoselect && outputs_sessions_count() == 0 && !any)
+    outputs_autoselect();
 }
 
 static enum command_state
@@ -2751,10 +3043,9 @@ playback_start_bh(void *arg, int *retval)
   // some of the speakers we tried to start responded with failure
   status_update(PLAY_PLAYING, LISTENER_PLAYER | LISTENER_SPEAKER | LISTENER_VOLUME);
 
-  // A pipe did not wait for its speakers, so they are started now that the
+  // A pipe does not wait for its speakers, so they are started now that the
   // player is playing. A speaker that is already running is left alone.
-  if (pb_session.playing_now && pb_session.playing_now->data_kind == DATA_KIND_PIPE)
-    pb_outputs_join();
+  speakers_join();
 
   // Complete any TV proxy group whose leader was probed before the player
   // reached PLAY_PLAYING; its followers were deferred until this point.
@@ -2818,32 +3109,8 @@ playback_start_item(void *arg, int *retval)
 	}
     }
 
-  // A live pipe does not wait for its speakers: it plays at once and they join
-  // from the bottom half
-  if (pb_session.playing_now && pb_session.playing_now->data_kind == DATA_KIND_PIPE)
-    {
-      *retval = 0;
-      return COMMAND_END;
-    }
-
-  // Start sessions on selected devices. We shouldn't see any callbacks to
-  // device_shutdown_cb, since the unselected devices shouldn't have sessions.
-  *retval = outputs_start(device_activate_cb, device_shutdown_cb, false);
-  if (*retval < 0)
-    DPRINTF(E_WARN, L_PLAYER, "All selected speakers failed to start\n");
-
-  // autoselect also applies in non-error cases (if no devices were selected).
-  // Note that if session count is 0 then retval should never be positive,
-  // because that would mean we are initiating a session. Just to be safe, we
-  // check anyway.
-  if (speaker_autoselect && outputs_sessions_count() == 0 && *retval <= 0)
-    *retval = outputs_autoselect(device_activate_cb, *retval);
-
-  // We're async if we need to wait for devices starting
-  if (*retval > 0)
-    return COMMAND_PENDING; // async
-
-  // Otherwise, just run the bottom half
+  // Every source is a live pipe, which does not wait for its speakers: it
+  // plays at once and they join from the bottom half
   *retval = 0;
   return COMMAND_END;
 }
@@ -3370,18 +3637,21 @@ speaker_group_deselect(struct output_device *device)
     }
 }
 
-static int
-speaker_group_start(struct output_device *device, output_status_cb cb, bool only_probe)
+// Starts the device and every member of its group that a group start does not
+// pass over, through the phase rule. explicit_request: the user asked for it
+static void
+speaker_group_start(struct output_device *device, bool explicit_request)
 {
   struct output_device *cur;
   const char *group_id;
-  int ret;
-  int pending = 0;
-  int successes = 0;
 
   group_id = outputs_device_group_id(device);
   if (!group_id)
-    return outputs_device_start(device, cb, only_probe);
+    {
+      if (!group_start_skip(device))
+	device_request(device, OUTPUT_REQ_SELECT, explicit_request, false);
+      return;
+    }
 
   for (cur = outputs_list(); cur; cur = cur->next)
     {
@@ -3393,34 +3663,24 @@ speaker_group_start(struct output_device *device, output_status_cb cb, bool only
       if (group_start_skip(cur))
         continue;
 
-      ret = outputs_device_start(cur, cb, only_probe);
-      if (ret > 0)
-        {
-          pending += ret;
-          successes++;
-        }
-      else if (ret == 0)
-        successes++;
+      device_request(cur, OUTPUT_REQ_SELECT, explicit_request, false);
     }
-
-  if (pending > 0)
-    return pending;
-
-  return (successes > 0) ? 0 : -1;
 }
 
-static int
-speaker_group_stop(struct output_device *device, output_status_cb cb)
+// Stops the device and every member of its group, through the phase rule (a
+// start in flight runs on and is stopped once it has ended)
+static void
+speaker_group_stop(struct output_device *device)
 {
   struct output_device *cur;
   const char *group_id;
-  int ret;
-  int pending = 0;
-  int successes = 0;
 
   group_id = outputs_device_group_id(device);
   if (!group_id)
-    return outputs_device_stop(device, cb);
+    {
+      device_request(device, OUTPUT_REQ_DESELECT, false, false);
+      return;
+    }
 
   for (cur = outputs_list(); cur; cur = cur->next)
     {
@@ -3429,20 +3689,8 @@ speaker_group_stop(struct output_device *device, output_status_cb cb)
       if (!cur_gid || strcmp(cur_gid, group_id) != 0)
         continue;
 
-      ret = outputs_device_stop(cur, cb);
-      if (ret > 0)
-        {
-          pending += ret;
-          successes++;
-        }
-      else if (ret == 0)
-        successes++;
+      device_request(cur, OUTPUT_REQ_DESELECT, false, false);
     }
-
-  if (pending > 0)
-    return pending;
-
-  return (successes > 0) ? 0 : -1;
 }
 
 static int
@@ -3639,16 +3887,6 @@ speaker_get_byindex(void *arg, int *retval)
   return COMMAND_END;
 }
 
-// A speaker command that fails at once has already changed the selection but
-// has no session callback to announce it, so announce it here. -4 and -5 are
-// refusals that changed nothing.
-static void
-speaker_cmd_failed_notify(int retval)
-{
-  if (retval < 0 && retval != -4 && retval != -5)
-    status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
-}
-
 static enum command_state
 speaker_set(void *arg, int *retval)
 {
@@ -3658,8 +3896,6 @@ speaker_set(void *arg, int *retval)
   int max_volume;
   int nspk;
   int i;
-
-  *retval = -1;
 
   ids = speaker_set_param->device_ids;
 
@@ -3692,13 +3928,23 @@ speaker_set(void *arg, int *retval)
         outputs_device_deselect(device);
     }
 
-  *retval = outputs_start(device_activate_cb, device_shutdown_cb, PLAYER_ONLY_PROBE);
+  // Stops first, then the starts, each through the phase rule; the speakers
+  // given are the user's own selection
+  for (device = outputs_list(); device; device = device->next)
+    {
+      if (!device->selected)
+	device_request(device, OUTPUT_REQ_DESELECT, false, false);
+    }
 
-  if (*retval > 0)
-    return COMMAND_PENDING; // async
+  for (device = outputs_list(); device; device = device->next)
+    {
+      if (!device->selected || group_start_skip(device))
+	continue;
 
-  speaker_cmd_failed_notify(*retval);
+      device_request(device, OUTPUT_REQ_SELECT, true, false);
+    }
 
+  *retval = 0;
   return COMMAND_END;
 }
 
@@ -3709,13 +3955,33 @@ struct speaker_enable_param
   int volume;     // level to start at, or -1 for none
 };
 
+// Selects the device and its group and starts them as the user's own select,
+// at the level given (-1 for none)
+static void
+speaker_enable_apply(struct output_device *device, int volume)
+{
+  int max_volume;
+
+  // An explicit level is not capped to the master volume
+  max_volume = (volume < 0 && player_state != PLAY_STOPPED) ? outputs_volume_get() : -1;
+
+  speaker_group_select(device, max_volume);
+
+  // Register the level on the device and every member of its group before the
+  // start, so that the first volume the speakers are sent is this one. Nothing
+  // is sent here: the start does that.
+  if (volume >= 0)
+    speaker_group_volume_apply(device, volume, -1, NULL);
+
+  speaker_group_start(device, true);
+}
+
 static enum command_state
 speaker_enable(void *arg, int *retval)
 {
   struct speaker_enable_param *param = arg;
   struct output_device *device;
   struct tv_proxy_enable enable;
-  int max_volume;
 
   *retval = -1;
 
@@ -3745,24 +4011,10 @@ speaker_enable(void *arg, int *retval)
                 outputs_device_display_name(device), enable.flag ? "without" : "with");
     }
 
-  // An explicit level is not capped to the master volume
-  max_volume = (param->volume < 0 && player_state != PLAY_STOPPED) ? outputs_volume_get() : -1;
+  // Accepted: the outcome reaches clients as the device's phase
+  speaker_enable_apply(device, param->volume);
 
-  speaker_group_select(device, max_volume);
-
-  // Register the level on the device and every member of its group before the
-  // start, so that the first volume the speakers are sent is this one. Nothing
-  // is sent here: the start does that.
-  if (param->volume >= 0)
-    speaker_group_volume_apply(device, param->volume, -1, NULL);
-
-  *retval = speaker_group_start(device, device_activate_cb, PLAYER_ONLY_PROBE);
-
-  if (*retval > 0)
-    return COMMAND_PENDING; // async
-
-  speaker_cmd_failed_notify(*retval);
-
+  *retval = 0;
   return COMMAND_END;
 }
 
@@ -3781,14 +4033,11 @@ speaker_disable(void *arg, int *retval)
   DPRINTF(E_DBG, L_PLAYER, "Speaker disable: '%s' (id=%" PRIu64 ")\n", outputs_device_display_name(device), *id);
 
   speaker_group_deselect(device);
+  device->tv_proxy_start_direct = 0;
 
-  *retval = speaker_group_stop(device, device_shutdown_cb);
+  speaker_group_stop(device);
 
-  if (*retval > 0)
-    return COMMAND_PENDING; // async
-
-  speaker_cmd_failed_notify(*retval);
-
+  *retval = 0;
   return COMMAND_END;
 }
 
@@ -3875,20 +4124,17 @@ speaker_offset_ms_set(void *arg, int *retval)
   if (player_state == PLAY_PAUSED)
     {
       // No live session to refresh; stop so the new offset is picked up
-      // when playback resumes
-      *retval = outputs_device_stop(device, device_shutdown_cb);
+      // when playback resumes, which starts the device again
+      device_request(device, OUTPUT_REQ_DESELECT, false, false);
     }
   else
     {
       // Refresh any live realtime session so the new offset applies to the
       // next sync packet; a no-op for backends without live offset support
       outputs_device_offset_set(device);
-      *retval = 0;
     }
 
-  if (*retval > 0)
-    return COMMAND_PENDING; // async
-
+  *retval = 0;
   return COMMAND_END;
 
  error:
@@ -3968,35 +4214,6 @@ speaker_mute_set(void *arg, int *retval)
   return COMMAND_END;
 }
 
-// The forced stop for a protocol mode switch has reported. Applies the newly
-// selected candidate then restarts playback on the device if appropriate.
-static int
-handle_mode_switch(struct output_device *device, enum output_device_state status, int retval)
-{
-  if (!device)
-    {
-      DPRINTF(E_WARN, L_PLAYER, "Output device disappeared before mode switch completion\n");
-      return -1;
-    }
-
-  DPRINTF(E_DBG, L_PLAYER, "Mode switch stop complete for '%s', applying new candidate\n", device->name);
-
-  // Now safe: session is NULL so effective_candidate_apply will update extra_device_info
-  outputs_device_candidate_apply(device);
-
-  // Restart if the device is still selected and playback is running
-  if (device->selected && player_state == PLAY_PLAYING)
-    outputs_device_start(device, device_streaming_cb, false);
-
-  return 0;
-}
-
-static void
-mode_switch_cb(struct output_device *device, enum output_device_state status)
-{
-  commands_exec_end(cmdbase, handle_mode_switch(device, status, 0));
-}
-
 static enum command_state
 speaker_mode_set(void *arg, int *retval)
 {
@@ -4012,16 +4229,10 @@ speaker_mode_set(void *arg, int *retval)
   if (ret < 0)
     goto error; // Invalid mode value
 
+  // The backend changes under a session or a start in flight: the device is
+  // stopped and started again on the new backend, by the phase rule
   if (ret == 1)
-    {
-      // Active session, backend would change: stop first, restart in callback
-      *retval = outputs_device_stop(device, mode_switch_cb);
-      if (*retval > 0)
-        return COMMAND_PENDING;
-
-      // Stop returned 0 (already stopped, race) or -1 (error): apply now
-      outputs_device_candidate_apply(device);
-    }
+    device_request(device, OUTPUT_REQ_MODE_SWITCH, false, true);
 
   *retval = 0;
   return COMMAND_END;
@@ -4033,61 +4244,28 @@ speaker_mode_set(void *arg, int *retval)
   return COMMAND_END;
 }
 
-// Attempts to reactivate a speaker that has failed. That includes restarting
-// playback if it was stopped.
+// Attempts to reactivate a speaker that has failed, while the player plays.
+// Every source is a live pipe, which plays on when its speakers fail, so there
+// is no suspended playback to resume first
 static enum command_state
 speaker_resurrect(void *arg, int *retval)
 {
   struct speaker_set_param *param = arg;
   struct output_device *device;
 
-  *retval = -1;
+  *retval = 0;
 
   device = outputs_device_get(*param->device_ids);
   if (!device)
-    goto out;
+    return COMMAND_END;
 
   DPRINTF(E_DBG, L_PLAYER, "Speaker resurrect: '%s' (id=%" PRIu64 ")\n", device->name, device->id);
 
-  if (device->busy || device->prevent_playback)
-    goto out;
+  if (device->busy || device->prevent_playback || !device->selected || player_state != PLAY_PLAYING)
+    return COMMAND_END;
 
-  if (player_state == PLAY_PAUSED)
-    {
-      // Playback was suspended by device_streaming_cb() because the speaker was
-      // the only one playing. In that case we need to first resume the source,
-      // then wait for the speaker to reactivate, and then run bottom half.
-      *retval = pb_resume();
-      if (*retval < 0)
-	goto out;
-    }
-  else if (player_state == PLAY_STOPPED)
-    {
-      // If PLAY_STOPPED there is nothing to do, we can't resurrect since the
-      // source is gone
-      goto out;
-    }
+  device_request(device, OUTPUT_REQ_SELECT, false, false);
 
-  *retval = outputs_device_start(device, device_activate_cb, false);
-
-  if (*retval > 0)
-    return COMMAND_PENDING; // Wait for speaker
-
- out:
-  return COMMAND_END;
-}
-
-static enum command_state
-speaker_resurrect_bh(void *arg, int *retval)
-{
-  // Playback was suspended by device_streaming_cb. We resumed the input in the
-  // top half, now we have to start the playback timer and update status
-  if (player_state == PLAY_PAUSED)
-    return playback_start_bh(arg, retval);
-
-  status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
-
-  *retval = 0;
   return COMMAND_END;
 }
 
@@ -4096,15 +4274,35 @@ speaker_authorize(void *arg, int *retval)
 {
   struct speaker_attr_param *param = arg;
   struct output_device *device;
+  struct output_phase_input in;
+  struct output_phase_result res;
+  int ret;
+
+  *retval = -1;
 
   device = outputs_device_get(param->spk_id);
   if (!device)
     return COMMAND_END;
 
-  *retval = outputs_device_authorize(device, param->pin, device_activate_cb);
+  *retval = 0;
 
-  if (*retval > 0)
-    return COMMAND_PENDING; // async
+  phase_input_fill(&in, device);
+  output_phase_on_request(&in, OUTPUT_REQ_AUTHORIZE, &res);
+  if (res.next_op != OUTPUT_OP_AUTHORIZE)
+    {
+      // The PIN is dropped; whatever is in flight reports as usual
+      DPRINTF(E_INFO, L_PLAYER, "PIN for '%s' not used: it has a session or an operation in flight (%s)\n",
+	      device->name, op_name(device->op));
+      return COMMAND_END;
+    }
+
+  flags_apply(device, &res);
+
+  // The PIN is used inside this call (the backend builds its first pairing
+  // request at once), so it is never kept
+  ret = outputs_device_authorize(device, param->pin, device_op_cb);
+  if (ret < 0)
+    operation_failed_at_once(device, OUTPUT_OP_AUTHORIZE);
 
   return COMMAND_END;
 }
@@ -4114,12 +4312,9 @@ speaker_start_all(void *arg, int *retval)
 {
   outputs_stop_delayed_cancel();
 
-  *retval = outputs_start(device_activate_cb, device_shutdown_cb, false);
+  speakers_join();
 
-  if (*retval > 0)
-    return COMMAND_PENDING; // async
-
-  // Otherwise we are done
+  *retval = 0;
   return COMMAND_END;
 }
 
@@ -4249,25 +4444,16 @@ volume_echo_role(struct output_device *device)
 static int
 handle_volume_echo(struct output_device *device, enum output_device_state status, int retval)
 {
-  if (!device || status == OUTPUT_STATE_FAILED || status == OUTPUT_STATE_STOPPED)
+  if (status == OUTPUT_STATE_FAILED || status == OUTPUT_STATE_STOPPED)
     {
-      DPRINTF(E_INFO, L_PLAYER, "Volume echo: send to '%s' ended with state %d\n", device ? device->name : "(gone)", status);
-      device_streaming_cb(device, status);
-      return retval;
+      DPRINTF(E_INFO, L_PLAYER, "Volume echo: send to '%s' ended with state %d\n", device->name, status);
+      return handle_streaming(device, status, retval);
     }
 
   DPRINTF(E_INFO, L_PLAYER, "Volume echo: '%s' accepted %d after %" PRIu64 " ms\n",
           device->name, device->volume_sent, monotonic_ms() - device->volume_sent_ms);
 
-  outputs_device_cb_set(device, device_streaming_cb);
-
   return retval;
-}
-
-static void
-device_volume_echo_cb(struct output_device *device, enum output_device_state status)
-{
-  handle_volume_echo(device, status, 0);
 }
 
 static void
@@ -4785,6 +4971,19 @@ memstats_sample_cmd(void *arg, int *retval)
 
   sample->sessions = outputs_sessions_count();
   airplay_encoder_budget_get(&sample->enc_in_use, &sample->enc_budget);
+
+#ifdef STORM_DEBUG
+  {
+    struct output_device *device;
+    uint64_t now = outputs_monotonic_ms();
+
+    // Every operation ends within its backend's bounds, far below this
+    for (device = outputs_list(); device; device = device->next)
+      if (device->op != OUTPUT_OP_NONE && now - device->op_started_ms > 120000)
+	DPRINTF(E_LOG, L_PLAYER, "Bug! Operation %s on '%s' has been in flight for %" PRIu64 " s\n",
+		op_name(device->op), device->name, (now - device->op_started_ms) / 1000);
+  }
+#endif
   *retval = 0;
   return COMMAND_END;
 }
@@ -5047,7 +5246,7 @@ player_speaker_resurrect(void *arg)
 
   param.device_ids = (uint64_t *)arg;
 
-  commands_exec_sync(cmdbase, speaker_resurrect, speaker_resurrect_bh, &param);
+  commands_exec_sync(cmdbase, speaker_resurrect, NULL, &param);
 }
 
 int
@@ -5377,7 +5576,7 @@ player_init(void)
   ret = outputs_init();
   outputs_flush_done_cb_set(flush_done_cb);
   outputs_phase_cb_set(phase_announce_cb);
-  outputs_stop_cb_set(device_streaming_cb);
+  outputs_stop_cb_set(device_op_cb);
   if (ret < 0)
     {
       DPRINTF(E_FATAL, L_PLAYER, "Output initiation failed\n");

@@ -526,10 +526,19 @@ outputs_device_phase_set(struct output_device *device, enum output_phase phase);
 void
 outputs_phase_cb_set(void (*cb)(struct output_device *device));
 
-// The callback the report of a delayed stop (outputs_device_stop_delayed)
-// reaches when the stop is made
+// The callback the report of a delayed stop (outputs_device_stop_delayed), or
+// of the stop of a device being removed, reaches
 void
 outputs_stop_cb_set(output_status_cb cb);
+
+// Read by a callback during its report: the device the report's slot was
+// registered for (known even when the device has gone), and whether the slot
+// carries the device's current operation generation
+uint64_t
+outputs_report_device_id(void);
+
+bool
+outputs_report_current_gen(void);
 
 /* ----------------------- Called by backend modules ------------------------ */
 
@@ -608,9 +617,20 @@ outputs_device_select(struct output_device *device, int max_volume);
 void
 outputs_device_deselect(struct output_device *device);
 
+// Begins a start or a probe: the operation generation moves on, op and its time
+// are recorded, the backend is called and the phase becomes connecting. Only
+// the start, the stop and the authorise begin an operation, one at a time:
+// asked for during a stop it starts the device once the stop has ended, during
+// a probe a real start follows the probe, during a start or an authorise it is
+// nothing. A device waiting for a PIN is started only by an explicit request
+// (the user's own select). 0 when nothing was begun; negative when the backend
+// failed at once, which leaves the phase to the caller.
 int
-outputs_device_start(struct output_device *device, output_status_cb cb, bool only_probe);
+outputs_device_start(struct output_device *device, output_status_cb cb, bool only_probe, bool explicit_request);
 
+// Begins a stop. During a start or a probe the start runs on and the device is
+// stopped once it has ended (the phase is stopping meanwhile); during a stop it
+// is nothing.
 int
 outputs_device_stop(struct output_device *device, output_status_cb cb);
 
@@ -663,11 +683,21 @@ outputs_device_volume_to_pct(struct output_device *device, const char *value);
 int
 outputs_device_quality_set(struct output_device *device, struct media_quality *quality, output_status_cb cb);
 
+// Begins an authorise (an operation, see outputs_device_start). 0 when the
+// device has a session or an operation in flight; negative when the backend
+// failed at once, which leaves the phase to the caller.
 int
 outputs_device_authorize(struct output_device *device, const char *pin, output_status_cb cb);
 
+// Gives the device's session a new callback for its next report. Nothing while
+// an operation is in flight, whose report must reach the operation's callback
 void
 outputs_device_cb_set(struct output_device *device, output_status_cb cb);
+
+// Gives the operation in flight a new callback slot for its next report, when
+// a report of it did not end it
+void
+outputs_device_op_cb_set(struct output_device *device, output_status_cb cb);
 
 void
 outputs_device_free(struct output_device *device);
@@ -676,11 +706,12 @@ outputs_device_free(struct output_device *device);
 // is not a valid enum member. Returns 0 if the mode is accepted. If the mode
 // names a concrete protocol (RAOP or AIRPLAY2) that this device does not
 // support, a WARN is logged and the existing mode is kept unchanged (the API
-// treats this as a no-op, not an error). If no session is active, the effective
-// backend is recomputed and applied immediately; the function then returns 0.
-// If a session IS active and the preferred backend would change, the function
-// returns 1 to signal that the caller must stop the session and call
-// outputs_device_candidate_apply() once the stop completes.
+// treats this as a no-op, not an error). If no session is active and nothing
+// is in flight, the effective backend is recomputed and applied immediately;
+// the function then returns 0. Otherwise, if the preferred backend would
+// change, the switch is made once the session has gone (or before the next
+// start) and the function returns 1 to signal that the caller must stop the
+// device and start it again.
 int
 outputs_device_mode_set(struct output_device *device, enum output_mode mode);
 
@@ -767,9 +798,8 @@ outputs_device_protocol_remove(struct output_device *canonical, struct output_de
 bool
 outputs_device_gc(int grace_secs);
 
-int
-outputs_start(output_status_cb started_cb, output_status_cb stopped_cb, bool only_probe);
-
+// Stops every device with a session, composed with whatever is in flight on it
+// (see outputs_device_stop)
 int
 outputs_stop(output_status_cb cb);
 

@@ -491,9 +491,12 @@ jsonapi_reply_config(struct httpd_request *hreq)
   else
     json_object_object_add(jreply, "event_socket", NULL);
   // The API features this build has, by name: "mute" means PUT
-  // /api/outputs/{id} takes muted and the output rows carry it
+  // /api/outputs/{id} takes muted and the output rows carry it;
+  // "async_outputs" means speaker writes answer without waiting for the
+  // speaker, whose outcome follows as its state
   CHECK_NULL(L_WEB, japi_features = json_object_new_array());
   json_object_array_add(japi_features, json_object_new_string("mute"));
+  json_object_array_add(japi_features, json_object_new_string("async_outputs"));
   json_object_object_add(jreply, "api_features", japi_features);
 
   CHECK_ERRNO(L_WEB, evbuffer_add_printf(hreq->out_body, "%s", json_object_to_json_string(jreply)));
@@ -798,12 +801,9 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
 	    goto error; // refused before anything is started
 	}
 
+      // Accepted means in flight or done: the outcome, a failure or a PIN
+      // asked for included, reaches clients as the speaker's state
       ret = selected ? player_speaker_enable(output_id, include_tv, start_volume) : player_speaker_disable(output_id);
-      if (ret == -3)
-	{
-	  jparse_free(request);
-	  return jsonapi_reply_error(hreq, HTTP_SERVUNAVAIL, "encoder_capacity");
-	}
       if (ret == -4)
 	{
 	  jparse_free(request);
@@ -813,16 +813,6 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
 	{
 	  jparse_free(request);
 	  return jsonapi_reply_error(hreq, HTTP_CONFLICT, "group_not_present");
-	}
-      if (selected && ret == -2)
-	{
-	  jparse_free(request);
-	  return jsonapi_reply_error(hreq, HTTP_BADREQUEST, "pin_required");
-	}
-      if (selected && ret < 0)
-	{
-	  jparse_free(request);
-	  return jsonapi_reply_error(hreq, HTTP_BADREQUEST, "start_failed");
 	}
       if (ret < 0)
 	goto error;

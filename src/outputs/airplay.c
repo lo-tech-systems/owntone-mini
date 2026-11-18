@@ -5581,9 +5581,10 @@ start_retry_timer_cb(int fd, short what, void *arg)
 
   device = outputs_device_get(ctx->device_id);
 
-  // Device disappeared, or something already started a session in the meantime.
+  // Device disappeared, something already started a session in the meantime,
+  // or the device has been moved to another backend between the attempts.
   // Resolve the still-pending activation callback as failed so it never hangs.
-  if (!device || device->session)
+  if (!device || device->session || device->type != OUTPUT_TYPE_AIRPLAY)
     {
       outputs_cb(ctx->callback_id, ctx->device_id, OUTPUT_STATE_FAILED);
       goto out;

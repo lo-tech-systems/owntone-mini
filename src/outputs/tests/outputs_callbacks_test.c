@@ -248,9 +248,58 @@ test_owner(void)
   expect("owner: an id given up and taken again", !outputs_callbacks_owner(reg, N, a, DEV_A) && outputs_callbacks_owner(reg, N, a, DEV_B));
 }
 
+// A device that is going is stopped whatever is in flight: the start's slot is
+// given up first, so the stop's slot is no second operation, and a report
+// already waiting stays to be dispatched
+static void
+test_device_going(void)
+{
+  enum outputs_callback_add_case how;
+  int start, level, stop, released;
+
+  reset();
+  level = add(DEV_A, cb_level, 6, false, &how);
+  mark_ready(level, DEV_A);
+  start = add(DEV_A, cb_start, 7, true, &how);
+
+  released = outputs_callbacks_settle(reg, N, DEV_A, -1, false, true);
+  expect("going: the start's slot given up", released == 1 && !reg[start].cb);
+  expect("going: the waiting report kept", reg[level].ready && reg[level].cb == cb_level);
+
+  stop = add(DEV_A, cb_stop, 8, true, &how);
+  expect("going: the stop takes a fresh slot, no complaint", stop >= 0 && how == OUTPUTS_CALLBACK_FRESH);
+}
+
+// One operation after another, as the report handler composes them: the
+// next operation's slot is taken once the last one's report was dispatched
+// (its slot freed), so each takes a fresh slot without a complaint, and the
+// session's own slot at the new generation is given up when the backend takes
+// the operation's id
+static void
+test_operations_in_turn(void)
+{
+  enum outputs_callback_add_case how;
+  int start, session, stop, released;
+
+  reset();
+  start = add(DEV_A, cb_start, 1, true, &how);
+  mark_ready(start, DEV_A);
+  memset(&reg[start], 0, sizeof(reg[start]));   // dispatched
+
+  session = add(DEV_A, cb_level, 1, false, &how);
+  outputs_callbacks_settle(reg, N, DEV_A, session, true, true);
+
+  stop = add(DEV_A, cb_stop, 2, true, &how);
+  expect("in turn: the stop is no second operation", how == OUTPUTS_CALLBACK_FRESH);
+  released = outputs_callbacks_settle(reg, N, DEV_A, stop, true, true);
+  expect("in turn: the session's slot given up", released == 1 && !reg[session].cb && reg[stop].cb == cb_stop);
+}
+
 int
 main(void)
 {
+  test_device_going();
+  test_operations_in_turn();
   test_in_place();
   test_new_operation_over_level();
   test_declined();
