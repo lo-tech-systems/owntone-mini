@@ -109,6 +109,18 @@ enum output_failure_reason
   OUTPUT_FAILURE_CAPACITY = 1,
 };
 
+// Whether the level a speaker sets itself (its knob, buttons or app) is
+// followed through a UPnP renderer on the same device
+enum output_volume_follow
+{
+  OUTPUT_VOLUME_FOLLOW_NONE          = 0,
+  OUTPUT_VOLUME_FOLLOW_SEARCHING     = 1,
+  OUTPUT_VOLUME_FOLLOW_UPNP          = 2,
+  // Followed, but the renderer's answers to levels sent do not fit its scale
+  // being ours plus a small offset, so nothing it reports is taken
+  OUTPUT_VOLUME_FOLLOW_UNKNOWN_SCALE = 3,
+};
+
 /* Linked list of device info used by the player for each device
  */
 struct output_device
@@ -253,6 +265,17 @@ struct output_device
   // Levels sent back to the device since volume_echo_since_ms, to cap them
   int volume_echo_count;
   uint64_t volume_echo_since_ms;
+  // When the device last reported its level itself (see the DACP endpoint)
+  uint64_t volume_reported_ms;
+
+  // Following the device's level through its UPnP renderer: the state the
+  // rows show (set by the follower; UNKNOWN_SCALE is shown from
+  // upnp_scale_unknown), and the learned difference between the renderer's
+  // scale and ours, read from the settings once
+  enum output_volume_follow volume_follow;
+  int upnp_offset;
+  bool upnp_offset_loaded;
+  bool upnp_scale_unknown;
 
   // Wall-clock time of the last successful mDNS advertisement for this
   // candidate. Set by candidate_store(); 0 if never set (legacy devices).

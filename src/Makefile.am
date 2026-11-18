@@ -69,6 +69,7 @@ owntone_SOURCES = main.c \
 	commands.c commands.h \
 	evchan.c evchan.h \
 	evchan_proto.c evchan_proto.h \
+	upnp_parse.c upnp_parse.h \
 	outputs_group_flags.h \
 	ptpd.c ptpd.h \
 	outputs/plist_wrap.h

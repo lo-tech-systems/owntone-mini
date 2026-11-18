@@ -2746,6 +2746,14 @@ raop_set_volume_internal(struct raop_session *rs, int volume, evrtsp_req_cb cb)
 
   rs->volume = volume;
 
+  // Every level sent, including the start and resend ones, so the player can
+  // tell the device confirming it from the device setting a level itself
+  if (ret >= 0)
+    {
+      device->volume_sent = volume;
+      device->volume_sent_ms = outputs_monotonic_ms();
+    }
+
   return ret;
 }
 

@@ -89,6 +89,7 @@
 #include "outputs.h"
 #include "outputs_group_flags.h"
 #include "speakers_summary.h"
+#include "upnp_parse.h"
 
 // Audio and metadata input
 #include "input.h"
@@ -2920,6 +2921,13 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
 
   spk->has_homepods = outputs_device_leads_tv_proxy_group(device);
 
+  if (device->v4_address)
+    snprintf(spk->v4_address, sizeof(spk->v4_address), "%s", device->v4_address);
+  snprintf(spk->config_name, sizeof(spk->config_name), "%s", device->name ? device->name : "");
+  spk->volume_follow = device->volume_follow;
+  if (device->volume_follow == OUTPUT_VOLUME_FOLLOW_UPNP && device->upnp_scale_unknown)
+    spk->volume_follow = OUTPUT_VOLUME_FOLLOW_UNKNOWN_SCALE;
+
   // An Apple TV enabled without itself plays nothing: its row shows what its
   // HomePods are doing
   if (spk->has_homepods && outputs_device_tv_proxy_excluded(device))
@@ -4070,10 +4078,168 @@ volume_setraw_speaker(void *arg, int *retval)
   // A raw volume is the device reporting its own level (see the DACP
   // endpoint). It is recorded on the whole group at once, so clients see it
   // straight away, and may be sent back once the reports stop.
+  device->volume_reported_ms = monotonic_ms();
   volume_echo_schedule(device, vol_param->volstr, volume);
   speaker_group_volume_apply(device, volume, -1, NULL);
 
   *retval = 0;
+
+  return COMMAND_END;
+}
+
+// A level from the device's UPnP renderer. The renderer answers every level
+// sent to the device too, at its own scale, which is ours plus an offset
+// learned from those answers. Nothing is sent to the device from here.
+static enum command_state
+volume_followed_report(void *arg, int *retval)
+{
+  struct player_followed_report *r = arg;
+  struct output_device *device;
+  struct output_device *row;
+  uint64_t now = monotonic_ms();
+  bool was_unknown;
+  int offset;
+
+  // Always 0, so the bottom half runs; it looks at the result
+  *retval = 0;
+
+  device = outputs_device_get(r->id);
+  if (!device)
+    {
+      r->result = FOLLOWED_GONE;
+      return COMMAND_END;
+    }
+
+  row = outputs_device_row(device);
+  r->row_id = row->id;
+  snprintf(r->row_name, sizeof(r->row_name), "%s", outputs_device_display_name(row));
+  r->sent = device->volume_sent;
+
+  if (!device->upnp_offset_loaded)
+    {
+      device->upnp_offset = config_get_device_int(device->name, "upnp_volume_offset", 0);
+      device->upnp_offset_loaded = true;
+    }
+  r->offset = device->upnp_offset;
+
+  // A level the device has just reported over DACP is waiting to be sent
+  // back, or has only just been: the renderer may still hold the old one,
+  // which must not be recorded over it. The send-back's own answer then
+  // arrives as an answer to a level sent.
+  if ((device->volume_echo_timer && evtimer_pending(device->volume_echo_timer, NULL))
+      || (device->volume_reported_ms && now - device->volume_reported_ms < PLAYER_VOLUME_ECHO_DELAY_MS + 100))
+    {
+      r->result = FOLLOWED_HELD;
+      return COMMAND_END;
+    }
+
+  // Soon after a level is sent, whatever the renderer reports is its answer
+  // to it, so a turn of the knob in that time is missed; the next is not
+  if (device->volume_sent_ms && now - device->volume_sent_ms < PLAYER_VOLUME_ECHO_WINDOW_MS)
+    {
+      was_unknown = device->upnp_scale_unknown;
+      switch (upnp_level_echo(r->raw, r->mute, device->volume_sent, &offset))
+	{
+	  case UPNP_ECHO_LEARN:
+	    device->upnp_scale_unknown = false;
+	    if (was_unknown)
+	      {
+		DPRINTF(E_LOG, L_PLAYER, "'%s' answered %d with %d: its scale fits again, following its level\n",
+			device->name, device->volume_sent, r->raw);
+		r->follow_changed = true;
+	      }
+	    if (offset != device->upnp_offset)
+	      {
+		device->upnp_offset = offset;
+		config_set_device_int_deferred(device->name, "upnp_volume_offset", offset);
+		r->offset = offset;
+		r->learned = true;
+	      }
+	    break;
+
+	  case UPNP_ECHO_NO_LEARN:
+	    break;
+
+	  case UPNP_ECHO_SCALE_UNKNOWN:
+	    if (!was_unknown)
+	      {
+		DPRINTF(E_WARN, L_PLAYER, "'%s' answered %d with %d: its scale is not ours, not following its level\n",
+			device->name, device->volume_sent, r->raw);
+		r->follow_changed = true;
+	      }
+	    device->upnp_scale_unknown = true;
+	    break;
+	}
+
+      r->result = FOLLOWED_CONFIRMATION;
+      return COMMAND_END;
+    }
+
+  if (device->upnp_scale_unknown)
+    {
+      r->result = FOLLOWED_SCALE_UNKNOWN;
+      return COMMAND_END;
+    }
+
+  r->pct = upnp_level_map(r->raw, r->mute, device->upnp_offset);
+  if (r->pct == device->volume)
+    {
+      r->result = FOLLOWED_UNCHANGED;
+      return COMMAND_END;
+    }
+
+  // Recorded on the whole group, never sent: the device is already playing at it
+  speaker_group_volume_apply(device, r->pct, -1, NULL);
+  r->result = FOLLOWED_RECORDED;
+  return COMMAND_END;
+}
+
+static enum command_state
+volume_followed_bh(void *arg, int *retval)
+{
+  struct player_followed_report *r = arg;
+
+  if (r->result == FOLLOWED_RECORDED)
+    status_update(player_state, LISTENER_VOLUME);
+  if (r->follow_changed)
+    status_update(player_state, LISTENER_SPEAKER);
+
+  return COMMAND_END;
+}
+
+struct follow_state_param {
+  uint64_t id;
+  enum output_volume_follow state;
+  bool changed;
+};
+
+static enum command_state
+speaker_follow_state_set(void *arg, int *retval)
+{
+  struct follow_state_param *p = arg;
+  struct output_device *device;
+
+  device = outputs_device_get(p->id);
+  if (!device)
+    {
+      *retval = -1;
+      return COMMAND_END;
+    }
+
+  p->changed = (device->volume_follow != p->state);
+  device->volume_follow = p->state;
+
+  *retval = 0;
+  return COMMAND_END;
+}
+
+static enum command_state
+speaker_follow_state_bh(void *arg, int *retval)
+{
+  struct follow_state_param *p = arg;
+
+  if (p->changed)
+    status_update(player_state, LISTENER_SPEAKER);
 
   return COMMAND_END;
 }
@@ -4487,6 +4653,20 @@ player_volume_setraw_speaker(uint64_t id, const char *volstr)
   ret = commands_exec_sync(cmdbase, volume_setraw_speaker, volume_generic_bh, &vol_param);
 
   return ret;
+}
+
+int
+player_volume_followed_report(struct player_followed_report *r)
+{
+  return commands_exec_sync(cmdbase, volume_followed_report, volume_followed_bh, r);
+}
+
+int
+player_speaker_follow_state_set(uint64_t id, enum output_volume_follow state)
+{
+  struct follow_state_param p = { .id = id, .state = state };
+
+  return commands_exec_sync(cmdbase, speaker_follow_state_set, speaker_follow_state_bh, &p);
 }
 
 /* ------------------- Non-blocking commands used by mDNS ------------------- */
