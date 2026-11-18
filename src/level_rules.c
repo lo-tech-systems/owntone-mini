@@ -29,3 +29,40 @@ level_wire_stale(bool silent, int volume, int volume_sent)
 {
   return level_to_send(silent, volume) != volume_sent;
 }
+
+static bool
+within(uint64_t at_ms, uint64_t now_ms, uint64_t window_ms)
+{
+  return at_ms != 0 && now_ms >= at_ms && now_ms - at_ms < window_ms;
+}
+
+enum level_report
+level_report_classify(bool silent, bool asks, int level,
+                      uint64_t sent_ms, bool sent_restores, uint64_t wake_sent_ms,
+                      uint64_t now_ms, uint64_t window_ms)
+{
+  // A request: no answer rule applies
+  if (asks)
+    return silent ? LEVEL_REPORT_WAKE : LEVEL_REPORT_RECORD;
+
+  if (silent)
+    {
+      // The answer to our 0, whatever its level
+      if (within(sent_ms, now_ms, window_ms))
+	return LEVEL_REPORT_ABSORB;
+      // Where we put it
+      if (level == 0)
+	return LEVEL_REPORT_ABSORB;
+      // A later step of a turn already forwarded
+      if (within(wake_sent_ms, now_ms, window_ms))
+	return LEVEL_REPORT_ABSORB;
+
+      return LEVEL_REPORT_WAKE;
+    }
+
+  // Settling after the level was put back
+  if (sent_restores && within(sent_ms, now_ms, window_ms))
+    return LEVEL_REPORT_ABSORB;
+
+  return LEVEL_REPORT_RECORD;
+}

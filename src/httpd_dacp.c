@@ -114,6 +114,16 @@ volume_report_pct(const struct player_speaker_info *speaker, uint64_t id, const 
   volume_report(speaker, id, verb, value);
 }
 
+// Reports a command the receiver sent (or a wake its volume buttons made)
+// under the output row that stands for it, as an AirPlay 2 receiver's
+// commands are reported. Dropped when no supervisor is listening.
+static void
+receiver_command_post(const struct player_speaker_info *speaker, const char *verb)
+{
+  if (evchan_event_receiver_command(speaker->row_id, speaker->id, speaker->row_name, verb, "dacp") < 0)
+    DPRINTF(E_DBG, L_DACP, "Receiver command '%s' from '%s' not reported, no event channel\n", verb, speaker->name);
+}
+
 
 /* ------------------------------- SETPROPERTY -------------------------------- */
 
@@ -126,6 +136,7 @@ static void
 setproperty_devicevolume(struct setproperty_ctx *ctx, const char *key, const char *value)
 {
   struct player_speaker_info speaker;
+  int ret;
 
   if (speaker_get(&speaker, ctx->hreq) < 0)
     {
@@ -135,9 +146,11 @@ setproperty_devicevolume(struct setproperty_ctx *ctx, const char *key, const cha
 
   DPRINTF(E_INFO, L_DACP, "DACP: '%s' reports volume %s -> speaker '%s'\n", key, value, speaker.name);
 
-  player_volume_setraw_speaker(speaker.id, value);
-
-  volume_report(&speaker, 0, key, value);
+  ret = player_volume_setraw_speaker(speaker.id, value);
+  if (ret == 2)
+    receiver_command_post(&speaker, "wake");
+  else if (ret != 1)
+    volume_report(&speaker, 0, key, value); // Recorded, or an error, reported as it always was
 }
 
 static void
@@ -216,6 +229,7 @@ dacp_reply_volumeup(struct httpd_request *hreq)
 {
   struct player_speaker_info speaker;
   int volume;
+  int ret;
 
   if (speaker_get(&speaker, hreq) < 0)
     {
@@ -227,9 +241,13 @@ dacp_reply_volumeup(struct httpd_request *hreq)
 
   DPRINTF(E_INFO, L_DACP, "DACP: '%s' reports volume %d -> speaker '%s'\n", "volumeup", volume, speaker.name);
 
-  player_volume_setabs_speaker(speaker.id, volume);
-
-  volume_report_pct(&speaker, 0, "volumeup", volume);
+  // The level is worked out from the kept one, so a silent speaker wakes
+  // at its own level
+  ret = player_volume_asked_speaker(speaker.id, volume);
+  if (ret == 2)
+    receiver_command_post(&speaker, "wake");
+  else
+    volume_report_pct(&speaker, 0, "volumeup", volume);
 
   httpd_send_reply(hreq, HTTP_NOCONTENT, "No Content", HTTPD_SEND_NO_GZIP);
   return 0;
@@ -240,6 +258,7 @@ dacp_reply_volumedown(struct httpd_request *hreq)
 {
   struct player_speaker_info speaker;
   int volume;
+  int ret;
 
   if (speaker_get(&speaker, hreq) < 0)
     {
@@ -251,9 +270,13 @@ dacp_reply_volumedown(struct httpd_request *hreq)
 
   DPRINTF(E_INFO, L_DACP, "DACP: '%s' reports volume %d -> speaker '%s'\n", "volumedown", volume, speaker.name);
 
-  player_volume_setabs_speaker(speaker.id, volume);
-
-  volume_report_pct(&speaker, 0, "volumedown", volume);
+  // The level is worked out from the kept one, so a silent speaker wakes
+  // at its own level
+  ret = player_volume_asked_speaker(speaker.id, volume);
+  if (ret == 2)
+    receiver_command_post(&speaker, "wake");
+  else
+    volume_report_pct(&speaker, 0, "volumedown", volume);
 
   httpd_send_reply(hreq, HTTP_NOCONTENT, "No Content", HTTPD_SEND_NO_GZIP);
   return 0;

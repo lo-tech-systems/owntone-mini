@@ -84,6 +84,8 @@ enum player_followed_result {
   FOLLOWED_UNCHANGED,     // the level the device already has
   FOLLOWED_HELD,          // the device has just reported over DACP; dropped
   FOLLOWED_SCALE_UNKNOWN, // the device's scale is not ours plus a small offset; dropped
+  FOLLOWED_ABSORBED,      // the device is silent, or its level was just put back: not its level; dropped
+  FOLLOWED_WAKE,          // the silent device's own control was turned; reported as a wake
   FOLLOWED_GONE,          // no such device
 };
 
@@ -216,8 +218,18 @@ player_volume_setrel_speaker(uint64_t id, int relvol);
 int
 player_volume_setabs_speaker(uint64_t id, int vol);
 
+// A level the device reports it is at (an AirPlay volume in dB). 0 when
+// recorded, 1 when it is not the device's level (it is silent, or its level
+// was just put back), 2 when it is a wake, -1 on error. Any thread but the
+// player.
 int
 player_volume_setraw_speaker(uint64_t id, const char *volstr);
+
+// A level the device asks for (a DACP volume button), 0 to 100: applied and
+// sent as a level set through the API is, unless the device is silent, which
+// makes it a wake (2). -1 on error. Any thread but the player.
+int
+player_volume_asked_speaker(uint64_t id, int vol);
 
 // A level (an AirPlay volume in dB, as for player_volume_setraw_speaker()) the
 // device reports it is already playing at: recorded like a raw volume, but

@@ -35,4 +35,23 @@ level_to_send(bool silent, int volume);
 bool
 level_wire_stale(bool silent, int volume, int volume_sent);
 
+enum level_report
+{
+  LEVEL_REPORT_RECORD,  // the device's level: recorded as it always was
+  LEVEL_REPORT_ABSORB,  // not the device's level: an answer to a level sent, or a step of a turn already handled
+  LEVEL_REPORT_WAKE,    // a person turned the silent device's own control
+};
+
+// What a level the device sent means. silent: the device is muted or held by
+// sending it 0. asks: the device asks for the level (a DACP volume button)
+// rather than reporting one it is at; a request is never an answer. level is
+// on our scale. sent_ms: when a level was last put on the wire (0: never);
+// sent_restores: that level ended a silence; wake_sent_ms: when a report from
+// the silent device was last forwarded as a wake (0: none). A time is inside
+// the window when it is set and now_ms is less than window_ms after it.
+enum level_report
+level_report_classify(bool silent, bool asks, int level,
+                      uint64_t sent_ms, bool sent_restores, uint64_t wake_sent_ms,
+                      uint64_t now_ms, uint64_t window_ms);
+
 #endif /* !__LEVEL_RULES_H__ */

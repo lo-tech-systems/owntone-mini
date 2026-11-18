@@ -91,6 +91,7 @@
 #include "outputs_group_flags.h"
 #include "speakers_summary.h"
 #include "upnp_parse.h"
+#include "level_rules.h"
 
 // Audio and metadata input
 #include "input.h"
@@ -196,6 +197,9 @@ struct speaker_attr_param
   // A level the device reported that it is already playing at, so it is
   // never sent back to it (see volume_setraw_speaker())
   bool no_send_back;
+  // The device asks for this level (a DACP volume button); it is applied and
+  // sent
+  bool asks;
 
   bool prevent_playback;
   bool busy;
@@ -4246,6 +4250,19 @@ volume_echo_schedule(struct output_device *device, const char *volstr, int volum
           device->name, restarted ? "restarted" : "armed", PLAYER_VOLUME_ECHO_DELAY_MS);
 }
 
+// What a level the device sent means, given its silence and the levels sent to
+// it lately. The rules are in level_rules.c; this is their one caller.
+static enum level_report
+speaker_report_classify(struct output_device *device, int level, bool asks)
+{
+  return level_report_classify(outputs_device_silent(device), asks, level,
+                               device->volume_sent_ms, device->volume_sent_restores, device->wake_sent_ms,
+                               monotonic_ms(), PLAYER_VOLUME_ECHO_WINDOW_MS);
+}
+
+// One command for every level a device reports and every level it asks for.
+// Results: 0 recorded, 1 not the device's level (it is silent, or its level
+// was just put back), 2 a wake, -1 error; pending while an asked level is sent.
 static enum command_state
 volume_setraw_speaker(void *arg, int *retval)
 {
@@ -4261,12 +4278,46 @@ volume_setraw_speaker(void *arg, int *retval)
       return COMMAND_END;
     }
 
-  volume = outputs_device_volume_to_pct(device, vol_param->volstr); // Only converts
-  if (volume < 0)
+  if (vol_param->volstr)
     {
-      DPRINTF(E_LOG, L_PLAYER, "Could not parse volume '%s' in update_volume() for speaker '%s'\n", vol_param->volstr, device->name);
-      *retval = -1;
-      return COMMAND_END;
+      volume = outputs_device_volume_to_pct(device, vol_param->volstr); // Only converts
+      if (volume < 0)
+	{
+	  DPRINTF(E_LOG, L_PLAYER, "Could not parse volume '%s' in update_volume() for speaker '%s'\n", vol_param->volstr, device->name);
+	  *retval = -1;
+	  return COMMAND_END;
+	}
+    }
+  else
+    volume = vol_param->volume; // A request, already on our scale
+
+  switch (speaker_report_classify(device, volume, vol_param->asks))
+    {
+      case LEVEL_REPORT_ABSORB:
+	if (outputs_device_silent(device))
+	  DPRINTF(E_DBG, L_PLAYER, "'%s' reports %d while silent: not its level\n", device->name, volume);
+	else
+	  DPRINTF(E_DBG, L_PLAYER, "'%s' reports %d just after its level was put back: not a change\n", device->name, volume);
+	*retval = 1;
+	return COMMAND_END;
+
+      case LEVEL_REPORT_WAKE:
+	device->wake_sent_ms = monotonic_ms();
+	DPRINTF(E_INFO, L_PLAYER, "'%s' woke: its own control %s %d while silent\n",
+		device->name, vol_param->asks ? "asks for" : "reports", volume);
+	*retval = 2;
+	return COMMAND_END;
+
+      case LEVEL_REPORT_RECORD:
+	break;
+    }
+
+  if (vol_param->asks)
+    {
+      // The device asks for the level: applied on its group and sent, as a
+      // level set through the API is
+      *retval = speaker_group_volume_apply(device, volume, -1, device_volume_cb);
+      return (*retval > 0) ? COMMAND_PENDING : COMMAND_END;
     }
 
   // A raw volume is the device reporting its own level (see the DACP
@@ -4301,16 +4352,25 @@ volume_reported_speaker(void *arg, int *retval)
   vol_param.no_send_back = true;
 
   volume_setraw_speaker(&vol_param, retval);
-  if (*retval < 0)
-    return COMMAND_END;
-
-  status_update(player_state, LISTENER_VOLUME);
+  if (*retval < 0 || *retval == 1)
+    return COMMAND_END; // Nothing recorded, nothing to tell
 
   device = outputs_device_get(param->id);
   if (!device)
     return COMMAND_END;
 
   row = outputs_device_row(device);
+
+  // A wake changes no row, so there is no status update
+  if (*retval == 2)
+    {
+      if (evchan_event_receiver_command(row->id, device->id, outputs_device_display_name(row), "wake", "airplay2_events") < 0)
+	DPRINTF(E_DBG, L_PLAYER, "Wake from '%s' not reported, no event channel\n", device->name);
+      return COMMAND_END;
+    }
+
+  status_update(player_state, LISTENER_VOLUME);
+
   if (evchan_event_device_volume(row->id, device->id, outputs_device_display_name(row), param->verb, param->volstr) < 0)
     DPRINTF(E_DBG, L_PLAYER, "Volume '%s' from '%s' not reported, no event channel\n", param->verb, device->name);
 
@@ -4328,6 +4388,7 @@ volume_followed_report(void *arg, int *retval)
   struct output_device *row;
   uint64_t now = monotonic_ms();
   bool was_unknown;
+  enum upnp_echo echo;
   int offset;
 
   // Always 0, so the bottom half runs; it looks at the result
@@ -4371,7 +4432,11 @@ volume_followed_report(void *arg, int *retval)
     {
       device->volume_answered = true;
       was_unknown = device->upnp_scale_unknown;
-      switch (upnp_level_echo(r->raw, r->mute, device->volume_sent, &offset))
+      // The first report after a silence ended may be a level the knob reached
+      // before the device applied ours, which would read as a wrong scale, so
+      // nothing is learned from it
+      echo = device->volume_sent_restores ? UPNP_ECHO_NO_LEARN : upnp_level_echo(r->raw, r->mute, device->volume_sent, &offset);
+      switch (echo)
 	{
 	  case UPNP_ECHO_LEARN:
 	    device->upnp_scale_unknown = false;
@@ -4415,6 +4480,23 @@ volume_followed_report(void *arg, int *retval)
     }
 
   r->pct = upnp_level_map(r->raw, r->mute, device->upnp_offset);
+
+  switch (speaker_report_classify(device, r->pct, false))
+    {
+      case LEVEL_REPORT_ABSORB:
+	r->result = FOLLOWED_ABSORBED;
+	return COMMAND_END;
+
+      case LEVEL_REPORT_WAKE:
+	device->wake_sent_ms = now;
+	DPRINTF(E_INFO, L_PLAYER, "'%s' woke: its own control reports %d while silent\n", device->name, r->pct);
+	r->result = FOLLOWED_WAKE;
+	return COMMAND_END;
+
+      case LEVEL_REPORT_RECORD:
+	break;
+    }
+
   if (r->pct == device->volume)
     {
       r->result = FOLLOWED_UNCHANGED;
@@ -4906,10 +4988,30 @@ player_volume_setraw_speaker(uint64_t id, const char *volstr)
   vol_param.spk_id = id;
   vol_param.volstr  = volstr;
   vol_param.no_send_back = false;
+  vol_param.asks = false;
 
   ret = commands_exec_sync(cmdbase, volume_setraw_speaker, volume_generic_bh, &vol_param);
 
   return ret;
+}
+
+int
+player_volume_asked_speaker(uint64_t id, int vol)
+{
+  struct speaker_attr_param vol_param;
+
+  if (vol < 0 || vol > 100)
+    {
+      DPRINTF(E_LOG, L_PLAYER, "Volume (%d) for player_volume_asked_speaker is out of range\n", vol);
+      return -1;
+    }
+
+  memset(&vol_param, 0, sizeof(vol_param));
+  vol_param.spk_id = id;
+  vol_param.volume = vol;
+  vol_param.asks = true;
+
+  return commands_exec_sync(cmdbase, volume_setraw_speaker, volume_generic_bh, &vol_param);
 }
 
 int

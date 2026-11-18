@@ -107,7 +107,7 @@ evchan_proto_changed_json(uint64_t seq)
 }
 
 char *
-evchan_proto_event_json(uint64_t seq, enum evchan_proto_event_kind kind, const char *verb, const char *value,
+evchan_proto_event_json(uint64_t seq, enum evchan_proto_event_kind kind, const char *verb, const char *value, const char *protocol,
                         const char *speaker_id, const char *member_id, const char *speaker_name, uint64_t at_ms)
 {
   json_object *obj;
@@ -129,7 +129,7 @@ evchan_proto_event_json(uint64_t seq, enum evchan_proto_event_kind kind, const c
   json_object_object_add(obj, "kind", json_object_new_string(kind == EVCHAN_EVENT_RECEIVER_COMMAND ? "receiver_command" : "device_volume"));
   json_object_object_add(obj, "verb", json_object_new_string(verb));
   if (kind == EVCHAN_EVENT_RECEIVER_COMMAND)
-    json_object_object_add(obj, "protocol", json_object_new_string("airplay2_events"));
+    json_object_object_add(obj, "protocol", json_object_new_string(protocol ? protocol : "unknown"));
   else
     json_object_object_add(obj, "value", json_object_new_string(value ? value : ""));
   json_object_object_add(obj, "speaker", jspeaker);

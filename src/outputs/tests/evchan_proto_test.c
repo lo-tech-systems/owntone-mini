@@ -215,7 +215,7 @@ event_receiver_command_with_name(void)
   json_object *speaker;
 
   case_begin("event_receiver_command_with_name");
-  obj = parse_owned(evchan_proto_event_json(3, EVCHAN_EVENT_RECEIVER_COMMAND, "paus", NULL, "9988776655443322", "9988776655443399", "Speaker One", 190511));
+  obj = parse_owned(evchan_proto_event_json(3, EVCHAN_EVENT_RECEIVER_COMMAND, "paus", NULL, "airplay2_events", "9988776655443322", "9988776655443399", "Speaker One", 190511));
   CHECK(str_is(obj, "type", "event"));
   CHECK(int_is(obj, "seq", 3));
   CHECK(str_is(obj, "kind", "receiver_command"));
@@ -238,12 +238,41 @@ event_without_a_name_has_null_name(void)
   json_object *speaker;
 
   case_begin("event_without_a_name_has_null_name");
-  obj = parse_owned(evchan_proto_event_json(4, EVCHAN_EVENT_RECEIVER_COMMAND, "play", NULL, "12", "12", NULL, 5));
+  obj = parse_owned(evchan_proto_event_json(4, EVCHAN_EVENT_RECEIVER_COMMAND, "play", NULL, "airplay2_events", "12", "12", NULL, 5));
   speaker = member(obj, "speaker");
   CHECK(speaker != NULL);
   CHECK(speaker && json_object_object_get_ex(speaker, "name", NULL));
   CHECK(speaker && member(speaker, "name") == NULL);
   CHECK(speaker && str_is(speaker, "id", "12"));
+  json_object_put(obj);
+  case_end();
+}
+
+static void
+event_receiver_command_carries_its_protocol(void)
+{
+  json_object *obj;
+
+  case_begin("event_receiver_command_carries_its_protocol");
+  obj = parse_owned(evchan_proto_event_json(8, EVCHAN_EVENT_RECEIVER_COMMAND, "paus", NULL, "dacp", "21", "21", "Speaker Three", 77));
+  CHECK(str_is(obj, "kind", "receiver_command"));
+  CHECK(str_is(obj, "verb", "paus"));
+  CHECK(str_is(obj, "protocol", "dacp"));
+  CHECK(member(obj, "value") == NULL);
+  json_object_put(obj);
+
+  obj = parse_owned(evchan_proto_event_json(9, EVCHAN_EVENT_RECEIVER_COMMAND, "wake", NULL, "upnp", "21", "22", "Speaker Three", 78));
+  CHECK(str_is(obj, "verb", "wake"));
+  CHECK(str_is(obj, "protocol", "upnp"));
+  json_object_put(obj);
+
+  obj = parse_owned(evchan_proto_event_json(10, EVCHAN_EVENT_RECEIVER_COMMAND, "wake", NULL, "dacp", "21", "21", NULL, 79));
+  CHECK(str_is(obj, "verb", "wake"));
+  CHECK(str_is(obj, "protocol", "dacp"));
+  json_object_put(obj);
+
+  obj = parse_owned(evchan_proto_event_json(11, EVCHAN_EVENT_RECEIVER_COMMAND, "plps", NULL, NULL, "21", "21", NULL, 80));
+  CHECK(str_is(obj, "protocol", "unknown"));
   json_object_put(obj);
   case_end();
 }
@@ -255,7 +284,7 @@ event_device_volume(void)
   json_object *speaker;
 
   case_begin("event_device_volume");
-  obj = parse_owned(evchan_proto_event_json(5, EVCHAN_EVENT_DEVICE_VOLUME, "volumeup", "45", "8734567012345678", "8734567012345678", "Speaker Two", 191002));
+  obj = parse_owned(evchan_proto_event_json(5, EVCHAN_EVENT_DEVICE_VOLUME, "volumeup", "45", NULL, "8734567012345678", "8734567012345678", "Speaker Two", 191002));
   CHECK(str_is(obj, "kind", "device_volume"));
   CHECK(str_is(obj, "verb", "volumeup"));
   CHECK(str_is(obj, "value", "45"));
@@ -274,16 +303,18 @@ event_device_volume_all_speakers_id(void)
   json_object *speaker;
 
   case_begin("event_device_volume_all_speakers_id");
-  obj = parse_owned(evchan_proto_event_json(6, EVCHAN_EVENT_DEVICE_VOLUME, "dmcp.volume", "30", "0", "0", NULL, 1));
+  obj = parse_owned(evchan_proto_event_json(6, EVCHAN_EVENT_DEVICE_VOLUME, "dmcp.volume", "30", NULL, "0", "0", NULL, 1));
   CHECK(str_is(obj, "verb", "dmcp.volume"));
   speaker = member(obj, "speaker");
   CHECK(speaker && str_is(speaker, "id", "0"));
   CHECK(speaker && member(speaker, "name") == NULL);
   json_object_put(obj);
 
-  // The raw verb and value are passed on as given, characters needing escapes included
-  obj = parse_owned(evchan_proto_event_json(6, EVCHAN_EVENT_DEVICE_VOLUME, "dmcp.device-volume", "-30.0\"x\\y", "7", "7", "A \"quoted\" name", 1));
+  // The raw verb and value are passed on as given, characters needing escapes
+  // included; a protocol given for a device volume is not sent
+  obj = parse_owned(evchan_proto_event_json(6, EVCHAN_EVENT_DEVICE_VOLUME, "dmcp.device-volume", "-30.0\"x\\y", "dacp", "7", "7", "A \"quoted\" name", 1));
   CHECK(str_is(obj, "value", "-30.0\"x\\y"));
+  CHECK(member(obj, "protocol") == NULL);
   speaker = member(obj, "speaker");
   CHECK(speaker && str_is(speaker, "name", "A \"quoted\" name"));
   json_object_put(obj);
@@ -525,6 +556,7 @@ main(int argc, char **argv)
   changed_message();
   event_receiver_command_with_name();
   event_without_a_name_has_null_name();
+  event_receiver_command_carries_its_protocol();
   event_device_volume();
   event_device_volume_all_speakers_id();
   error_message();

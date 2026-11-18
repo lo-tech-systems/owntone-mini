@@ -302,6 +302,13 @@ struct output_device
   // endpoint). Both are on the canonical device only.
   int volume_sent;
   uint64_t volume_sent_ms;
+  // The last send ended a silence (the device's own level put back): its
+  // UPnP answer teaches nothing about the scale, and reports just after it
+  // describe levels reached before the device applied it
+  bool volume_sent_restores;
+  // When a report from the silent device was last forwarded as a wake
+  // (monotonic ms, 0 if none since the silence began)
+  uint64_t wake_sent_ms;
   // Set once the device's UPnP renderer has answered the last level sent, so
   // that later reports in the answer window are read as the device's own
   // changes. Cleared with every level sent.

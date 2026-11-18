@@ -63,18 +63,24 @@ evchan_enabled(void);
 const char *
 evchan_socket_path(void);
 
-// Any thread but the player. Reports a receiver command or a device volume to
-// the connected supervisor, or drops it when none is connected. Never blocks:
-// one write to the notifier's command pipe, which a running loop drains.
-// Returns 0 if handed over, -1 if the channel is disabled.
+// Any thread, the player's included. Reports a receiver command or a device
+// volume to the connected supervisor, or drops it when none is connected.
+// Never blocks: one write to the notifier's command pipe, which a running loop
+// drains. Returns 0 if handed over, -1 if the channel is disabled.
 //
 // speaker_id is the id of the output row the event is reported under: for a
 // device that has no row of its own (a hidden HomePod behind an Apple TV, the
 // second speaker of a stereo pair) that is the visible output standing for it.
 // member_id is the id of the device the event actually came from, the same as
 // speaker_id when the device has its own row; it is carried for logs only.
+//
+// protocol names where the command came from: "airplay2_events" (an AirPlay 2
+// receiver's events connection), "dacp" (an AirPlay 1 receiver's
+// remote-control requests) or "upnp" (a wake read from a UPnP renderer's
+// level). Verb "wake" means the player read a turn of a silent speaker's own
+// volume control; nothing was changed because of it.
 int
-evchan_event_receiver_command(uint64_t speaker_id, uint64_t member_id, const char *name, const char *verb);
+evchan_event_receiver_command(uint64_t speaker_id, uint64_t member_id, const char *name, const char *verb, const char *protocol);
 
 int
 evchan_event_device_volume(uint64_t speaker_id, uint64_t member_id, const char *name, const char *verb, const char *value);

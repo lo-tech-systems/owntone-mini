@@ -2215,6 +2215,7 @@ outputs_device_session_remove(uint64_t device_id, void *session)
       if (device->hold_kind != OUTPUT_HOLD_NONE)
 	DPRINTF(E_INFO, L_PLAYER, "Hold of '%s' ended with its session\n", device->name);
       hold_kind_set(device, OUTPUT_HOLD_NONE);
+      device->wake_sent_ms = 0;
       device->stop_pending = 0;
 
       // A backend switch that was asked for while the session ran is made now
@@ -2668,6 +2669,7 @@ outputs_device_level_to_send(struct output_device *device)
   device->volume_sent = level;
   device->volume_sent_ms = monotonic_ms();
   device->volume_answered = false;
+  device->volume_sent_restores = false;
 
   return level;
 }
@@ -2725,8 +2727,15 @@ silence_edge_send(struct output_device *device, output_status_cb cb)
   // callback_add() would replace a starting session's callback before the
   // backend declined
   ret = outputs[device->type]->device_volume_set(device, callback_add(device, cb));
+  if (ret <= 0)
+    return 0;
 
-  return (ret > 0) ? 1 : 0;
+  // The builder has just recorded the send; reports that follow it are read
+  // against this edge, and a wake starts afresh
+  device->volume_sent_restores = !outputs_device_silent(device);
+  device->wake_sent_ms = 0;
+
+  return 1;
 }
 
 // The reason a silence edge was not sent, for the log

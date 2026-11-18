@@ -524,7 +524,7 @@ handle_event(struct airplay_events_client *client, const char *verb, double leve
       return;
     }
 
-  if (evchan_event_receiver_command(client->row_id, client->device_id, client->row_name, verb) < 0)
+  if (evchan_event_receiver_command(client->row_id, client->device_id, client->row_name, verb, "airplay2_events") < 0)
     DPRINTF(E_DBG, L_AIRPLAY, "Receiver command '%s' from '%s' not reported, no event channel\n", verb, client->name);
 }
 

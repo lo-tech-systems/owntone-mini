@@ -663,6 +663,17 @@ coalesce_cb(evutil_socket_t fd, short what, void *arg)
 	DPRINTF(E_DBG, L_UPNP, "'%s' reports raw %d on a scale not known, dropped\n", e->name, r.raw);
 	break;
 
+      case FOLLOWED_ABSORBED:
+	DPRINTF(E_DBG, L_UPNP, "'%s' reports %d (raw %d%s) while silent or settling, dropped\n",
+		e->name, r.pct, r.raw, r.mute ? ", muted" : "");
+	break;
+
+      case FOLLOWED_WAKE:
+	DPRINTF(E_INFO, L_UPNP, "'%s' reports %d (raw %d) while silent: a wake\n", e->name, r.pct, r.raw);
+	if (evchan_event_receiver_command(r.row_id, r.id, r.row_name, "wake", "upnp") < 0)
+	  DPRINTF(E_DBG, L_UPNP, "Wake from '%s' not reported, no event channel\n", e->name);
+	break;
+
       case FOLLOWED_GONE:
 	break;
     }

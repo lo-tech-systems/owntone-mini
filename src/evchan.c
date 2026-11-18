@@ -95,6 +95,7 @@ struct event_args
   char *name;
   char *verb;
   char *value;
+  char *protocol;
   uint64_t at_ms;
 };
 
@@ -561,7 +562,7 @@ event_exec(void *arg, int *retval)
       if (!c->hello_seen || c->closing)
 	continue;
 
-      json = evchan_proto_event_json(c->seq + 1, args->kind, args->verb, args->value, id, member, args->name, args->at_ms);
+      json = evchan_proto_event_json(c->seq + 1, args->kind, args->verb, args->value, args->protocol, id, member, args->name, args->at_ms);
       if (conn_send(c, json) == 0)
 	sent = true;
     }
@@ -572,6 +573,7 @@ event_exec(void *arg, int *retval)
   free(args->name);
   free(args->verb);
   free(args->value);
+  free(args->protocol);
 
   // The command facility frees args itself
   return COMMAND_END;
@@ -739,7 +741,8 @@ listener_cb(short event_mask, void *ctx)
 /* ------------------------------- Interface -------------------------------- */
 
 static int
-event_post(enum evchan_proto_event_kind kind, uint64_t speaker_id, uint64_t member_id, const char *name, const char *verb, const char *value)
+event_post(enum evchan_proto_event_kind kind, uint64_t speaker_id, uint64_t member_id, const char *name, const char *verb, const char *value,
+           const char *protocol)
 {
   struct event_args *args;
 
@@ -753,6 +756,7 @@ event_post(enum evchan_proto_event_kind kind, uint64_t speaker_id, uint64_t memb
   args->name = name ? strdup(name) : NULL;
   args->verb = strdup(verb ? verb : "");
   args->value = value ? strdup(value) : NULL;
+  args->protocol = protocol ? strdup(protocol) : NULL;
   args->at_ms = monotonic_ms() - started_ms;
 
   if (commands_exec_async(cmdbase, event_exec, args) < 0)
@@ -760,6 +764,7 @@ event_post(enum evchan_proto_event_kind kind, uint64_t speaker_id, uint64_t memb
       free(args->name);
       free(args->verb);
       free(args->value);
+      free(args->protocol);
       free(args);
       return -1;
     }
@@ -768,15 +773,15 @@ event_post(enum evchan_proto_event_kind kind, uint64_t speaker_id, uint64_t memb
 }
 
 int
-evchan_event_receiver_command(uint64_t speaker_id, uint64_t member_id, const char *name, const char *verb)
+evchan_event_receiver_command(uint64_t speaker_id, uint64_t member_id, const char *name, const char *verb, const char *protocol)
 {
-  return event_post(EVCHAN_EVENT_RECEIVER_COMMAND, speaker_id, member_id, name, verb, NULL);
+  return event_post(EVCHAN_EVENT_RECEIVER_COMMAND, speaker_id, member_id, name, verb, NULL, protocol);
 }
 
 int
 evchan_event_device_volume(uint64_t speaker_id, uint64_t member_id, const char *name, const char *verb, const char *value)
 {
-  return event_post(EVCHAN_EVENT_DEVICE_VOLUME, speaker_id, member_id, name, verb, value);
+  return event_post(EVCHAN_EVENT_DEVICE_VOLUME, speaker_id, member_id, name, verb, value, NULL);
 }
 
 bool

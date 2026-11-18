@@ -84,12 +84,13 @@ char *
 evchan_proto_changed_json(uint64_t seq);
 
 // For a receiver command, value is ignored and the event carries the protocol
-// the command arrived on; for a device volume, value is the level as given.
+// given (sent as "unknown" when NULL); for a device volume, value is the level
+// as given and protocol is ignored.
 // speaker_id is the output row the event is reported under and member_id the
 // device it came from (the same when the device has its own row).
 // speaker_name may be NULL (sent as null).
 char *
-evchan_proto_event_json(uint64_t seq, enum evchan_proto_event_kind kind, const char *verb, const char *value,
+evchan_proto_event_json(uint64_t seq, enum evchan_proto_event_kind kind, const char *verb, const char *value, const char *protocol,
                         const char *speaker_id, const char *member_id, const char *speaker_name, uint64_t at_ms);
 
 char *
