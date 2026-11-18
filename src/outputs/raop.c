@@ -2752,6 +2752,7 @@ raop_set_volume_internal(struct raop_session *rs, int volume, evrtsp_req_cb cb)
     {
       device->volume_sent = volume;
       device->volume_sent_ms = outputs_monotonic_ms();
+      device->volume_answered = false;
     }
 
   return ret;

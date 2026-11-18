@@ -265,6 +265,10 @@ struct output_device
   // endpoint). Both are on the canonical device only.
   int volume_sent;
   uint64_t volume_sent_ms;
+  // Set once the device's UPnP renderer has answered the last level sent, so
+  // that later reports in the answer window are read as the device's own
+  // changes. Cleared with every level sent.
+  bool volume_answered;
   struct event *volume_echo_timer;
   // Levels sent back to the device since volume_echo_since_ms, to cap them
   int volume_echo_count;

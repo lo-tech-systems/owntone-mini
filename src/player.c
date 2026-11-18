@@ -82,6 +82,7 @@
 #include "worker.h"
 #include "listener.h"
 #include "commands.h"
+#include "evchan.h"
 #include "mdns.h"
 #include "memstats.h"
 
@@ -192,6 +193,9 @@ struct speaker_attr_param
 
   int volume;
   const char *volstr;
+  // A level the device reported that it is already playing at, so it is
+  // never sent back to it (see volume_setraw_speaker())
+  bool no_send_back;
 
   bool prevent_playback;
   bool busy;
@@ -206,6 +210,13 @@ struct speaker_attr_param
   int metadata_fd;
 
   const char *pin;
+};
+
+struct volume_reported_param
+{
+  uint64_t id;
+  char volstr[32];
+  char verb[16];
 };
 
 struct speaker_get_param
@@ -4182,13 +4193,49 @@ volume_setraw_speaker(void *arg, int *retval)
     }
 
   // A raw volume is the device reporting its own level (see the DACP
-  // endpoint). It is recorded on the whole group at once, so clients see it
-  // straight away, and may be sent back once the reports stop.
+  // endpoint and the AirPlay event channel). It is recorded on the whole group
+  // at once, so clients see it straight away, and may be sent back once the
+  // reports stop, unless the device said it is already playing at it.
   device->volume_reported_ms = monotonic_ms();
-  volume_echo_schedule(device, vol_param->volstr, volume);
+  if (!vol_param->no_send_back)
+    volume_echo_schedule(device, vol_param->volstr, volume);
   speaker_group_volume_apply(device, volume, -1, NULL);
 
   *retval = 0;
+
+  return COMMAND_END;
+}
+
+// A level the device reported it is already playing at, queued by a thread
+// that must not wait for the player (see player_volume_reported_speaker()).
+// Async commands have no bottom half, so clients are told here, and the
+// supervisor once the level is recorded.
+static enum command_state
+volume_reported_speaker(void *arg, int *retval)
+{
+  struct volume_reported_param *param = arg;
+  struct speaker_attr_param vol_param;
+  struct output_device *device;
+  struct output_device *row;
+
+  memset(&vol_param, 0, sizeof(vol_param));
+  vol_param.spk_id = param->id;
+  vol_param.volstr = param->volstr;
+  vol_param.no_send_back = true;
+
+  volume_setraw_speaker(&vol_param, retval);
+  if (*retval < 0)
+    return COMMAND_END;
+
+  status_update(player_state, LISTENER_VOLUME);
+
+  device = outputs_device_get(param->id);
+  if (!device)
+    return COMMAND_END;
+
+  row = outputs_device_row(device);
+  if (evchan_event_device_volume(row->id, device->id, outputs_device_display_name(row), param->verb, param->volstr) < 0)
+    DPRINTF(E_DBG, L_PLAYER, "Volume '%s' from '%s' not reported, no event channel\n", param->verb, device->name);
 
   return COMMAND_END;
 }
@@ -4239,10 +4286,13 @@ volume_followed_report(void *arg, int *retval)
       return COMMAND_END;
     }
 
-  // Soon after a level is sent, whatever the renderer reports is its answer
-  // to it, so a turn of the knob in that time is missed; the next is not
-  if (device->volume_sent_ms && now - device->volume_sent_ms < PLAYER_VOLUME_ECHO_WINDOW_MS)
+  // The renderer's first report soon after a level is sent is its answer to
+  // it. Reports after that are the device's own changes (a turn of the knob
+  // straight after a level was sent), so they are not read as answers: taken
+  // as one, a new level looks like a scale that is not ours.
+  if (upnp_report_is_answer(device->volume_sent_ms, device->volume_answered, now, PLAYER_VOLUME_ECHO_WINDOW_MS))
     {
+      device->volume_answered = true;
       was_unknown = device->upnp_scale_unknown;
       switch (upnp_level_echo(r->raw, r->mute, device->volume_sent, &offset))
 	{
@@ -4766,10 +4816,31 @@ player_volume_setraw_speaker(uint64_t id, const char *volstr)
 
   vol_param.spk_id = id;
   vol_param.volstr  = volstr;
+  vol_param.no_send_back = false;
 
   ret = commands_exec_sync(cmdbase, volume_setraw_speaker, volume_generic_bh, &vol_param);
 
   return ret;
+}
+
+int
+player_volume_reported_speaker(uint64_t id, const char *volstr, const char *verb)
+{
+  struct volume_reported_param *param;
+
+  CHECK_NULL(L_PLAYER, param = calloc(1, sizeof(*param)));
+  param->id = id;
+  snprintf(param->volstr, sizeof(param->volstr), "%s", volstr);
+  snprintf(param->verb, sizeof(param->verb), "%s", verb);
+
+  // On success the command frees param
+  if (commands_exec_async(cmdbase, volume_reported_speaker, param) < 0)
+    {
+      free(param);
+      return -1;
+    }
+
+  return 0;
 }
 
 int

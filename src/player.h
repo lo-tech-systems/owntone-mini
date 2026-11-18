@@ -210,6 +210,15 @@ player_volume_setabs_speaker(uint64_t id, int vol);
 int
 player_volume_setraw_speaker(uint64_t id, const char *volstr);
 
+// A level (an AirPlay volume in dB, as for player_volume_setraw_speaker()) the
+// device reports it is already playing at: recorded like a raw volume, but
+// never sent back to the device, then reported on the event channel as a
+// device volume under verb, with volstr as its value. Queued without waiting
+// for the player, so it is safe from threads the player may itself wait for.
+// Returns 0 when queued.
+int
+player_volume_reported_speaker(uint64_t id, const char *volstr, const char *verb);
+
 // A level a device's UPnP renderer reports, which is recorded (never sent to
 // the device) unless it is the device's answer to a level sent to it. Any
 // thread but the player. Returns 0; the outcome is in r->result.

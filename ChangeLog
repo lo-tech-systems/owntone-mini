@@ -73,6 +73,15 @@
 - new: a receiver command sent as a number (`modernMediaRemoteCommand`) is
   read as well as the four letter form, and an AirPlay event that cannot be
   read is logged in full at the normal level
+- new: a turn of an AirPlay 2 speaker's own volume control that it reports
+  on its events connection (`dvlc`) is recorded as the speaker's level,
+  without being sent back to it, and reported on the event channel as a
+  `device_volume` with verb `dvlc`
+- fix: a speaker followed over UPnP stopped being followed when its knob was
+  turned within two seconds of a level being sent to it (for example a
+  resume): the turn was read as the speaker's answer to that level, which
+  then looked like a volume scale that is not ours. Only the first report
+  after a level is sent is now taken as the answer
 
 ## Version 1.5.0 - 2026-10-14
 

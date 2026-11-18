@@ -30,6 +30,7 @@
 #include <unistd.h>
 #include <inttypes.h>
 #include <errno.h>
+#include <math.h>
 #include <sys/socket.h>
 
 #include <pthread.h>
@@ -39,11 +40,13 @@
 
 #include "owntone_config.h"
 #include "airplay_events.h"
+#include "airplay_remote_level.h"
 #include "commands.h"
 #include "evchan.h"
 #include "misc.h"
 #include "logger.h"
 #include "pair_ap/pair.h"
+#include "player.h"
 #include "plist_wrap.h"
 
 #define RTSP_VERSION "RTSP/1.0"
@@ -313,8 +316,10 @@ modern_command_verb(plist_t request)
   return strdup(buf);
 }
 
+// *level is the "volume" a command carries (a "dvlc" reporting the
+// receiver's own level), or NAN when it carries none
 static int
-rtsp_parse(char **verb, uint8_t *in, size_t in_len)
+rtsp_parse(char **verb, double *level, uint8_t *in, size_t in_len)
 {
   uint8_t *body;
   size_t body_len;
@@ -322,7 +327,10 @@ rtsp_parse(char **verb, uint8_t *in, size_t in_len)
   plist_t item;
   char *type = NULL;
   char *value = NULL;
+  bool known;
   int ret;
+
+  *level = NAN;
 
   DHEXDUMP(E_DBG, L_AIRPLAY, in, in_len, "Incoming event\n");
 
@@ -375,8 +383,14 @@ rtsp_parse(char **verb, uint8_t *in, size_t in_len)
 
   DPRINTF(E_INFO, L_AIRPLAY, "Received event type '%s', value '%s'\n", type, value);
 
-  if (strcmp(value, "paus") != 0 && strcmp(value, "play") != 0 && strcmp(value, "plps") != 0 &&
-      strcmp(value, "nitm") != 0 && strcmp(value, "pitm") != 0)
+  item = plist_dict_get_item(request, "volume");
+  if (item && plist_get_node_type(item) == PLIST_REAL)
+    plist_get_real_val(item, level);
+
+  known = strcmp(value, "paus") == 0 || strcmp(value, "play") == 0 || strcmp(value, "plps") == 0 ||
+          strcmp(value, "nitm") == 0 || strcmp(value, "pitm") == 0 ||
+          (strcmp(value, "dvlc") == 0 && !isnan(*level));
+  if (!known)
     {
       // Receivers send command values we have no handling for, and the value
       // on its own rarely says what was meant by it. Dump the whole event: it
@@ -407,12 +421,38 @@ rtsp_parse(char **verb, uint8_t *in, size_t in_len)
 
 /* --------------------------- Message handling ----------------------------- */
 
+// Thread: airplay events. A receiver reporting a turn of its own volume
+// control. The level is recorded like one a speaker reports over DACP, but is
+// not sent back (the receiver is already playing at it), and the player then
+// reports it to the local supervisor as a device volume. Queued for the
+// player without waiting, as the player may be waiting for this thread to
+// stop.
+static void
+handle_volume(struct airplay_events_client *client, double level)
+{
+  char volstr[32];
+
+  snprintf(volstr, sizeof(volstr), "%.6f", airplay_remote_level_db(level));
+
+  DPRINTF(E_INFO, L_AIRPLAY, "'%s' reports its own volume, %.4f of its range (%s dB)\n", client->name, level, volstr);
+
+  if (player_volume_reported_speaker(client->device_id, volstr, "dvlc") < 0)
+    DPRINTF(E_LOG, L_AIRPLAY, "Could not queue the volume '%s' reported\n", client->name);
+}
+
 // Thread: airplay events. A receiver's command is reported to the local
 // supervisor and never acted on here; the supervisor decides what a pause or
-// play from a device means for the outputs.
+// play from a device means for the outputs. A volume the receiver reports is
+// handled by handle_volume().
 static void
-handle_event(struct airplay_events_client *client, const char *verb)
+handle_event(struct airplay_events_client *client, const char *verb, double level)
 {
+  if (strcmp(verb, "dvlc") == 0 && !isnan(level))
+    {
+      handle_volume(client, level);
+      return;
+    }
+
   if (evchan_event_receiver_command(client->row_id, client->device_id, client->row_name, verb) < 0)
     DPRINTF(E_DBG, L_AIRPLAY, "Receiver command '%s' from '%s' not reported, no event channel\n", verb, client->name);
 }
@@ -463,6 +503,7 @@ incoming_cb(int fd, short what, void *arg)
 {
   struct airplay_events_client *client = arg;
   char *verb = NULL;
+  double level;
   uint8_t *plain;
   size_t plain_len;
   int ret;
@@ -491,7 +532,7 @@ incoming_cb(int fd, short what, void *arg)
   plain = evbuffer_pullup(client->pending, -1);
   plain_len = evbuffer_get_length(client->pending);
 
-  ret = rtsp_parse(&verb, plain, plain_len);
+  ret = rtsp_parse(&verb, &level, plain, plain_len);
   if (ret < 0) // A message type we don't know about, so ignore
     {
       evbuffer_drain(client->pending, -1);
@@ -505,7 +546,7 @@ incoming_cb(int fd, short what, void *arg)
 
   evbuffer_drain(client->pending, -1);
 
-  handle_event(client, verb);
+  handle_event(client, verb, level);
   free(verb);
 
   ret = respond(client);

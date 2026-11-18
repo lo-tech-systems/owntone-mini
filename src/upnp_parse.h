@@ -21,6 +21,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 // Reading what a UPnP renderer sends: SSDP replies, HTTP message heads, the
 // device description and RenderingControl events, and the rules that turn a
@@ -115,5 +116,12 @@ enum upnp_echo {
 // renderer, which is taken to be the renderer's answer to it
 enum upnp_echo
 upnp_level_echo(int raw, bool mute, int sent, int *offset);
+
+// Whether a renderer's report is its answer to the last level sent: it is
+// the first report since that level was sent (at sent_ms, 0 if never), within
+// window_ms of it. Later reports are the device's own changes, such as a turn
+// of its knob straight after a level was sent.
+bool
+upnp_report_is_answer(uint64_t sent_ms, bool answered, uint64_t now_ms, uint64_t window_ms);
 
 #endif /* !__UPNP_PARSE_H__ */

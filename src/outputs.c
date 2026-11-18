@@ -2514,6 +2514,7 @@ outputs_device_volume_set(struct output_device *device, output_status_cb cb)
     {
       device->volume_sent = device->volume;
       device->volume_sent_ms = monotonic_ms();
+      device->volume_answered = false;
     }
 
   return ret; // We don't change device state just because of a failed volume change

@@ -56,7 +56,7 @@ owntone_SOURCES = main.c \
 	outputs.h outputs.c \
 	outputs/rtp_common.h outputs/rtp_common.c \
 	outputs/raop.c outputs/airplay.c $(PAIR_AP_SRC) \
-	outputs/airplay_events.c outputs/airplay_events.h \
+	outputs/airplay_events.c outputs/airplay_events.h outputs/airplay_remote_level.h \
 	outputs/airplay_mrp.c outputs/airplay_mrp.h \
 	outputs/airplay_buffered.c outputs/airplay_buffered.h \
 	outputs/airplay_anchor.c outputs/airplay_anchor.h \
@@ -77,10 +77,12 @@ owntone_SOURCES = main.c \
 	ptpd.c ptpd.h \
 	outputs/plist_wrap.h
 
-TESTS = airplay_anchor_test evchan_proto_test tv_proxy_mode_test speakers_summary_test upnp_parse_test upnp_sub_test
+TESTS = airplay_anchor_test airplay_remote_level_test evchan_proto_test tv_proxy_mode_test speakers_summary_test upnp_parse_test upnp_sub_test
 # upnp_http_check is run by hand against tools/upnp_fake_renderer.py
 check_PROGRAMS = $(TESTS) upnp_http_check
 airplay_anchor_test_SOURCES = outputs/tests/airplay_anchor_test.c outputs/airplay_anchor.c outputs/airplay_anchor.h
+airplay_remote_level_test_SOURCES = outputs/tests/airplay_remote_level_test.c outputs/airplay_remote_level.h
+airplay_remote_level_test_LDADD = -lm
 evchan_proto_test_SOURCES = outputs/tests/evchan_proto_test.c evchan_proto.c evchan_proto.h
 evchan_proto_test_LDADD = $(OWNTONE_LIBS)
 tv_proxy_mode_test_SOURCES = outputs/tests/tv_proxy_mode_test.c outputs_group_flags.h

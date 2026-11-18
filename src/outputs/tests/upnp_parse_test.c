@@ -625,6 +625,24 @@ level_echo(void)
   case_end();
 }
 
+static void
+report_is_answer(void)
+{
+  case_begin("report_is_answer");
+  // The first report soon after a level is sent is the answer
+  CHECK(upnp_report_is_answer(1000, false, 1500, 2000));
+  CHECK(upnp_report_is_answer(1000, false, 2999, 2000));
+  // Once answered, the reports that follow in the window are the device's own:
+  // the answer to 17 is 18, then the knob is turned to 25 and 31
+  CHECK(!upnp_report_is_answer(1000, true, 1500, 2000));
+  CHECK(!upnp_report_is_answer(1000, true, 1900, 2000));
+  // Past the window, or with nothing sent, nothing is an answer
+  CHECK(!upnp_report_is_answer(1000, false, 3000, 2000));
+  CHECK(!upnp_report_is_answer(1000, false, 9000, 2000));
+  CHECK(!upnp_report_is_answer(0, false, 500, 2000));
+  case_end();
+}
+
 int
 main(int argc, char **argv)
 {
@@ -644,6 +662,7 @@ main(int argc, char **argv)
   chunked();
   level_map();
   level_echo();
+  report_is_answer();
 
   printf("%d cases, %d failed\n", cases_run, cases_failed);
 

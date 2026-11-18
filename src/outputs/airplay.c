@@ -4013,6 +4013,7 @@ payload_make_set_volume(struct evrtsp_request *req, struct airplay_session *sess
     {
       device->volume_sent = session->volume;
       device->volume_sent_ms = monotonic_ms();
+      device->volume_answered = false;
     }
 
   raop_volume = airplay_volume_from_pct(session->volume, session->devname);

@@ -808,3 +808,12 @@ upnp_level_echo(int raw, bool mute, int sent, int *offset)
   *offset = raw - sent;
   return UPNP_ECHO_LEARN;
 }
+
+bool
+upnp_report_is_answer(uint64_t sent_ms, bool answered, uint64_t now_ms, uint64_t window_ms)
+{
+  if (!sent_ms || answered)
+    return false;
+
+  return now_ms - sent_ms < window_ms;
+}
