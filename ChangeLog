@@ -89,9 +89,6 @@
   and its session failed
 - fix: a speaker that reports its volume as `-0.000000` (full volume, signed
   zero) was logged as an invalid volume and its level was not recorded
-- fix: a speaker that ignored the level sent when its session started, and
-  played at full volume while clients showed the level that was sent, is
-  sent its level once more one second after its session starts streaming
 
 ## Version 1.5.0 - 2026-10-14
 

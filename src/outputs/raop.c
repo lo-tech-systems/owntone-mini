@@ -107,11 +107,6 @@
 // https://github.com/owntone/owntone-server/issues/734#issuecomment-622959334
 #define RAOP_KEEP_ALIVE_INTERVAL   25
 
-// A speaker has been seen ignoring the level sent while its session started
-// and playing at full volume, so the level is sent once more this long (in
-// milliseconds) after the session starts streaming
-#define RAOP_START_VOLUME_RESEND_MS 1000
-
 // This is an arbitrary value which just needs to be kept in sync with the config
 #define RAOP_CONFIG_MAX_VOLUME     11
 
@@ -209,10 +204,6 @@ struct raop_session
   // last entered STREAMING, so it is only reported once per transition
   bool streaming_reported;
 
-  // Set once the one-shot re-send of the level has been armed for this
-  // session, so a resume after a flush does not arm it again
-  bool start_volume_armed;
-
   struct raop_master_session *master_session;
 
   struct evrtsp_connection *ctrl;
@@ -229,10 +220,6 @@ struct raop_session
   bool only_probe;
 
   struct event *deferredev;
-
-  // One-shot timer that sends the speaker's level once more shortly after
-  // the session starts streaming (see session_volume_resend_cb())
-  struct event *start_volume_ev;
 
   int reqs_in_flight;
   int cseq;
@@ -412,9 +399,6 @@ raop_device_start(struct output_device *rd, int callback_id);
 
 static int
 raop_device_probe(struct output_device *rd, int callback_id);
-
-static void
-session_volume_resend_cb(int fd, short what, void *arg);
 
 
 /* ------------------------------- MISC HELPERS ----------------------------- */
@@ -2013,9 +1997,6 @@ session_free(struct raop_session *rs)
   if (rs->deferredev)
     event_free(rs->deferredev);
 
-  if (rs->start_volume_ev)
-    event_free(rs->start_volume_ev);
-
   if (rs->server_fd >= 0)
     close(rs->server_fd);
 
@@ -2257,7 +2238,6 @@ session_make(struct output_device *rd, int callback_id, bool only_probe)
 
   CHECK_NULL(L_RAOP, rs = calloc(1, sizeof(struct raop_session)));
   CHECK_NULL(L_RAOP, rs->deferredev = evtimer_new(evbase_player, deferredev_cb, rs));
-  CHECK_NULL(L_RAOP, rs->start_volume_ev = evtimer_new(evbase_player, session_volume_resend_cb, rs));
 
   rs->devname = strdup(rd->name);
   rs->volume = rd->volume;
@@ -2817,33 +2797,6 @@ raop_cb_set_volume(struct evrtsp_request *req, void *arg)
 
  error:
   session_failure(rs);
-}
-
-// Fires RAOP_START_VOLUME_RESEND_MS after a session first starts streaming
-// and sends the speaker's current level again. A speaker has been seen
-// ignoring the level sent while its session started and playing at full
-// volume, with nothing else to send the level again. Sent like any other
-// level, so the player records it as sent and can match the speaker's answer.
-static void
-session_volume_resend_cb(int fd, short what, void *arg)
-{
-  struct raop_session *rs = arg;
-  struct output_device *device;
-  int ret;
-
-  if (rs->state != RAOP_STATE_STREAMING)
-    return;
-
-  device = outputs_device_get(rs->device_id);
-  if (!device)
-    return;
-
-  DPRINTF(E_INFO, L_RAOP, "Re-sending the volume of '%s' (%d) after start\n", rs->devname, device->volume);
-
-  // Not session_failure() on error, a failed send is not worth the session
-  ret = raop_set_volume_internal(rs, device->volume, raop_cb_set_volume);
-  if (ret < 0)
-    DPRINTF(E_WARN, L_RAOP, "Could not re-send volume to '%s'\n", rs->devname);
 }
 
 /* Volume in [0 - 100] */
@@ -5025,17 +4978,6 @@ raop_write(struct output_buffer *obuf)
 	  if (ret < 0)
 	    DPRINTF(E_WARN, L_RAOP, "Could not re-send volume to '%s'\n", rs->devname);
 	}
-
-	  // The first transition of the session only, not each resume after a
-	  // flush: the speaker's level is lost when a session starts, not when
-	  // it resumes
-	  if (!rs->start_volume_armed)
-	    {
-	      struct timeval resend_tv = { RAOP_START_VOLUME_RESEND_MS / 1000, (RAOP_START_VOLUME_RESEND_MS % 1000) * 1000 };
-
-	      rs->start_volume_armed = true;
-	      evtimer_add(rs->start_volume_ev, &resend_tv);
-	    }
     }
 
   // Tells the player that audio is flowing, once per CONNECTED->STREAMING
