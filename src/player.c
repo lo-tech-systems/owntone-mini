@@ -1721,9 +1721,20 @@ static void
 tv_proxy_leader_restart_cb(struct output_device *device, enum output_device_state status);
 static bool
 speaker_group_sibling_held(struct output_device *device);
-
 static void
-device_streaming_cb(struct output_device *device, enum output_device_state status)
+device_streaming_cb(struct output_device *device, enum output_device_state status);
+
+// The handlers below hold what a backend report means to the player. Each
+// callback given to outputs is a thin wrapper that calls one of them and then
+// ends its command or tells the clients, as the callback always did. A handler
+// takes the value the command holds so far (0 when there is none) and returns
+// the value it stands for.
+
+// A report while the device streams, or while it is idle with a session: a
+// failure is recovered from where it can be, a step towards streaming hands the
+// device back to this handler's callback
+static int
+handle_streaming(struct output_device *device, enum output_device_state status, int retval)
 {
   if (!device)
     {
@@ -1835,14 +1846,23 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
     }
 
  out:
+  return retval;
+}
+
+static void
+device_streaming_cb(struct output_device *device, enum output_device_state status)
+{
+  handle_streaming(device, status, 0);
+
   // We don't do this in the other cb's because they are triggered by a command
   // and thus the update should be done as part of the command completion (which
   // can better determine which type of listener event to use)
   status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
 }
 
-static void
-device_volume_cb(struct output_device *device, enum output_device_state status)
+// The answer to a level sent by a volume command
+static int
+handle_volume(struct output_device *device, enum output_device_state status, int retval)
 {
   if (!device)
     {
@@ -1866,41 +1886,55 @@ device_volume_cb(struct output_device *device, enum output_device_state status)
       && (!pb_session.playing_now || pb_session.playing_now->data_kind != DATA_KIND_PIPE))
     pb_suspend();
 
-  commands_exec_end(cmdbase, 0);
+  return retval;
+}
+
+static void
+device_volume_cb(struct output_device *device, enum output_device_state status)
+{
+  commands_exec_end(cmdbase, handle_volume(device, status, 0));
 }
 
 // Answer to the level a mute or a hold put on the wire (0, or the device's own
 // level when the silence ends). Not part of a command (see
-// device_volume_echo_cb()): a failure goes to the streaming callback, success
+// device_volume_echo_cb()): a failure goes to the streaming handler, success
 // hands the device back to it.
-static void
-device_level_edge_cb(struct output_device *device, enum output_device_state status)
+static int
+handle_level_edge(struct output_device *device, enum output_device_state status, int retval)
 {
   if (!device || status == OUTPUT_STATE_FAILED || status == OUTPUT_STATE_STOPPED)
     {
       DPRINTF(E_INFO, L_PLAYER, "Level edge: send to '%s' ended with state %d\n", device ? device->name : "(gone)", status);
       device_streaming_cb(device, status);
-      return;
+      return retval;
     }
 
   DPRINTF(E_DBG, L_PLAYER, "Level edge: '%s' accepted %d\n", device->name, device->volume_sent);
   outputs_device_cb_set(device, device_streaming_cb);
+
+  return retval;
 }
 
 static void
-device_flush_cb(struct output_device *device, enum output_device_state status)
+device_level_edge_cb(struct output_device *device, enum output_device_state status)
 {
-  // The command, if any, ends when the last device it flushed has reported,
-  // whatever the report, see flush_done_cb()
+  handle_level_edge(device, status, 0);
+}
+
+// A flushed device's answer. The command, if any, ends when the last device it
+// flushed has reported, whatever the report, see flush_done_cb()
+static int
+handle_flush(struct output_device *device, enum output_device_state status, int retval)
+{
   if (!device)
     {
       DPRINTF(E_LOG, L_PLAYER, "Output device disappeared before flush completion!\n");
-      return;
+      return retval;
     }
   else if (status == OUTPUT_STATE_FAILED)
     {
       DPRINTF(E_LOG, L_PLAYER, "The %s device '%s' failed during execution of flush command\n", device->type_name, device->name);
-      return;
+      return retval;
     }
 
   DPRINTF(E_DBG, L_PLAYER, "Callback from %s device %s to device_flush_cb (status %d)\n", device->type_name, device->name, status);
@@ -1914,6 +1948,14 @@ device_flush_cb(struct output_device *device, enum output_device_state status)
     }
 
   outputs_device_stop_delayed(device, device_streaming_cb);
+
+  return retval;
+}
+
+static void
+device_flush_cb(struct output_device *device, enum output_device_state status)
+{
+  handle_flush(device, status, 0);
 }
 
 // A device's phase changed: clients are told, as for any report
@@ -1951,25 +1993,28 @@ flush_command_wait(int *retval)
   return COMMAND_PENDING;
 }
 
-static void
-device_shutdown_cb(struct output_device *device, enum output_device_state status)
+// A stopped device's report
+static int
+handle_shutdown(struct output_device *device, enum output_device_state status, int retval)
 {
-  int retval;
-
-  retval = commands_exec_returnvalue(cmdbase);
   if (!device)
     {
       DPRINTF(E_WARN, L_PLAYER, "Output device disappeared before shutdown completion!\n");
 
       if (retval != -2)
 	retval = -1;
-      goto out;
+      return retval;
     }
 
   DPRINTF(E_DBG, L_PLAYER, "Callback from %s device %s to device_shutdown_cb (status %d)\n", device->type_name, device->name, status);
 
- out:
-  commands_exec_end(cmdbase, retval);
+  return retval;
+}
+
+static void
+device_shutdown_cb(struct output_device *device, enum output_device_state status)
+{
+  commands_exec_end(cmdbase, handle_shutdown(device, status, commands_exec_returnvalue(cmdbase)));
 }
 
 // Completes the stop of an audio-suppressed TV proxy leader whose followers
@@ -1978,22 +2023,22 @@ device_shutdown_cb(struct output_device *device, enum output_device_state status
 // direct if no follower is around to wait for, otherwise the normal proxied
 // path re-derives whatever is appropriate (it will come back suppressed only
 // if a follower is actually streaming again).
-static void
-tv_proxy_leader_restart_cb(struct output_device *device, enum output_device_state status)
+static int
+handle_tv_proxy_leader_restart(struct output_device *device, enum output_device_state status, int retval)
 {
   if (!device)
-    return;
+    return retval;
 
   if (device->session)
     {
       // Stop did not complete (yet); leave the device on its normal callback
       // rather than trying to start it on top of a live session.
       outputs_device_cb_set(device, device_streaming_cb);
-      return;
+      return retval;
     }
 
   if (!device->selected || player_state != PLAY_PLAYING)
-    return;
+    return retval;
 
   if (!outputs_device_tv_proxy_followers_streaming(device))
     device->tv_proxy_start_direct = 1;
@@ -2001,6 +2046,14 @@ tv_proxy_leader_restart_cb(struct output_device *device, enum output_device_stat
   outputs_device_start(device, device_streaming_cb, false);
 
   status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
+
+  return retval;
+}
+
+static void
+tv_proxy_leader_restart_cb(struct output_device *device, enum output_device_state status)
+{
+  handle_tv_proxy_leader_restart(device, status, 0);
 }
 
 // Starts the hidden followers of a TV proxy group once the leader (the Apple
@@ -3915,16 +3968,15 @@ speaker_mute_set(void *arg, int *retval)
   return COMMAND_END;
 }
 
-// Callback fired after a forced stop for a protocol mode switch. Applies the
-// newly selected candidate then restarts playback on the device if appropriate.
-static void
-mode_switch_cb(struct output_device *device, enum output_device_state status)
+// The forced stop for a protocol mode switch has reported. Applies the newly
+// selected candidate then restarts playback on the device if appropriate.
+static int
+handle_mode_switch(struct output_device *device, enum output_device_state status, int retval)
 {
   if (!device)
     {
       DPRINTF(E_WARN, L_PLAYER, "Output device disappeared before mode switch completion\n");
-      commands_exec_end(cmdbase, -1);
-      return;
+      return -1;
     }
 
   DPRINTF(E_DBG, L_PLAYER, "Mode switch stop complete for '%s', applying new candidate\n", device->name);
@@ -3936,7 +3988,13 @@ mode_switch_cb(struct output_device *device, enum output_device_state status)
   if (device->selected && player_state == PLAY_PLAYING)
     outputs_device_start(device, device_streaming_cb, false);
 
-  commands_exec_end(cmdbase, 0);
+  return 0;
+}
+
+static void
+mode_switch_cb(struct output_device *device, enum output_device_state status)
+{
+  commands_exec_end(cmdbase, handle_mode_switch(device, status, 0));
 }
 
 static enum command_state
@@ -4186,22 +4244,30 @@ volume_echo_role(struct output_device *device)
 }
 
 // Completion of a level sent back to a speaker. The send is not part of a
-// command, so unlike device_volume_cb() this ends none; a failure goes to the
-// streaming callback, which would have had it had the send not been made.
-static void
-device_volume_echo_cb(struct output_device *device, enum output_device_state status)
+// command, so unlike a volume command's answer this ends none; a failure goes
+// to the streaming handler, which would have had it had the send not been made.
+static int
+handle_volume_echo(struct output_device *device, enum output_device_state status, int retval)
 {
   if (!device || status == OUTPUT_STATE_FAILED || status == OUTPUT_STATE_STOPPED)
     {
       DPRINTF(E_INFO, L_PLAYER, "Volume echo: send to '%s' ended with state %d\n", device ? device->name : "(gone)", status);
       device_streaming_cb(device, status);
-      return;
+      return retval;
     }
 
   DPRINTF(E_INFO, L_PLAYER, "Volume echo: '%s' accepted %d after %" PRIu64 " ms\n",
           device->name, device->volume_sent, monotonic_ms() - device->volume_sent_ms);
 
   outputs_device_cb_set(device, device_streaming_cb);
+
+  return retval;
+}
+
+static void
+device_volume_echo_cb(struct output_device *device, enum output_device_state status)
+{
+  handle_volume_echo(device, status, 0);
 }
 
 static void
