@@ -39,6 +39,9 @@
 // as one.
 #define OUTPUTS_MAX_QUALITY_SUBSCRIPTIONS 5
 
+// The longest PIN a client may send, in characters
+#define OUTPUTS_PIN_MAX 15
+
 // Whether the device should be *displayed* as selected is not given by
 // device->selected, since that means "has the user selected the device",
 // without taking into account whether it is working or available. This macro

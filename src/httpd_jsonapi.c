@@ -730,6 +730,7 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
   json_object *request = NULL;
   bool has_selected;
   bool selected;
+  bool pin_select;
   bool mode_after_disable;
   int include_tv;
   int volume;
@@ -786,7 +787,45 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
 	goto error;
     }
 
-  if (has_selected)
+  // A PIN with selected true is one request: the authorise, and the start it
+  // unlocks once the PIN has paired the speaker (or the new PIN start when the
+  // receiver refuses it), at the level given. selected, volume and pin are
+  // not applied again below
+  pin_select = selected && jparse_contains_key(request, "pin", json_type_string);
+  if (pin_select)
+    {
+      pin = jparse_str_from_obj(request, "pin");
+      if (!pin || strlen(pin) > OUTPUTS_PIN_MAX)
+	goto error;
+
+      include_tv = -1;
+      if (jparse_contains_key(request, "include_tv", json_type_boolean))
+	include_tv = jparse_bool_from_obj(request, "include_tv") ? 1 : 0;
+
+      start_volume = -1;
+      if (jparse_contains_key(request, "volume", json_type_int))
+	{
+	  start_volume = jparse_int_from_obj(request, "volume");
+	  if (start_volume < 0 || start_volume > 100)
+	    goto error;
+	}
+
+      ret = player_speaker_authorize_then_select(output_id, pin, include_tv, start_volume);
+      if (ret == -4)
+	{
+	  jparse_free(request);
+	  return jsonapi_reply_error(hreq, HTTP_CONFLICT, "reselect_required");
+	}
+      if (ret == -5)
+	{
+	  jparse_free(request);
+	  return jsonapi_reply_error(hreq, HTTP_CONFLICT, "group_not_present");
+	}
+      if (ret < 0)
+	goto error;
+    }
+
+  if (has_selected && !pin_select)
     {
       include_tv = -1;
       if (jparse_contains_key(request, "include_tv", json_type_boolean))
@@ -825,7 +864,7 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
         goto error;
     }
 
-  if (jparse_contains_key(request, "volume", json_type_int))
+  if (!pin_select && jparse_contains_key(request, "volume", json_type_int))
     {
       volume = jparse_int_from_obj(request, "volume");
       ret = player_volume_setabs_speaker(output_id, volume);
@@ -847,9 +886,11 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
 	goto error;
     }
 
-  if (jparse_contains_key(request, "pin", json_type_string))
+  if (!pin_select && jparse_contains_key(request, "pin", json_type_string))
     {
       pin = jparse_str_from_obj(request, "pin");
+      if (pin && strlen(pin) > OUTPUTS_PIN_MAX)
+	goto error;
       ret = pin ? player_speaker_authorize(output_id, pin) : 0;
       if (ret < 0)
 	goto error;

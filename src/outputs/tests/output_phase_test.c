@@ -831,6 +831,251 @@ test_names(void)
     }
 }
 
+/* ------------- Sequences as the player's report handler makes them ---------- */
+
+// One device driven the way the player applies the rule: flags and the
+// selection first, then the phase the event reached, then the next operation,
+// which sets its own phase. Every phase change is announced, and a change of
+// selection or PIN state with no phase change too; the log is what a client
+// would see, one entry per announcement
+struct seq_device
+{
+  struct output_phase_input in;
+  enum output_failure_reason reason;
+  char log[512];
+};
+
+static void
+seq_announce(struct seq_device *d)
+{
+  char entry[64];
+
+  snprintf(entry, sizeof(entry), "%s%s%s%s%s", d->log[0] ? "," : "", output_phase_name(d->in.phase),
+           (d->in.phase == P(FAILED) || d->in.phase == P(PASSWORD) || d->reason == F(CANCELLED)) ? ":" : "",
+           (d->in.phase == P(FAILED) || d->in.phase == P(PASSWORD) || d->reason == F(CANCELLED)) ? output_failure_name(d->reason) : "",
+           d->in.pin_pending ? "+pin" : "");
+  strncat(d->log, entry, sizeof(d->log) - strlen(d->log) - 1);
+}
+
+static void
+seq_apply(struct seq_device *d, const struct output_phase_result *r, enum output_op ended)
+{
+  enum output_phase before = d->in.phase;
+  enum output_phase reached = r->mid_phase;
+  bool announced = false;
+
+  if (r->set_stop_after_start) d->in.stop_after_start = true;
+  if (r->clear_stop_after_start) d->in.stop_after_start = false;
+  if (r->set_restart_after_stop) d->in.restart_after_stop = true;
+  if (r->clear_restart_after_stop) d->in.restart_after_stop = false;
+  if (r->set_upgrade_after_probe) d->in.upgrade_after_probe = true;
+  if (r->clear_upgrade_after_probe) d->in.upgrade_after_probe = false;
+  if (r->set_pin_pending) d->in.pin_pending = true;
+  if (r->clear_pin_pending) d->in.pin_pending = false;
+  if (r->reason != F(NONE)) d->reason = r->reason;
+  if (r->deselect) d->in.selected = false;
+  if (r->clear_op) d->in.op = O(NONE);
+
+  // The select that came with the PIN selects the device before its start
+  if (ended == O(AUTHORIZE) && d->in.then_select && (r->next_op == O(START) || r->next_op == O(PROBE)))
+    d->in.selected = true;
+  if (r->clear_then_select) d->in.then_select = false;
+
+  if (r->next_op == O(NONE))
+    reached = r->phase;
+
+  if (reached != before)
+    {
+      d->in.phase = reached;
+      seq_announce(d);
+      announced = true;
+    }
+
+  if (r->next_op != O(NONE))
+    {
+      d->in.op = r->next_op;
+      if (r->phase != d->in.phase)
+	{
+	  d->in.phase = r->phase;
+	  seq_announce(d);
+	  announced = true;
+	}
+    }
+
+  if (r->announce && !announced)
+    seq_announce(d);
+}
+
+static void
+seq_request(struct seq_device *d, enum output_request req, bool explicit_request)
+{
+  struct output_phase_result r;
+
+  d->in.explicit_request = explicit_request;
+  output_phase_on_request(&d->in, req, &r);
+  d->in.explicit_request = false;
+  seq_apply(d, &r, O(NONE));
+}
+
+static void
+seq_report(struct seq_device *d, enum output_report report, enum output_failure_reason reason, bool has_session, bool current)
+{
+  struct output_phase_result r;
+  enum output_op op = d->in.op;
+
+  d->in.report_current_gen = current;
+  d->in.report_reason = reason;
+  d->in.has_session = has_session;
+  output_phase_on_report(&d->in, report, &r);
+  seq_apply(d, &r, (current && r.clear_op) ? op : O(NONE));
+}
+
+static void
+seq_check(const char *name, const struct seq_device *d, const char *want)
+{
+  cases_run++;
+  if (strcmp(d->log, want) == 0)
+    return;
+
+  cases_failed++;
+  printf("FAIL %s\n  got  %s\n  want %s\n", name, d->log, want);
+}
+
+// A device that asked for a PIN, as the PIN request finds it
+static void
+seq_pin_device(struct seq_device *d, bool then_select)
+{
+  memset(d, 0, sizeof(*d));
+  d->in.phase = P(PASSWORD);
+  d->in.pin_pending = true;
+  d->in.playing = true;
+  d->reason = F(PIN_REQUIRED);
+  d->in.then_select = then_select;
+}
+
+static void
+test_sequences(void)
+{
+  struct seq_device d;
+
+  // The right PIN with selected true: the stopped between the two
+  // operations is announced, with the PIN no longer pending
+  seq_pin_device(&d, true);
+  seq_request(&d, OUTPUT_REQ_AUTHORIZE, false);
+  seq_report(&d, R(STOPPED), F(NONE), false, true);
+  seq_report(&d, R(CONNECTED), F(NONE), true, true);
+  seq_report(&d, R(STREAMING), F(NONE), true, true);
+  seq_check("right PIN with select", &d, "connecting+pin,stopped,connecting,connected,streaming");
+
+  // A wrong PIN with selected true: the refusal, then the start the request
+  // asked for, which shows a new PIN
+  seq_pin_device(&d, true);
+  seq_request(&d, OUTPUT_REQ_AUTHORIZE, false);
+  seq_report(&d, R(PASSWORD), F(PIN_INVALID), false, true);
+  seq_report(&d, R(PASSWORD), F(PIN_REQUIRED), false, true);
+  seq_check("wrong PIN with select", &d, "connecting+pin,password:pin_invalid+pin,connecting+pin,password:pin_required+pin");
+
+  // A wrong PIN alone: the refusal, and nothing started
+  seq_pin_device(&d, false);
+  seq_request(&d, OUTPUT_REQ_AUTHORIZE, false);
+  seq_report(&d, R(PASSWORD), F(PIN_INVALID), false, true);
+  seq_check("wrong PIN alone", &d, "connecting+pin,password:pin_invalid+pin");
+
+  // An authorise that timed out: timeout, not a refused PIN, and no new PIN
+  // start, since the PIN on screen may be the one being typed
+  seq_pin_device(&d, true);
+  seq_request(&d, OUTPUT_REQ_AUTHORIZE, false);
+  seq_report(&d, R(PASSWORD), F(TIMEOUT), false, true);
+  seq_check("authorise timed out", &d, "connecting+pin,password:timeout+pin");
+  cases_run++;
+  if (d.in.then_select || d.in.op != O(NONE) || d.in.selected)
+    {
+      cases_failed++;
+      printf("FAIL authorise timed out: the select survived\n");
+    }
+
+  // A deselect during the authorise takes the select away; the pairing ends
+  // stopped and nothing starts
+  seq_pin_device(&d, true);
+  seq_request(&d, OUTPUT_REQ_AUTHORIZE, false);
+  seq_request(&d, OUTPUT_REQ_DESELECT, false);
+  seq_report(&d, R(STOPPED), F(NONE), false, true);
+  seq_check("deselect during the authorise", &d, "connecting+pin,stopped");
+
+  // Nothing automatic starts a device that waits for a PIN; the user's own
+  // select does
+  seq_pin_device(&d, false);
+  seq_request(&d, OUTPUT_REQ_SELECT, false);
+  seq_check("automatic select of a PIN device", &d, "");
+  seq_request(&d, OUTPUT_REQ_SELECT, true);
+  seq_check("user's select of a PIN device", &d, "connecting+pin");
+
+  // A deselect while connecting: stopping at once, the start runs on and is
+  // stopped once it has a session, then stopped
+  memset(&d, 0, sizeof(d));
+  d.in.playing = true;
+  d.in.selected = true;
+  seq_request(&d, OUTPUT_REQ_SELECT, true);
+  d.in.selected = false;
+  seq_request(&d, OUTPUT_REQ_DESELECT, false);
+  seq_report(&d, R(CONNECTED), F(NONE), true, true);
+  seq_report(&d, R(STOPPED), F(NONE), false, true);
+  seq_check("deselect while connecting, start succeeds", &d, "connecting,stopping,stopped");
+
+  // The same, the start leaving no session: stopped and cancelled
+  memset(&d, 0, sizeof(d));
+  d.in.playing = true;
+  d.in.selected = true;
+  seq_request(&d, OUTPUT_REQ_SELECT, true);
+  d.in.selected = false;
+  seq_request(&d, OUTPUT_REQ_DESELECT, false);
+  seq_report(&d, R(FAILED), F(UNREACHABLE), false, true);
+  seq_check("deselect while connecting, start fails", &d, "connecting,stopping,stopped:cancelled");
+
+  // A select during a stop: nothing new until the stop ends, then the start
+  memset(&d, 0, sizeof(d));
+  d.in.playing = true;
+  d.in.phase = P(STREAMING);
+  d.in.has_session = true;
+  seq_request(&d, OUTPUT_REQ_DESELECT, false);
+  d.in.selected = true;
+  seq_request(&d, OUTPUT_REQ_SELECT, true);
+  seq_report(&d, R(STOPPED), F(NONE), false, true);
+  seq_check("select during a stop", &d, "stopping,stopped,connecting");
+
+  // A probe that ends while the player plays is followed by the start, and
+  // both phases are announced
+  memset(&d, 0, sizeof(d));
+  d.in.selected = true;
+  seq_request(&d, OUTPUT_REQ_SELECT, true);
+  d.in.playing = true;
+  seq_report(&d, R(STARTUP), F(NONE), false, true);
+  seq_check("probe then start", &d, "connecting,stopped,connecting");
+
+  // A report from an older operation moves nothing
+  memset(&d, 0, sizeof(d));
+  d.in.playing = true;
+  d.in.phase = P(STOPPING);
+  d.in.op = O(STOP);
+  d.in.has_session = true;
+  seq_report(&d, R(FAILED), F(UNREACHABLE), true, false);
+  seq_check("stale report", &d, "");
+
+  // An established session that fails stays selected, reads lost
+  memset(&d, 0, sizeof(d));
+  d.in.playing = true;
+  d.in.selected = true;
+  d.in.phase = P(STREAMING);
+  seq_report(&d, R(FAILED), F(TIMEOUT), false, true);
+  seq_check("established session lost", &d, "failed:lost");
+  cases_run++;
+  if (!d.in.selected)
+    {
+      cases_failed++;
+      printf("FAIL established session lost: deselected\n");
+    }
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -839,6 +1084,7 @@ main(int argc, char *argv[])
 
   seed = (argc > 1) ? strtoull(argv[1], NULL, 10) : (uint64_t)time(NULL);
 
+  test_sequences();
   test_report_table();
   test_request_table();
   test_stale_generation();

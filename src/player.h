@@ -168,6 +168,15 @@ player_speaker_disable(uint64_t id);
 int
 player_speaker_authorize(uint64_t id, const char *pin);
 
+// A PIN and the select it unlocks in one request: the speaker is paired with
+// the PIN and then started (with its group) at volume (-1 for none), as an
+// enable with include_tv would start it; a PIN the receiver refuses is
+// followed by a new PIN start. Returns 0 when accepted (the outcome follows as
+// the speaker's state), -1 for an unknown speaker, -4 or -5 as an enable
+// refuses include_tv. The PIN is not kept after the call.
+int
+player_speaker_authorize_then_select(uint64_t id, const char *pin, int include_tv, int volume);
+
 int
 player_speaker_format_set(uint64_t id, enum media_format format);
 

@@ -2336,6 +2336,8 @@ handle_authorize(struct output_device *device, enum output_device_state status, 
 
 static int
 handle_volume_echo(struct output_device *device, enum output_device_state status, int retval);
+static void
+speaker_enable_apply(struct output_device *device, int volume);
 
 
 /* ---------------- The one way a speaker report is handled ----------------- */
@@ -2522,6 +2524,8 @@ report_apply(struct output_device *device, enum output_device_state status, stru
   enum output_op next;
   bool current = in->report_current_gen;
   bool ended;
+  bool then_select;
+  int start_volume;
 
   in->report_reason = (status == OUTPUT_STATE_FAILED || status == OUTPUT_STATE_PASSWORD) ? device->last_failure : OUTPUT_FAILURE_NONE;
   output_phase_on_report(in, report_of(status), &res);
@@ -2533,18 +2537,33 @@ report_apply(struct output_device *device, enum output_device_state status, stru
 
   ended = current && res.clear_op && (op != OUTPUT_OP_NONE);
 
+  // The select that came with the PIN: the start the rule asks for after the
+  // authorise is that select, of the device and its group
+  then_select = ended && (op == OUTPUT_OP_AUTHORIZE) && in->then_select
+                && (res.next_op == OUTPUT_OP_START || res.next_op == OUTPUT_OP_PROBE);
+  start_volume = device->start_volume;
+
   flags_apply(device, &res);
   if (res.clear_op)
     device->op = OUTPUT_OP_NONE;
 
   next = res.next_op;
-  if ((next == OUTPUT_OP_START || next == OUTPUT_OP_PROBE) && start_left_to_others(device, ended ? op : OUTPUT_OP_NONE))
+  if (then_select)
+    next = OUTPUT_OP_NONE;
+  else if ((next == OUTPUT_OP_START || next == OUTPUT_OP_PROBE) && start_left_to_others(device, ended ? op : OUTPUT_OP_NONE))
     {
       DPRINTF(E_DBG, L_PLAYER, "'%s' is not started after its report: it is started another way\n", device->name);
       next = OUTPUT_OP_NONE;
     }
 
   result_phases_apply(device, &res, next, false);
+
+  if (then_select)
+    {
+      DPRINTF(E_INFO, L_PLAYER, "Starting '%s' as the PIN request asked\n", device->name);
+      device->start_volume = -1;
+      speaker_enable_apply(device, start_volume);
+    }
 
   // The session's next report reaches the session's callback; a report that
   // was one step of an operation gives the operation a new slot
@@ -4305,14 +4324,46 @@ speaker_mode_set(void *arg, int *retval)
   return COMMAND_END;
 }
 
+// Begins an authorise with the PIN. then_select: the request also asked for
+// the device to be started, at volume (-1 for none), once the PIN has paired
+// it, or with a new PIN start when the receiver refuses this one. A PIN that
+// arrives while the device has a session or an operation in flight is
+// dropped; whatever is in flight reports as usual
+static void
+authorize_begin(struct output_device *device, const char *pin, bool then_select, int volume)
+{
+  struct output_phase_input in;
+  struct output_phase_result res;
+  int ret;
+
+  phase_input_fill(&in, device);
+  output_phase_on_request(&in, OUTPUT_REQ_AUTHORIZE, &res);
+  if (res.next_op != OUTPUT_OP_AUTHORIZE)
+    {
+      DPRINTF(E_INFO, L_PLAYER, "PIN for '%s' not used: it has a session or an operation in flight (%s)\n",
+	      device->name, op_name(device->op));
+      return;
+    }
+
+  flags_apply(device, &res);
+
+  device->then_select = then_select;
+  device->start_volume = then_select ? volume : -1;
+
+  // The PIN is used inside this call (the backend builds its first pairing
+  // request at once), so it is never kept
+  ret = outputs_device_authorize(device, pin, device_op_cb);
+  if (ret < 0)
+    operation_failed_at_once(device, OUTPUT_OP_AUTHORIZE);
+  else if (ret == 0)
+    device->then_select = 0;
+}
+
 static enum command_state
 speaker_authorize(void *arg, int *retval)
 {
   struct speaker_attr_param *param = arg;
   struct output_device *device;
-  struct output_phase_input in;
-  struct output_phase_result res;
-  int ret;
 
   *retval = -1;
 
@@ -4320,26 +4371,49 @@ speaker_authorize(void *arg, int *retval)
   if (!device)
     return COMMAND_END;
 
-  *retval = 0;
+  authorize_begin(device, param->pin, false, -1);
 
-  phase_input_fill(&in, device);
-  output_phase_on_request(&in, OUTPUT_REQ_AUTHORIZE, &res);
-  if (res.next_op != OUTPUT_OP_AUTHORIZE)
+  *retval = 0;
+  return COMMAND_END;
+}
+
+struct speaker_authorize_select_param
+{
+  uint64_t id;
+  const char *pin;
+  int include_tv;
+  int volume;     // level to start at, or -1 for none
+};
+
+// A PIN and the select it unlocks, in one request: the include_tv option is
+// judged now, as an enable would judge it, and the start follows the pairing
+static enum command_state
+speaker_authorize_then_select(void *arg, int *retval)
+{
+  struct speaker_authorize_select_param *param = arg;
+  struct output_device *device;
+  struct tv_proxy_enable enable;
+
+  *retval = -1;
+
+  device = outputs_device_get(param->id);
+  if (!device)
+    return COMMAND_END;
+
+  enable = tv_proxy_enable_resolve(outputs_device_leads_tv_proxy_group(device), param->include_tv,
+                                   device->selected, device->tv_proxy_speakers_only);
+  if (enable.refusal)
     {
-      // The PIN is dropped; whatever is in flight reports as usual
-      DPRINTF(E_INFO, L_PLAYER, "PIN for '%s' not used: it has a session or an operation in flight (%s)\n",
-	      device->name, op_name(device->op));
+      *retval = enable.refusal;
       return COMMAND_END;
     }
 
-  flags_apply(device, &res);
+  if (enable.set_flag)
+    device->tv_proxy_speakers_only = enable.flag;
 
-  // The PIN is used inside this call (the backend builds its first pairing
-  // request at once), so it is never kept
-  ret = outputs_device_authorize(device, param->pin, device_op_cb);
-  if (ret < 0)
-    operation_failed_at_once(device, OUTPUT_OP_AUTHORIZE);
+  authorize_begin(device, param->pin, true, param->volume);
 
+  *retval = 0;
   return COMMAND_END;
 }
 
@@ -5276,6 +5350,19 @@ player_speaker_authorize(uint64_t id, const char *pin)
   param.pin = pin;
 
   return commands_exec_sync(cmdbase, speaker_authorize, speaker_generic_bh, &param);
+}
+
+int
+player_speaker_authorize_then_select(uint64_t id, const char *pin, int include_tv, int volume)
+{
+  struct speaker_authorize_select_param param;
+
+  param.id = id;
+  param.pin = pin;
+  param.include_tv = include_tv;
+  param.volume = volume;
+
+  return commands_exec_sync(cmdbase, speaker_authorize_then_select, speaker_generic_bh, &param);
 }
 
 int
