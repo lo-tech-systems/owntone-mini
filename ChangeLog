@@ -65,8 +65,9 @@
 - change: the service no longer sets `MemoryMax` or `MemorySwapMax`. They were
   sized for the full server, and the memory controller that enforces them is
   off by default on Raspberry Pi kernels, so they never applied
-- new: AirPlay 2 speakers other than Apple TVs and HomePods report their own
-  buttons (Pause, Play): their sessions are set up with an iPhone's sender
+- new: AirPlay 2 speakers that do not advertise that they send their buttons
+  to any sender (features bit 58, as Apple TVs and HomePods do) report their
+  own buttons (Pause, Play): their sessions are set up with an iPhone's sender
   description and the list of commands the sender accepts, which such a
   speaker waits for before sending its buttons. A speaker that refuses the
   list of commands still plays. Per speaker `remote_commands` (default on)

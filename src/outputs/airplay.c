@@ -558,8 +558,9 @@ struct airplay_session
   // be reported back to us. Such a speaker only sends them to a sender that
   // describes itself the way an iPhone does, so the session SETUP carries the
   // iPhone's sender keys (setup_sender_keys_add()) and the MediaRemote command
-  // table is sent as in buffered mode. On for every speaker but an Apple TV
-  // or HomePod, unless the speaker's remote_commands setting is false.
+  // table is sent as in buffered mode. On for every speaker that does not
+  // advertise SupportsHangdogRemoteControl (bit 58), unless the speaker's
+  // remote_commands setting is false.
   bool remote_commands;
 
   bool req_has_auth;
@@ -7830,6 +7831,7 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
   uint64_t id;
   bool advertises_buffered = false;
   bool wants_nowplaying_features = false;
+  bool sends_own_buttons = false;
   bool device_changed;
   int ret;
 
@@ -7969,6 +7971,10 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
     extra->use_ptp = 1;
   if (keyval_get(&features_kv, "SupportsSetPeersExtendedMessage"))
     extra->supports_setpeersx = true;
+  // SupportsHangdogRemoteControl (bit 58): the receiver sends its own
+  // buttons to any sender, so it does not need remote_commands (below)
+  if (keyval_get(&features_kv, "SupportsHangdogRemoteControl"))
+    sends_own_buttons = true;
 
   // Whether the device claims buffered-audio support in its mDNS advertisement.
   // This claim is not trusted for the routing decision (some receivers set it
@@ -8018,10 +8024,9 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
   if (wants_nowplaying_features && !(devcfg && cfg_getbool(devcfg, "nowplaying_disable")))
     extra->wanted_metadata |= AIRPLAY_MD_WANTS_NOWPLAYING;
 
-  // On by default for every speaker but an Apple TV or HomePod, which send
-  // their own buttons without it; a speaker's setting can turn it off
-  extra->remote_commands = !airplay_is_appletv_device(extra->devtype) && extra->devtype != AIRPLAY_DEV_HOMEPOD
-                           && config_get_device_bool(name, "remote_commands", true);
+  // On by default for every speaker that does not advertise bit 58, whatever
+  // its model; a speaker's setting can turn it off
+  extra->remote_commands = !sends_own_buttons && config_get_device_bool(name, "remote_commands", true);
 
   extra->gid = safe_strdup(keyval_get(txt, "gid"));
   extra->gpn = safe_strdup(keyval_get(txt, "gpn"));
