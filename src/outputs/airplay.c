@@ -261,6 +261,11 @@
 // https://github.com/owntone/owntone-server/issues/734#issuecomment-622959334
 #define AIRPLAY_KEEP_ALIVE_INTERVAL   25
 
+// A speaker has been seen ignoring the level sent while its session started
+// and playing at full volume, so the level is sent once more this long (in
+// milliseconds) after the session starts streaming
+#define AIRPLAY_START_VOLUME_RESEND_MS 1000
+
 // Building and queueing one request on the player thread takes this long (in
 // milliseconds) or more before it is logged at info rather than debug level
 #define AIRPLAY_REQUEST_BUILD_SLOW_MS 5
@@ -681,6 +686,9 @@ struct airplay_session
   // Set once session_streaming_report() has told the player
   // OUTPUT_STATE_STREAMING for this session, so it is only reported once.
   bool streaming_reported;
+  // Set once the one-shot re-send of the level has been armed for this
+  // session, so a resume after a flush does not arm it again
+  bool start_volume_armed;
   // The rtptime named by this session's anchor - delivery starts exactly at
   // this frame (see the gate in buffered_frame_send). Equals the write head
   // for a first/frozen anchor, or a slightly-future join point when joining
@@ -696,6 +704,10 @@ struct airplay_session
   // One-shot timer that follows up a track-change push with artwork ~1s
   // later (see np_artwork_cb() for the full rationale).
   struct event *np_artwork_ev;
+
+  // One-shot timer that sends the speaker's level once more shortly after
+  // the session starts streaming (see session_volume_resend_cb())
+  struct event *start_volume_ev;
 
   /* Pairing, see pair.h */
   enum pair_type pair_type;
@@ -1586,6 +1598,30 @@ session_volume_resync(struct airplay_session *session)
   sequence_start(AIRPLAY_SEQ_SEND_VOLUME, session, NULL, "volume_resync");
 }
 
+// Fires AIRPLAY_START_VOLUME_RESEND_MS after a session first starts streaming
+// and sends the speaker's current level again. A speaker has been seen
+// ignoring the level sent while its session started and playing at full
+// volume, with nothing else to send the level again. Sent like any other
+// level, so the player records it as sent and can match the speaker's answer.
+static void
+session_volume_resend_cb(int fd, short what, void *arg)
+{
+  struct airplay_session *session = arg;
+  struct output_device *device;
+
+  if (session->state != AIRPLAY_STATE_STREAMING)
+    return;
+
+  device = outputs_device_get(session->device_id);
+  if (!device)
+    return;
+
+  DPRINTF(E_INFO, L_AIRPLAY, "Re-sending the volume of '%s' (%d) after start\n", session->devname, device->volume);
+
+  // payload_make_set_volume() refreshes session->volume itself
+  sequence_start(AIRPLAY_SEQ_SEND_VOLUME, session, NULL, "volume_resend");
+}
+
 static void
 master_session_free(struct airplay_master_session *ams)
 {
@@ -1886,6 +1922,9 @@ session_free(struct airplay_session *session)
 
   if (session->np_artwork_ev)
     event_free(session->np_artwork_ev);
+
+  if (session->start_volume_ev)
+    event_free(session->start_volume_ev);
 
   if (session->pairev)
     event_free(session->pairev);
@@ -2370,6 +2409,7 @@ session_make(struct output_device *device, int callback_id)
   CHECK_NULL(L_AIRPLAY, session->anchorev = evtimer_new(evbase_player, anchor_retry_cb, session));
   CHECK_NULL(L_AIRPLAY, session->np_reassert_ev = evtimer_new(evbase_player, np_reassert_cb, session));
   CHECK_NULL(L_AIRPLAY, session->np_artwork_ev = evtimer_new(evbase_player, np_artwork_cb, session));
+  CHECK_NULL(L_AIRPLAY, session->start_volume_ev = evtimer_new(evbase_player, session_volume_resend_cb, session));
   CHECK_NULL(L_AIRPLAY, session->pairev = evtimer_new(evbase_player, pair_job_timeout_cb, session));
 
   session->serial = airplay_session_serial_next++;
@@ -8227,6 +8267,17 @@ airplay_write(struct output_buffer *obuf)
 	    }
 
 	  session_volume_resync(session);
+
+	  // The first transition of the session only, not each resume after a
+	  // flush: the speaker's level is lost when a session starts, not when
+	  // it resumes
+	  if (!session->start_volume_armed)
+	    {
+	      struct timeval resend_tv = { AIRPLAY_START_VOLUME_RESEND_MS / 1000, (AIRPLAY_START_VOLUME_RESEND_MS % 1000) * 1000 };
+
+	      session->start_volume_armed = true;
+	      evtimer_add(session->start_volume_ev, &resend_tv);
+	    }
 	}
 
       // A buffered receiver plays nothing until it has accepted a rate=1
