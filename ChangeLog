@@ -24,6 +24,27 @@
   `{"error": "reselect_required"}`, and `include_tv: false` for an Apple TV
   that does not lead a group of HomePods at the moment is refused with `409`
   and `{"error": "group_not_present"}`
+- new: enabling an output with `volume` in `PUT /api/outputs/{id}` starts
+  its speakers at that level. The level is set on the output and on every
+  other member of its group before the start, without being limited by the
+  volume of speakers already playing, so the first volume a speaker is sent
+  is the requested one, and `0` starts silent. The event channel's `hello`
+  lists a `start_volume` capability for it
+- new: an enable that is refused answers `400` with `{"error":
+  "pin_required"}` when the device asked for a PIN or password, and `{"error":
+  "start_failed"}` for any other refusal
+- change: a session from the pipe plays as soon as the pipe is open. The
+  selected speakers join as each one connects, so a speaker that is off no
+  longer holds up playback, `GET /api/outputs` or other requests
+- change: a speaker start makes one attempt. The connection and each request
+  up to setting up the stream give up after 4 seconds (15 after that), and
+  only a stereo pair's pair-setup rejection just after a stop is tried again.
+  Enabling an output now answers at once if the speaker is off, within about
+  4 seconds if it does not answer, and within about 30 seconds at worst, not
+  over a minute. This applies to AirPlay 1 speakers too
+- fix: the first start of a stereo pair holds the first member for up to
+  2.5 seconds while the other is still being set up, so that both are given
+  the same first frame
 - change: a pause or play sent by a receiver (for example an Apple TV going
   into standby) is reported on the event channel and nothing else; it no
   longer deselects the output or changes playback. The `paused_by_device`

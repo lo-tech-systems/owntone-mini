@@ -60,7 +60,9 @@ server allows four connections at once.
 | `error` | `code`, `text`. The server closes the connection after it. |
 
 `capabilities` lists what this build can report: `changed`,
-`receiver_command`, `device_volume` and `include_tv`.
+`receiver_command`, `device_volume`, `include_tv` and `start_volume`.
+`start_volume` means an enable that carries a `volume` starts the speakers at
+that level (see [Update an output](json-api.md#update-an-output)).
 
 `changed` carries no detail. The client reads `GET /api/outputs` to find out
 what changed. At most one `changed` is sent per 20 ms on a connection, so a
@@ -95,7 +97,7 @@ Example:
 
 ```json
 {"type":"hello","protocol":1,"client":"supervisor 1.0"}
-{"type":"hello","seq":1,"protocol":1,"version":"1.6.0","boot":"3f9a1c2e77b04d15","uptime_ms":1843,"capabilities":["changed","receiver_command","device_volume","include_tv"],"ping_interval_ms":10000,"idle_close_ms":30000,"max_line":4096}
+{"type":"hello","seq":1,"protocol":1,"version":"1.6.0","boot":"3f9a1c2e77b04d15","uptime_ms":1843,"capabilities":["changed","receiver_command","device_volume","include_tv","start_volume"],"ping_interval_ms":10000,"idle_close_ms":30000,"max_line":4096}
 {"type":"changed","seq":2,"what":"outputs"}
 {"type":"event","seq":3,"kind":"receiver_command","verb":"paus","protocol":"airplay2_events","speaker":{"id":"9988776655443322","member_id":"9988776655443399","name":"TV A"},"at_ms":190511}
 {"type":"event","seq":4,"kind":"device_volume","verb":"volumeup","value":"45","speaker":{"id":"8734567012345678","member_id":"8734567012345678","name":"Speaker A"},"at_ms":191002}
@@ -113,13 +115,24 @@ Example:
 - When the daemon stops, a client that has nothing waiting to be sent gets
   `error` with code `shutting_down` and then the connection closes; any other
   client is simply closed.
-- Changing an output can take a long time. Enabling one blocks until the
-  speaker has started, or until its start attempts have run out, which can be
-  well over a minute for a speaker that is switched off but still listed, and
-  other requests to the player wait behind it. A client that sees a timeout
-  on the HTTP API while a start is in progress should treat the request as
-  pending and wait for the next `changed`, not conclude that the daemon is
-  down.
+- Starting playback from the pipe never waits for a speaker. The player is
+  playing as soon as the pipe is open, and the selected speakers join it as
+  each one connects, so a speaker that is switched off cannot hold up the
+  others, the player's state or other requests. Each speaker's row steps
+  through `startup`, `connected` and `streaming`, or `failed`, and each step
+  is announced with `changed`.
+- Enabling one output with `PUT /api/outputs/{id}` still waits for the
+  speaker's answer, and other requests to the player wait behind it. A start
+  makes one attempt: the connection and each request up to setting up the
+  stream give up after 4 seconds, and a request after that after 15, so a
+  refusal comes back at once from a speaker that is off, within about 4
+  seconds from one that does not answer, and within about 30 seconds at
+  worst from one that answers part of the way and then stalls. The one
+  retry is a stereo pair's pair-setup rejection just after a stop, tried up
+  to twice more 3 seconds apart. A client that sees a timeout while a start
+  is in progress should treat the request as pending and wait for the next
+  `changed`, not conclude that the daemon is down. Starting a speaker again
+  after a failure is the supervisor's job.
 - `boot` tells a restart of the daemon from a dropped connection. `uptime_ms`
   says how far device discovery is likely to have got.
 - Fields may be added to a message without changing the protocol version.

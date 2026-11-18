@@ -42,7 +42,7 @@ endpoint can return are listed in its section.
 
 | Code | Meaning |
 | ---- | ------- |
-| 400 | Invalid or missing request body, bad value, unknown output id, or unknown path |
+| 400 | Invalid or missing request body, bad value, unknown output id, or unknown path. Enabling an output that could not be started has the body `{"error": "pin_required"}` or `{"error": "start_failed"}` |
 | 401 | Credentials needed (see above) |
 | 403 | Address not trusted and no `admin_password` set |
 | 404 | Unknown setting |
@@ -193,7 +193,12 @@ The state of what the row plays. For an output on its own that is its own connec
 | `failure` | string | Why the last start failed: `"capacity"` if the buffered-encode budget was used up, otherwise `"none"` |
 
 An output that is selected is not necessarily streaming: `selected` says what
-was asked for, `session.state` what the device is doing. For HomePods played
+was asked for, `session.state` what the device is doing. When playback starts
+from the pipe, the player plays at once, with or without speakers, and each
+selected speaker steps through `"startup"`, `"connected"` and `"streaming"`, or
+ends at `"failed"`, as it joins. `GET /api/player` reports `play` about the
+start buffer (2.3 seconds) after the pipe opens, not when a speaker has
+started. For HomePods played
 without their Apple TV, `session.state` is `"streaming"` if any HomePod streams,
 otherwise `"startup"` if any is starting or connected, otherwise `"password"`,
 `"failed"` or `"stopped"` in that order of precedence.
@@ -316,7 +321,7 @@ All fields are optional. Any combination may be supplied in one request.
 | --- | ---- | ----- |
 | `selected` | boolean | Enable or disable the output |
 | `include_tv` | boolean | With `selected: true` on an Apple TV that leads a group of HomePods: `true` plays on the Apple TV and the HomePods (the default behaviour), `false` plays on the HomePods only and gives the Apple TV no session. Ignored for any other output, except that `false` is refused with `409` (see below) unless the output's `has_homepods` is `true`. When absent the option is left as it was |
-| `volume` | integer | Set output volume, from `0` to `100` |
+| `volume` | integer | Set output volume, from `0` to `100`. Sent with `selected: true` it is also the level the speakers start at: it is set on the output, and on every other member of its group (a stereo pair, or the HomePods behind an Apple TV), before they are started, and is not limited by the volume of speakers already playing. `0` starts them silent. Without `selected: true` it sets the level of the output |
 | `pin` | string | Submit a PIN for authorization |
 | `format` | string | Set the output audio format |
 | `offset_ms` | integer | Set timing offset in milliseconds, from `-2000` to `2000` |
@@ -330,16 +335,27 @@ already taken effect.
 
 Returns HTTP `204 No Content` on success.
 
-Enabling an output blocks until the speaker has started or its start attempts
-have run out, which for a speaker that is switched off but still listed can take
-well over a minute, and other requests to the player (including
-`GET /api/outputs`) wait behind it. A client should treat a timeout during a
-start as "pending" and check again, not as the daemon being down.
+Enabling an output waits until the speaker has started or the start has
+failed, and other requests to the player (including `GET /api/outputs`) wait
+behind it. The start makes one attempt: the connection and each request up to
+setting up the stream give up after 4 seconds, and a request after that after
+15. A speaker that is off or refuses the connection is answered at once, and
+one that does not answer within about 4 seconds. A speaker that answers part of
+the way and then stalls can take up to about 30 seconds. A client should treat
+a timeout during a start as "pending" and check again, not as the daemon being
+down.
 
 Returns HTTP `400 Bad Request` if the id is not a number, the body is missing
 or not valid JSON, no output has that id, `volume` or `offset_ms` is out of
-range, the output could not be enabled, disabled or given the format, the PIN
-was not accepted, or `mode` is not one of the names listed above.
+range (an enable with `volume` out of range starts nothing), the output could
+not be disabled or given the format, the PIN was not accepted, or `mode` is
+not one of the names listed above.
+
+An enable that is refused answers `400` with a JSON body naming the reason:
+`{"error": "pin_required"}` when the device asked for a PIN or password (send
+it with `pin`), and `{"error": "start_failed"}` for any other refusal, including an enable of an id
+that no output has. The
+status is the same for both, so a client that ignores the body is unaffected.
 
 The `include_tv` option is fixed for as long as the output is selected. A
 request that would change it while the output is selected gets HTTP `409
