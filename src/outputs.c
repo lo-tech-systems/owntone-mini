@@ -2095,7 +2095,10 @@ outputs_device_session_remove(uint64_t device_id)
 
   device = outputs_device_get(device_id);
   if (device)
-    device->session = NULL;
+    {
+      device->session = NULL;
+      device->held = false;
+    }
 
   // With no sessions left, give the allocator a chance to hand pages back to
   // the system instead of holding onto this session's high-water mark. The
@@ -2526,6 +2529,24 @@ outputs_device_offset_set(struct output_device *device)
     return 0; // Device isn't active
 
   return outputs[device->type]->device_offset_set(device);
+}
+
+int
+outputs_device_hold_set(struct output_device *device, bool held)
+{
+  int ret;
+
+  if (outputs[device->type]->disabled || !outputs[device->type]->device_hold_set)
+    return -1;
+
+  if (!device->session)
+    return -1;
+
+  ret = outputs[device->type]->device_hold_set(device, held);
+  if (ret == 0)
+    device->held = held;
+
+  return ret;
 }
 
 int

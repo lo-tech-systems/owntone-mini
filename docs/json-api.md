@@ -192,6 +192,7 @@ The state of what the row plays. For an output on its own that is its own connec
 | --- | ---- | ----- |
 | `state` | string | `"stopped"` (no connection), `"startup"` (connecting), `"connected"` (connected, audio not flowing yet), `"streaming"`, `"failed"`, or `"password"` (the device wants a PIN or password) |
 | `failure` | string | Why the last start failed: `"capacity"` if the buffered-encode budget was used up, otherwise `"none"` |
+| `held` | boolean | `true` while the output is held with `hold` (see [Update an output](#update-an-output)): it paused itself and is sent no audio. For a group it is `true` when every speaker of the group that has a session is held. Cleared when the hold ends or the session ends |
 
 An output that is selected is not necessarily streaming: `selected` says what
 was asked for, `session.state` what the device is doing. When playback starts
@@ -211,7 +212,8 @@ setting the volume of the listed output applies to every output in its group.
 
 A row used to carry `paused_by_device`. It has been removed: a pause from a
 device is now only [reported](event-channel.md), and does not change the
-output.
+output. A supervisor that wants the speaker to stay paused holds it with
+`hold`.
 
 The AirPlay 2 modes beyond plain `"airplay2"` (realtime) select a buffered
 transport, where the receiver queues audio ahead of playout instead of
@@ -327,10 +329,24 @@ All fields are optional. Any combination may be supplied in one request.
 | `format` | string | Set the output audio format |
 | `offset_ms` | integer | Set timing offset in milliseconds, from `-2000` to `2000` |
 | `mode` | string | Set the protocol mode preference: `"auto"`, `"raop"`, `"airplay2"`, `"airplay2_buffered"`, `"airplay2_buffered_24"`, `"airplay2_surround_stereo"`, or `"airplay2_surround_upmix"` |
+| `hold` | boolean | `true` holds a speaker that paused itself, `false` ends the hold. See below |
 
 Fields are applied in this order: `offset_ms`, `selected` (with `include_tv`),
-`volume`, `pin`, `format`, `mode`. If one fails, the ones before it have
+`volume`, `hold`, `pin`, `format`, `mode`. If one fails, the ones before it have
 already taken effect.
+
+A buffered AirPlay 2 receiver (an Apple TV, a HomePod) pauses itself when its
+own pause is pressed, and its own play does not restart it. It keeps reading
+audio until its buffer is full and then stops, and the session then fails.
+`hold: true` stops sending it audio, so the session stays up, and tells it that
+playback is paused. `hold: false` restarts it at the live position: its buffer
+is flushed and it is given a new start time. For a group (a stereo pair, or an
+Apple TV and its HomePods) every speaker of the group with a session is held or
+restarted together. Holding a speaker that is held, or ending the hold of one
+that is not, is accepted and changes nothing. A request for an output that
+cannot be held (no session, or not a buffered AirPlay 2 session) gets HTTP `409
+Conflict` with body `{"error": "not_holdable"}`. The hold ends with the
+session.
 
 **Response**
 

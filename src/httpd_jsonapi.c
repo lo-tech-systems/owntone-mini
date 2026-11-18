@@ -559,6 +559,7 @@ speaker_session_to_json(struct player_speaker_info *spk)
   json_object_object_add(session, "state", json_object_new_string(output_state_to_string(spk->state)));
   json_object_object_add(session, "failure",
                          json_object_new_string(spk->last_failure == OUTPUT_FAILURE_CAPACITY ? "capacity" : "none"));
+  json_object_object_add(session, "held", json_object_new_boolean(spk->held));
 
   return session;
 }
@@ -777,6 +778,20 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
     {
       volume = jparse_int_from_obj(request, "volume");
       ret = player_volume_setabs_speaker(output_id, volume);
+      if (ret < 0)
+	goto error;
+    }
+
+  // A speaker that paused itself is held, and its hold ended, on the
+  // supervisor's word only
+  if (jparse_contains_key(request, "hold", json_type_boolean))
+    {
+      ret = player_speaker_hold_set(output_id, jparse_bool_from_obj(request, "hold"));
+      if (ret == -2)
+	{
+	  jparse_free(request);
+	  return jsonapi_reply_error(hreq, HTTP_CONFLICT, "not_holdable");
+	}
       if (ret < 0)
 	goto error;
     }

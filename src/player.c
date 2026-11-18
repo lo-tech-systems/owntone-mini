@@ -200,6 +200,7 @@ struct speaker_attr_param
   enum media_format format;
   enum output_mode mode;
   int offset_ms;
+  bool held;
 
   int audio_fd;
   int metadata_fd;
@@ -2871,6 +2872,36 @@ homepods_session_of(struct player_speaker_info *spk, struct output_device *devic
   spk->last_failure = capacity ? OUTPUT_FAILURE_CAPACITY : OUTPUT_FAILURE_NONE;
 }
 
+// Whether the speakers a row stands for are held: every member of its group
+// that has a session is held, not counting an Apple TV whose HomePods play the
+// audio. A device in no group is held when it is.
+static bool
+speaker_group_held(struct output_device *device)
+{
+  struct output_device *cur;
+  const char *group_id;
+  int held = 0;
+
+  group_id = outputs_device_group_id(device);
+  if (!group_id)
+    return device->held;
+
+  for (cur = outputs_list(); cur; cur = cur->next)
+    {
+      const char *cur_gid = outputs_device_group_id(cur);
+
+      if (!cur_gid || strcmp(cur_gid, group_id) != 0 || !cur->session || cur->tv_proxy_audio_suppress)
+	continue;
+
+      if (!cur->held)
+	return false;
+
+      held++;
+    }
+
+  return held > 0;
+}
+
 static void
 device_to_speaker_info(struct player_speaker_info *spk, struct output_device *device, uint32_t index)
 {
@@ -2913,6 +2944,7 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
 
   spk->state = device->state;
   spk->last_failure = device->last_failure;
+  spk->held = speaker_group_held(device);
 
   row = outputs_device_row(device);
   spk->row_id = row->id;
@@ -3589,6 +3621,53 @@ speaker_offset_ms_set(void *arg, int *retval)
  error:
   DPRINTF(E_LOG, L_PLAYER, "Error setting offset_ms %d, outside of supported range -2000 to 2000\n", param->offset_ms);
   *retval = -1;
+  return COMMAND_END;
+}
+
+// Holds the speakers of a row, or ends their hold: the device and, for a group
+// (a stereo pair, an Apple TV and its HomePods), every member with a session,
+// so the members stop and restart together. -1 for an unknown device, -2 when
+// none of them could be held.
+static enum command_state
+speaker_hold_set(void *arg, int *retval)
+{
+  struct speaker_attr_param *param = arg;
+  struct output_device *device;
+  struct output_device *cur;
+  const char *group_id;
+  int accepted = 0;
+
+  device = outputs_device_get(param->spk_id);
+  if (!device)
+    {
+      *retval = -1;
+      return COMMAND_END;
+    }
+
+  group_id = outputs_device_group_id(device);
+  if (!group_id)
+    {
+      if (outputs_device_hold_set(device, param->held) == 0)
+	accepted++;
+    }
+  else
+    {
+      for (cur = outputs_list(); cur; cur = cur->next)
+	{
+	  const char *cur_gid = outputs_device_group_id(cur);
+
+	  if (!cur_gid || strcmp(cur_gid, group_id) != 0 || !cur->session)
+	    continue;
+
+	  if (outputs_device_hold_set(cur, param->held) == 0)
+	    accepted++;
+	}
+    }
+
+  DPRINTF(E_INFO, L_PLAYER, "%s '%s': %d speaker(s)\n", param->held ? "Hold" : "Hold ended for",
+          outputs_device_display_name(device), accepted);
+
+  *retval = (accepted > 0) ? 0 : -2;
   return COMMAND_END;
 }
 
@@ -4568,6 +4647,17 @@ player_speaker_offset_ms_set(uint64_t id, int offset_ms)
   param.offset_ms = offset_ms;
 
   return commands_exec_sync(cmdbase, speaker_offset_ms_set, speaker_generic_bh, &param);
+}
+
+int
+player_speaker_hold_set(uint64_t id, bool held)
+{
+  struct speaker_attr_param param;
+
+  param.spk_id = id;
+  param.held = held;
+
+  return commands_exec_sync(cmdbase, speaker_hold_set, speaker_generic_bh, &param);
 }
 
 int

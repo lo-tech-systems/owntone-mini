@@ -243,6 +243,10 @@ struct output_device
   // For user config of speaker start
   int offset_ms;
 
+  // The device paused itself and its session is held (see
+  // outputs_device_hold_set). Lives as long as the session.
+  bool held;
+
   // Address
   char *v4_address;
   char *v6_address;
@@ -390,6 +394,12 @@ struct output_definition
   // cache a per-sync-packet offset need to implement this.
   int (*device_offset_set)(struct output_device *device);
 
+  // Hold a session whose device paused itself (no audio is sent to it), or end
+  // the hold, which restarts it at the live position. Synchronous: any wire
+  // requests run on their own. Optional: returns negative if the session
+  // cannot be held.
+  int (*device_hold_set)(struct output_device *device, bool held);
+
   // Request a change of quality from the device
   int (*device_quality_set)(struct output_device *device, struct media_quality *quality, int callback_id);
 
@@ -527,6 +537,12 @@ outputs_device_volume_set(struct output_device *device, output_status_cb cb);
 // doesn't support live offset refresh, negative on error.
 int
 outputs_device_offset_set(struct output_device *device);
+
+// Holds the session of a device that paused itself, or ends the hold (see
+// device_hold_set). Returns 0 on success, negative if the device has no
+// session or its session cannot be held.
+int
+outputs_device_hold_set(struct output_device *device, bool held);
 
 int
 outputs_device_volume_to_pct(struct output_device *device, const char *value);

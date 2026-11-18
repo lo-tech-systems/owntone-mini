@@ -49,6 +49,9 @@ struct player_speaker_info {
   enum output_device_state state;
   enum output_failure_reason last_failure;
 
+  // The speakers the row stands for paused themselves and are held
+  bool held;
+
   // True for an Apple TV that leads a group of HomePods which are present
   bool has_homepods;
 
@@ -165,6 +168,11 @@ player_speaker_format_set(uint64_t id, enum media_format format);
 
 int
 player_speaker_offset_ms_set(uint64_t id, int offset_ms);
+
+// Holds a speaker that paused itself (and the rest of its group), or ends the
+// hold. -1 for an unknown speaker, -2 when it could not be held.
+int
+player_speaker_hold_set(uint64_t id, bool held);
 
 int
 player_speaker_mode_set(uint64_t id, enum output_mode mode);
