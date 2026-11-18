@@ -1643,7 +1643,10 @@ session_status(struct airplay_session *session)
 	state = OUTPUT_STATE_CONNECTED;
 	break;
       case AIRPLAY_STATE_STREAMING:
-	state = OUTPUT_STATE_STREAMING;
+	// A buffered receiver plays nothing until its anchor is accepted, so
+	// until then a report from another answer (a level, a flush) says
+	// connected
+	state = (session->buffered_mode && !session->streaming_reported) ? OUTPUT_STATE_CONNECTED : OUTPUT_STATE_STREAMING;
 	break;
       default:
 	DPRINTF(E_LOG, L_AIRPLAY, "Bug! Unhandled state in session_status(): %d\n", session->state);
