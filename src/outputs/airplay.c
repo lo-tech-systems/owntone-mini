@@ -7794,8 +7794,11 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
   ret = evrtsp_make_request(session->ctrl, req, cur_request->rtsp_type, uri);
   if (ret < 0)
     {
-      // A failed connect leaves req queued on session->ctrl, which frees it
+      // A failed connect leaves req queued on session->ctrl, which frees it.
+      // A connect is the only way this fails, e.g. with no route to the
+      // receiver
       req = NULL;
+      session_fail_reason(session, OUTPUT_FAILURE_UNREACHABLE);
       goto error;
     }
 

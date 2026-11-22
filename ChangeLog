@@ -3,7 +3,10 @@
 ## Unreleased
 
 - fix: owntone-mini no longer stops when a speaker is started while the
-  network is down. The failed request was freed twice and libevent aborted
+  network is down. The failed request was freed twice and owntone-mini
+  crashed
+- fix: an AirPlay 2 speaker that cannot be reached when it is started is
+  reported as unreachable, not as refusing
 - fix: a malformed PTP signalling message from the network can no longer
   overrun a peer address on the stack
 - fix: pairing with an empty TLV no longer writes two bytes past the end of
