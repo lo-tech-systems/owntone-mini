@@ -119,22 +119,20 @@
 // (value is in milliseconds)
 #define PLAYER_WRITE_BEHIND_MAX 1500
 
-// If a speaker fails during playback we try to bring it back by reconnecting
-// after this number of seconds. When this feature was added, we had an issue
-// with Homepods and ATV4's dropping connections, so it is also a workaround.
+// A speaker that fails during playback, when it is lost or when its start
+// fails while another member of its group plays, is started again after this
+// number of seconds, at most this many times since it last streamed or was
+// enabled. After that quick retry, recovery is the client's. Speakers that
+// reconnect are those with the reconnect option, on by default for HomePods
+// and Apple TVs, which tend to drop connections.
 #define PLAYER_SPEAKER_RESURRECT_TIME 5
+#define PLAYER_SPEAKER_RECONNECT_MAX 1
 
 // A device that asked for a PIN waits this many seconds for it, about as long
 // as a receiver keeps the PIN on its screen. A wait that ends with an
 // operation in flight is looked at again after the shorter time
 #define PLAYER_PIN_WAIT_TIME 120
 #define PLAYER_PIN_WAIT_RECHECK_TIME 10
-
-// A TV proxy group leader (the Apple TV) that drops its session is
-// reconnected after this many seconds, for at most this many consecutive
-// attempts.
-#define PLAYER_TV_PROXY_RECONNECT_TIME 3
-#define PLAYER_TV_PROXY_RECONNECT_MAX 3
 
 // Seconds between housekeeping ticks that expire removal-candidate devices.
 #define PLAYER_DEVICE_GC_INTERVAL 30
@@ -176,8 +174,9 @@
 // started from playback_start_bh once the player is playing);
 // once any of them reports streaming, tv_proxy_leader_start() starts the
 // Apple TV's real session. If no follower can be started at all, the Apple TV
-// is started directly instead, as a fallback. A leader that then drops its
-// session is reconnected automatically (see PLAYER_TV_PROXY_RECONNECT_TIME).
+// is started directly instead, as a fallback. A leader or a follower that then
+// drops its session is retried like any other speaker (see
+// PLAYER_SPEAKER_RESURRECT_TIME).
 // Followers are stopped together with the leader, and volume commands go to
 // the leader and then fan out to the followers.
 
@@ -1741,6 +1740,8 @@ static int
 device_start(struct output_device *device, bool only_probe, bool explicit_request);
 static void
 device_request(struct output_device *device, enum output_request req, bool explicit_request, bool backend_changes);
+static void
+speaker_announce(struct output_device *device);
 
 // A selected device whose session failed is started again by a timer of its
 // own. The timer's argument is a copy of the device id, so a device freed in
@@ -1764,9 +1765,13 @@ resurrect_cb(int fd, short what, void *arg)
 
   // Not while it waits for a PIN (a start would replace the PIN on screen),
   // and not when nothing plays: every source is a live pipe, which plays on
-  // when its speakers fail, so there is no suspended playback to resume
+  // when its speakers fail, so there is no suspended playback to resume. The
+  // device is no longer live, which its row shows
   if (!device->selected || device->pin_pending || device->busy || device->prevent_playback || player_state != PLAY_PLAYING)
-    return;
+    {
+      speaker_announce(device);
+      return;
+    }
 
   device_request(device, OUTPUT_REQ_SELECT, false, false);
   status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
@@ -1797,6 +1802,65 @@ resurrect_cancel(struct output_device *device)
   free(event_get_callback_arg(device->resurrect_ev));
   event_free(device->resurrect_ev);
   device->resurrect_ev = NULL;
+}
+
+// A member that plays or is about to: a session starting, connected or
+// streaming, or a failure whose retry is waiting
+static bool
+member_live(struct output_device *device)
+{
+  switch (device->phase)
+    {
+      case OUTPUT_PHASE_CONNECTING:
+      case OUTPUT_PHASE_CONNECTED:
+      case OUTPUT_PHASE_STREAMING:
+	return true;
+      default:
+	return device->selected && device->resurrect_ev != NULL;
+    }
+}
+
+// Whether another member of the device's group is live. An Apple TV left out
+// of its group has no session and does not count
+static bool
+group_sibling_live(struct output_device *device)
+{
+  struct output_device *cur;
+  const char *group_id;
+
+  group_id = outputs_device_group_id(device);
+  if (!group_id)
+    return false;
+
+  for (cur = outputs_list(); cur; cur = cur->next)
+    {
+      const char *cur_gid = outputs_device_group_id(cur);
+
+      if (cur == device || !cur_gid || strcmp(cur_gid, group_id) != 0 || outputs_device_tv_proxy_excluded(cur))
+	continue;
+
+      if (member_live(cur))
+	return true;
+    }
+
+  return false;
+}
+
+// Whether a failure of the device reported now would be retried: a device
+// that reconnects (the reconnect option), still wanted and able to play, with
+// its quick retry unspent, that was lost while playing or whose group still
+// has a member live. Read before the report moves the device's phase
+static bool
+retry_allowed(struct output_device *device)
+{
+  if (!device->resurrect || !device->selected || device->pin_pending || device->busy || device->prevent_playback)
+    return false;
+  if (player_state != PLAY_PLAYING || device->reconnects >= PLAYER_SPEAKER_RECONNECT_MAX)
+    return false;
+  if (device->phase == OUTPUT_PHASE_CONNECTED || device->phase == OUTPUT_PHASE_STREAMING)
+    return true;
+
+  return group_sibling_live(device);
 }
 
 static void
@@ -1904,14 +1968,16 @@ handle_streaming(struct output_device *device, enum output_device_state status, 
       // also covers the case where the leader's own session is already up
       // but audio-suppressed (its followers render the audio): if every
       // follower is now gone, that session must be replaced with a real,
-      // direct one instead of silently doing nothing.
+      // direct one instead of silently doing nothing. A follower is up while
+      // it is live, the failing one included when its retry is waiting, so the
+      // fallbacks wait for the retries to be spent.
       if (leader && leader->selected)
 	{
 	  struct output_device *cur;
 	  const char *group_id = outputs_device_group_id(device);
-	  bool sibling_up = false;
+	  bool sibling_up = member_live(device);
 
-	  for (cur = outputs_list(); group_id && cur; cur = cur->next)
+	  for (cur = outputs_list(); group_id && cur && !sibling_up; cur = cur->next)
 	    {
 	      const char *cur_gid;
 
@@ -1919,11 +1985,8 @@ handle_streaming(struct output_device *device, enum output_device_state status, 
 		continue;
 
 	      cur_gid = outputs_device_group_id(cur);
-	      if (cur_gid && strcmp(cur_gid, group_id) == 0 && cur->session)
-		{
-		  sibling_up = true;
-		  break;
-		}
+	      if (cur_gid && strcmp(cur_gid, group_id) == 0 && member_live(cur))
+		sibling_up = true;
 	    }
 
 	  if (!leader->session && !sibling_up)
@@ -1947,26 +2010,8 @@ handle_streaming(struct output_device *device, enum output_device_state status, 
 	    }
 	}
 
-      // A TV proxy group leader that drops its session is reconnected
-      // directly, bounded by PLAYER_TV_PROXY_RECONNECT_MAX; the counter is
-      // reset below once the leader streams, so the retries are bounded per
-      // outage.
-      if (outputs_device_is_tv_proxy_leader(device) && device->selected
-          && device->tv_proxy_reconnects < PLAYER_TV_PROXY_RECONNECT_MAX)
-	{
-	  device->tv_proxy_reconnects++;
-	  DPRINTF(E_LOG, L_PLAYER, "TV proxy: Apple TV '%s' dropped its session, reconnecting in %d sec (attempt %u of %d)\n",
-	          outputs_device_display_name(device), PLAYER_TV_PROXY_RECONNECT_TIME, device->tv_proxy_reconnects, PLAYER_TV_PROXY_RECONNECT_MAX);
-	  resurrect_arm(device, PLAYER_TV_PROXY_RECONNECT_TIME);
-	  goto out;
-	}
-
-      if (!device->resurrect)
-	goto out;
-
-      DPRINTF(E_LOG, L_PLAYER, "Attempting reconnection in %d sec to the %s device '%s'\n", PLAYER_SPEAKER_RESURRECT_TIME, device->type_name, device->name);
-
-      resurrect_arm(device, PLAYER_SPEAKER_RESURRECT_TIME);
+      // Whether the device is retried was decided by the phase rule, and its
+      // retry armed with the result (see flags_apply())
     }
   else if (status == OUTPUT_STATE_STOPPED)
     {
@@ -1978,8 +2023,8 @@ handle_streaming(struct output_device *device, enum output_device_state status, 
 
       if (status == OUTPUT_STATE_STREAMING)
 	{
-	  // Audio is flowing, so the leader's reconnect budget starts afresh
-	  device->tv_proxy_reconnects = 0;
+	  // Audio is flowing, so the reconnect budget starts afresh
+	  device->reconnects = 0;
 	  tv_proxy_followers_start(device);
 	  tv_proxy_leader_start(device);
 	}
@@ -2191,7 +2236,8 @@ tv_proxy_followers_start(struct output_device *leader)
 	continue;
       if (!cur->selected)
 	continue;
-      if (cur->session)
+      // Up already, or being started
+      if (cur->session || cur->op != OUTPUT_OP_NONE)
 	{
 	  up++;
 	  continue;
@@ -2364,7 +2410,8 @@ speaker_member_returned(void *arg, int *retval)
 }
 
 // A start or a probe that ended. The phase rule has already deselected a
-// failed start and recorded a PIN the receiver asks for. Returns -2 for a PIN
+// failed start it does not retry, armed the retry of one it does, and
+// recorded a PIN the receiver asks for. Returns -2 for a PIN
 // asked for, -1 for a failure, else retval
 static int
 handle_activate(struct output_device *device, enum output_device_state status, int retval)
@@ -2508,6 +2555,7 @@ phase_input_fill(struct output_phase_input *in, struct output_device *device)
   in->upgrade_after_probe = device->upgrade_after_probe;
   in->then_select = device->then_select;
   in->pin_pending = device->pin_pending;
+  in->retry_allowed = retry_allowed(device);
 }
 
 // Whether a start the phase rule asks for after a report is left to another
@@ -2575,8 +2623,21 @@ flags_apply(struct output_device *device, const struct output_phase_result *res)
   if (res->reason != OUTPUT_FAILURE_NONE)
     device->last_failure = res->reason;
 
-  if (res->deselect && device->selected)
-    outputs_device_deselect(device);
+  // Armed before the phase is set and announced, so the row already counts
+  // the device as about to start again
+  if (res->retry)
+    {
+      device->reconnects++;
+      DPRINTF(E_LOG, L_PLAYER, "Attempting reconnection in %d sec to the %s device '%s'\n", PLAYER_SPEAKER_RESURRECT_TIME, device->type_name, device->name);
+      resurrect_arm(device, PLAYER_SPEAKER_RESURRECT_TIME);
+    }
+
+  if (res->deselect)
+    {
+      resurrect_cancel(device);
+      if (device->selected)
+	outputs_device_deselect(device);
+    }
 }
 
 static void
@@ -3758,6 +3819,16 @@ group_start_skip(struct output_device *device)
   return true;
 }
 
+// An enable gives the device a fresh reconnect budget: a start of its own that
+// fails is reported at once, not taken for a retry
+static void
+member_select(struct output_device *device, int max_volume)
+{
+  device->reconnects = 0;
+  resurrect_cancel(device);
+  outputs_device_select(device, max_volume);
+}
+
 static void
 speaker_group_select(struct output_device *device, int max_volume)
 {
@@ -3767,7 +3838,7 @@ speaker_group_select(struct output_device *device, int max_volume)
   group_id = outputs_device_group_id(device);
   if (!group_id)
     {
-      outputs_device_select(device, max_volume);
+      member_select(device, max_volume);
       return;
     }
 
@@ -3779,7 +3850,7 @@ speaker_group_select(struct output_device *device, int max_volume)
       const char *cur_gid = outputs_device_group_id(cur);
 
       if (cur_gid && strcmp(cur_gid, group_id) == 0)
-        outputs_device_select(cur, max_volume);
+        member_select(cur, max_volume);
     }
 }
 
@@ -3853,6 +3924,7 @@ static void
 speaker_group_start(struct output_device *device, bool explicit_request)
 {
   struct output_device *cur;
+  struct output_device *leader;
   const char *group_id;
 
   group_id = outputs_device_group_id(device);
@@ -3875,6 +3947,12 @@ speaker_group_start(struct output_device *device, bool explicit_request)
 
       device_request(cur, OUTPUT_REQ_SELECT, explicit_request, false);
     }
+
+  // A follower missing behind an Apple TV that already plays is started by
+  // the leader's chain, which the leader's select does not run again
+  leader = outputs_device_is_tv_proxy_leader(device) ? device : tv_proxy_leader_of(device);
+  if (leader && leader->session && player_state == PLAY_PLAYING)
+    tv_proxy_followers_start(leader);
 }
 
 // Stops the device and every member of its group, through the phase rule (a
@@ -4492,6 +4570,9 @@ authorize_begin(struct output_device *device, const char *pin, bool then_select,
   if (enable && enable->set_flag)
     device->tv_proxy_speakers_only = enable->flag;
 
+  // The PIN's own select starts the device; a retry waiting would start it
+  // during the pairing
+  resurrect_cancel(device);
   flags_apply(device, &res);
 
   device->then_select = then_select;
