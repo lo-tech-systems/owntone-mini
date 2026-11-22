@@ -7793,7 +7793,11 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
 
   ret = evrtsp_make_request(session->ctrl, req, cur_request->rtsp_type, uri);
   if (ret < 0)
-    goto error;
+    {
+      // A failed connect leaves req queued on session->ctrl, which frees it
+      req = NULL;
+      goto error;
+    }
 
   took_ms = monotonic_ms() - start_ms;
   cpu_ms = (unsigned int)((thread_cpu_us() - start_cpu_us) / 1000);
