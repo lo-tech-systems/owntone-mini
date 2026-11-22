@@ -17,6 +17,21 @@
 - new: a debug log line names a receiver that has probed our PTP clock for
   5 s but still announces a grandmaster of its own, so it is not following
   our clock. It is logged once per run of clock probes
+- new: an output row shows its whole group. A stereo pair or an Apple TV
+  with its HomePods reads streaming while any of its speakers plays, and
+  password while any of them waits for a PIN; it is selected while any of
+  them is. A new row value, `members_missing`, in the outputs list and in
+  `output_state` events, counts the speakers not playing while another is
+- fix: a speaker of a group whose start fails while another speaker of the
+  group plays is retried, and the group no longer reads failed and off while
+  part of it plays
+- change: every speaker that reconnects (the `reconnect` option, on by
+  default for HomePods and Apple TVs) gets one quick retry, 5 s after it is
+  lost or after its start fails while its group plays, and is then left to
+  the client. An Apple TV leading HomePods used to get three retries 3 s
+  apart, and now needs the `reconnect` option like any other speaker
+- change: a speaker that comes back into a held group is held too, rather
+  than ending the hold of the group
 
 ## Version 1.6.0 - 2026-11-18
 
