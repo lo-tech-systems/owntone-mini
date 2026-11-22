@@ -16,8 +16,9 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-// Checks how the session states of the other devices in a group are reduced
-// to one, with no daemon and no framework. From the top of the source tree:
+// Checks how the session states of the members of a row are reduced to the
+// one the row shows, with no daemon and no framework. From the top of the
+// source tree:
 //
 //   cc -std=gnu11 -Wall -Wextra -Werror -o /tmp/speakers_summary_test src/outputs/tests/speakers_summary_test.c
 //   /tmp/speakers_summary_test
@@ -95,22 +96,33 @@ each_state_alone_maps_to_itself(void)
   case_end();
 }
 
+// A PIN asked for shows even while another member plays: the user has to act
 static void
-streaming_wins_over_everything(void)
+password_wins_over_everything(void)
 {
   struct speakers_seen s = { .streaming = true, .starting = true, .stopping = true, .password = true, .failed = true };
 
-  case_begin("streaming_wins_over_everything");
+  case_begin("password_wins_over_everything");
+  CHECK(speakers_summary_resolve(s) == SPEAKERS_SUMMARY_PASSWORD);
+  case_end();
+}
+
+static void
+streaming_wins_over_the_rest(void)
+{
+  struct speakers_seen s = { .streaming = true, .starting = true, .stopping = true, .failed = true };
+
+  case_begin("streaming_wins_over_the_rest");
   CHECK(speakers_summary_resolve(s) == SPEAKERS_SUMMARY_STREAMING);
   case_end();
 }
 
 static void
-starting_wins_over_password_and_failed(void)
+starting_wins_over_stopping_and_failed(void)
 {
-  struct speakers_seen s = { .starting = true, .stopping = true, .password = true, .failed = true };
+  struct speakers_seen s = { .starting = true, .stopping = true, .failed = true };
 
-  case_begin("starting_wins_over_password_and_failed");
+  case_begin("starting_wins_over_stopping_and_failed");
   CHECK(speakers_summary_resolve(s) == SPEAKERS_SUMMARY_STARTING);
   case_end();
 }
@@ -139,9 +151,199 @@ stopping_ranks_below_starting(void)
   case_begin("stopping_ranks_below_starting");
   CHECK(speakers_summary_resolve(alone) == SPEAKERS_SUMMARY_STOPPING);
   CHECK(speakers_summary_resolve(with_starting) == SPEAKERS_SUMMARY_STARTING);
-  CHECK(speakers_summary_resolve(with_password) == SPEAKERS_SUMMARY_STOPPING);
+  CHECK(speakers_summary_resolve(with_password) == SPEAKERS_SUMMARY_PASSWORD);
   CHECK(speakers_summary_resolve(with_failed) == SPEAKERS_SUMMARY_STOPPING);
   CHECK(speakers_summary_resolve(with_streaming) == SPEAKERS_SUMMARY_STREAMING);
+  case_end();
+}
+
+/* ------------------------------ Row members ------------------------------- */
+
+static const struct row_member streaming_member = { .phase = OUTPUT_PHASE_STREAMING, .live = true, .selected = true };
+static const struct row_member connecting_member = { .phase = OUTPUT_PHASE_CONNECTING, .live = true, .selected = true };
+static const struct row_member retrying_member = { .phase = OUTPUT_PHASE_FAILED, .live = true, .selected = true,
+                                                   .reason = OUTPUT_FAILURE_LOST };
+static const struct row_member failed_member = { .phase = OUTPUT_PHASE_FAILED, .reason = OUTPUT_FAILURE_UNREACHABLE };
+static const struct row_member stopped_member = { .phase = OUTPUT_PHASE_STOPPED };
+
+static struct speakers_row_view
+row_of(const struct row_member *members, int n)
+{
+  struct speakers_row row = { 0 };
+  int i;
+
+  for (i = 0; i < n; i++)
+    speakers_row_add(&row, &members[i]);
+
+  return speakers_row_resolve(&row);
+}
+
+// One member of a stereo pair is retried while the other plays: the pair
+// plays, is on, and nothing is missing yet
+static void
+row_pair_one_retrying(void)
+{
+  struct row_member m[] = { streaming_member, retrying_member };
+  struct speakers_row_view v = row_of(m, 2);
+
+  case_begin("row_pair_one_retrying");
+  CHECK(v.summary == SPEAKERS_SUMMARY_STREAMING);
+  CHECK(v.selected);
+  CHECK(v.members_missing == 0);
+  CHECK(v.reason == OUTPUT_FAILURE_NONE);
+  case_end();
+}
+
+// The retry was spent: the pair plays on with one member missing
+static void
+row_pair_one_given_up(void)
+{
+  struct row_member m[] = { streaming_member, failed_member };
+  struct speakers_row_view v = row_of(m, 2);
+
+  case_begin("row_pair_one_given_up");
+  CHECK(v.summary == SPEAKERS_SUMMARY_STREAMING);
+  CHECK(v.selected);
+  CHECK(v.members_missing == 1);
+  case_end();
+}
+
+// Both members wait for their retry: the row reads starting and stays on
+static void
+row_pair_both_retrying(void)
+{
+  struct row_member m[] = { retrying_member, retrying_member };
+  struct speakers_row_view v = row_of(m, 2);
+
+  case_begin("row_pair_both_retrying");
+  CHECK(v.summary == SPEAKERS_SUMMARY_STARTING);
+  CHECK(v.selected);
+  CHECK(v.members_missing == 0);
+  case_end();
+}
+
+// Nothing is live: the row fails, and nothing counts as missing
+static void
+row_pair_both_failed(void)
+{
+  struct row_member m[] = { failed_member, failed_member };
+  struct speakers_row_view v = row_of(m, 2);
+
+  case_begin("row_pair_both_failed");
+  CHECK(v.summary == SPEAKERS_SUMMARY_FAILED);
+  CHECK(!v.selected);
+  CHECK(v.members_missing == 0);
+  CHECK(v.reason == OUTPUT_FAILURE_UNREACHABLE);
+  case_end();
+}
+
+// One member asks for a PIN while the other plays: the PIN shows, and the
+// member waiting for it is not counted as missing
+static void
+row_pair_pin_while_playing(void)
+{
+  struct row_member pin = { .phase = OUTPUT_PHASE_PASSWORD, .pin_pending = true, .reason = OUTPUT_FAILURE_PIN_REQUIRED };
+  struct row_member m[] = { streaming_member, pin };
+  struct speakers_row_view v = row_of(m, 2);
+
+  case_begin("row_pair_pin_while_playing");
+  CHECK(v.summary == SPEAKERS_SUMMARY_PASSWORD);
+  CHECK(v.pin_pending);
+  CHECK(v.reason == OUTPUT_FAILURE_PIN_REQUIRED);
+  CHECK(v.members_missing == 0);
+  case_end();
+}
+
+// An Apple TV included in its group whose control session failed while its
+// HomePods play: the row plays
+static void
+row_tv_failed_homepods_play(void)
+{
+  struct row_member tv = failed_member;
+  struct row_member m[3];
+  struct speakers_row_view v;
+
+  tv.is_row = true;
+  m[0] = tv;
+  m[1] = streaming_member;
+  m[2] = streaming_member;
+  v = row_of(m, 3);
+
+  case_begin("row_tv_failed_homepods_play");
+  CHECK(v.summary == SPEAKERS_SUMMARY_STREAMING);
+  CHECK(v.members_missing == 1);
+  case_end();
+}
+
+// An Apple TV whose start failed and was deselected, its HomePods selected and
+// waiting for its chain: the row fails, though still shown selected
+static void
+row_tv_start_failed_followers_waiting(void)
+{
+  struct row_member tv = failed_member;
+  struct row_member waiting = { .phase = OUTPUT_PHASE_STOPPED, .selected = true };
+  struct row_member m[3];
+  struct speakers_row_view v;
+
+  tv.is_row = true;
+  m[0] = tv;
+  m[1] = waiting;
+  m[2] = waiting;
+  v = row_of(m, 3);
+
+  case_begin("row_tv_start_failed_followers_waiting");
+  CHECK(v.summary == SPEAKERS_SUMMARY_FAILED);
+  CHECK(v.selected);
+  CHECK(v.members_missing == 0);
+  case_end();
+}
+
+// A retried member and one that is gone: the row reads starting, with the
+// gone one counted
+static void
+row_retrying_and_gone(void)
+{
+  struct row_member m[] = { retrying_member, stopped_member };
+  struct speakers_row_view v = row_of(m, 2);
+
+  case_begin("row_retrying_and_gone");
+  CHECK(v.summary == SPEAKERS_SUMMARY_STARTING);
+  CHECK(v.members_missing == 1);
+  case_end();
+}
+
+// A device in no group is its own row
+static void
+row_single_device(void)
+{
+  struct row_member m[] = { connecting_member };
+  struct speakers_row_view v = row_of(m, 1);
+  struct row_member f[] = { failed_member };
+  struct speakers_row_view vf = row_of(f, 1);
+
+  case_begin("row_single_device");
+  CHECK(v.summary == SPEAKERS_SUMMARY_STARTING);
+  CHECK(v.selected);
+  CHECK(v.members_missing == 0);
+  CHECK(vf.summary == SPEAKERS_SUMMARY_FAILED);
+  CHECK(vf.reason == OUTPUT_FAILURE_UNREACHABLE);
+  case_end();
+}
+
+// The row's own device gives the reason when it is in the winning phase,
+// wherever it is in the list; else the first member in it does
+static void
+row_reason_precedence(void)
+{
+  struct row_member first = { .phase = OUTPUT_PHASE_FAILED, .reason = OUTPUT_FAILURE_TIMEOUT };
+  struct row_member own = { .phase = OUTPUT_PHASE_FAILED, .reason = OUTPUT_FAILURE_UNREACHABLE, .is_row = true };
+  struct row_member second = { .phase = OUTPUT_PHASE_FAILED, .reason = OUTPUT_FAILURE_REFUSED };
+  struct row_member with_own[] = { first, own };
+  struct row_member without_own[] = { first, second };
+
+  case_begin("row_reason_precedence");
+  CHECK(row_of(with_own, 2).reason == OUTPUT_FAILURE_UNREACHABLE);
+  CHECK(row_of(without_own, 2).reason == OUTPUT_FAILURE_TIMEOUT);
   case_end();
 }
 
@@ -152,10 +354,21 @@ main(int argc, char **argv)
 
   nothing_seen_is_stopped();
   each_state_alone_maps_to_itself();
-  streaming_wins_over_everything();
-  starting_wins_over_password_and_failed();
+  password_wins_over_everything();
+  streaming_wins_over_the_rest();
+  starting_wins_over_stopping_and_failed();
   password_wins_over_failed();
   stopping_ranks_below_starting();
+  row_pair_one_retrying();
+  row_pair_one_given_up();
+  row_pair_both_retrying();
+  row_pair_both_failed();
+  row_pair_pin_while_playing();
+  row_tv_failed_homepods_play();
+  row_tv_start_failed_followers_waiting();
+  row_retrying_and_gone();
+  row_single_device();
+  row_reason_precedence();
 
   printf("%d cases, %d failed\n", cases_run, cases_failed);
 
