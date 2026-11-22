@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## Version 1.6.1 - 2026-11-22
 
 - fix: owntone-mini no longer stops when a speaker is started while the
   network is down. The failed request was freed twice and owntone-mini
@@ -48,6 +48,7 @@
   with the `raop` mode
 - change: a speaker that comes back into a held group is held too, rather
   than ending the hold of the group
+- fix: owntone-mini builds with compilers that default to C23
 
 ## Version 1.6.0 - 2026-11-18
 
