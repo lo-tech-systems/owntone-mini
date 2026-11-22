@@ -652,7 +652,7 @@ in the path. An unknown setting gives HTTP `404 Not Found`.
 | `/api/settings/player/start_buffer_ms` | integer | Start buffer in milliseconds, valid range `300` to `3500`, restart required |
 | `/api/settings/player/uncompressed_alac` | boolean | ALAC output preference, restart required |
 | `/api/settings/player/device_removal_grace_period` | integer | Seconds a disappeared AirPlay device is kept selectable, valid range `0` to `3600`; applied to the running player immediately on PUT, no restart required |
-| `/api/settings/player/buffered_audio_enabled` | boolean | Prefer buffered AAC-LC over realtime for AirPlay 2 outputs left on `auto` (default `true`, gated per device on an advertised buffered format); takes effect on the next output start |
+| `/api/settings/player/buffered_audio_enabled` | boolean | Prefer buffered AAC-LC over realtime for AirPlay 2 outputs left on `auto` (default `true`, gated per device on an advertised buffered format); when `false` they play realtime AirPlay 2. Takes effect on the next output start |
 | `/api/settings/player/buffered_encoder_budget` | integer | Buffered-encode capacity budget override, valid range `0` to `64` (`0` = auto, CPU-based); takes effect on the next output activation |
 | `/api/settings/player/tv_proxy_leader_audio_suppress` | boolean | Suppress audio to a TV proxy leader (e.g. Apple TV) whose HomePod followers are already streaming, keeping control/anchor/metadata/volume only (default `true`); takes effect on the next TV proxy leader start |
 | `/api/settings/player/pipe_sample_rate` | integer | Pipe input sample rate, one of `44100`, `48000`, `88200`, `96000`; restart required |

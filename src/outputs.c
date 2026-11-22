@@ -1114,24 +1114,13 @@ effective_type_resolve(struct output_device *device)
   if (device->preferred_mode != OUTPUT_MODE_AUTO && device->preferred_mode != OUTPUT_MODE_RAOP && ap2)
     return OUTPUT_TYPE_AIRPLAY;
 
-  // AUTO ladder: Buffered > AP1 (RAOP) > AP2 realtime. Use the AirPlay backend
-  // for buffered only when the global switch is on and the device has advertised
-  // an actual AAC bufferStream format (buffered_modes, learned from GET /info -
-  // not merely the mDNS bit-40 "SupportsBufferedAudio" flag, which some receivers
-  // advertise without reliably playing a buffered stream). Otherwise prefer RAOP
-  // over AirPlay 2 realtime; realtime is the last resort, reached only when RAOP
-  // is absent (an AirPlay-2-only receiver).
+  // AUTO: AirPlay 2 buffered > AirPlay 2 realtime > AirPlay 1 (RAOP). Any
+  // device that offers AirPlay 2 gets the AirPlay backend, which plays it
+  // buffered when the global switch is on and the device has shown an actual
+  // bufferStream format (outputs_device_buffered_capable), and realtime
+  // otherwise. RAOP only for a receiver with no AirPlay 2
   if (device->preferred_mode == OUTPUT_MODE_AUTO)
-    {
-      if (ap2 && config_get_bool("buffered_audio_enabled", true)
-          && outputs_device_buffered_capable(device))
-        return OUTPUT_TYPE_AIRPLAY;
-      if (raop)
-        return OUTPUT_TYPE_RAOP;
-      if (ap2)
-        return OUTPUT_TYPE_AIRPLAY;
-      return OUTPUT_TYPE_RAOP;
-    }
+    return ap2 ? OUTPUT_TYPE_AIRPLAY : OUTPUT_TYPE_RAOP;
 
   // Preferred protocol unavailable: highest priority wins
   if (ap2 &&

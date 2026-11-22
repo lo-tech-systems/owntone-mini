@@ -101,14 +101,15 @@ add them, but the daemon does not create them.
 
 ### buffered_audio_enabled
 
-When `true`, an AirPlay 2 output left on the `auto` mode preference prefers
-buffered AAC-LC playback (`airplay2_buffered`) over realtime, but only on a
-device that has advertised an actual AAC bufferStream format (learned from the
-receiver's info response), not merely the mDNS "SupportsBufferedAudio" flag. A
-device that has not advertised a concrete buffered format falls back to `raop`
-(AirPlay 1), and realtime `airplay2` is used only as a last resort for a
-receiver that supports nothing else. When `false`, `auto` never uses buffered
-(`raop`, then realtime `airplay2`).
+An output left on the `auto` mode preference uses AirPlay 2 whenever the
+receiver offers it, and AirPlay 1 (`raop`) only for a receiver with no AirPlay
+2. When `true`, such an AirPlay 2 output plays buffered AAC-LC
+(`airplay2_buffered`), but only on a device that has advertised an actual AAC
+bufferStream format (learned from the receiver's info response), not merely
+the mDNS "SupportsBufferedAudio" flag; any other AirPlay 2 receiver plays
+realtime `airplay2`. When `false`, `auto` never uses buffered: AirPlay 2
+receivers play realtime `airplay2`. To keep a receiver on AirPlay 1, set its
+mode to `raop`.
 
 The default is `true` so that outputs left on `auto` benefit from buffered
 timing without manual configuration. Because the buffered path is still gated

@@ -33,6 +33,11 @@
 - change: a HomePod pair's pair-setup rejection just after a stop is retried
   by the same two quick retries, rather than twice 3 s apart inside the
   start
+- change: a speaker left on the `auto` mode plays AirPlay 2 whenever it
+  offers it, buffered when it has shown a buffered format and realtime
+  otherwise, and AirPlay 1 only when it has no AirPlay 2. Before, `auto`
+  chose AirPlay 1 over realtime AirPlay 2. A speaker can be kept on AirPlay 1
+  with the `raop` mode
 - change: a speaker that comes back into a held group is held too, rather
   than ending the hold of the group
 

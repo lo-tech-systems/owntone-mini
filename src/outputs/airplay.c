@@ -2648,9 +2648,9 @@ session_make(struct output_device *device, int callback_id)
     // into the buffered transport only once it has advertised an actual AAC
     // bufferStream format (learned via GET /info, reflected in supported_modes).
     // A device that only sets the SupportsBufferedAudio flag (mDNS bit 40) but
-    // lists no concrete format is NOT driven over buffered - the RAOP/AirPlay 1
-    // path is used instead (see effective_type_resolve), since such a device may
-    // not play a buffered stream reliably. Explicit selections are never
+    // lists no concrete format is NOT driven over buffered - the realtime path
+    // is used instead, since such a device may not play a buffered stream
+    // reliably. Explicit selections are never
     // influenced by the switch; surround is never selected implicitly under
     // "auto".
     if (mode == OUTPUT_MODE_AUTO && config_get_bool("buffered_audio_enabled", true)
