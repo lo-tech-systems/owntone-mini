@@ -114,7 +114,7 @@ order as written:
  "state":"streaming","reason":"none",
  "member_state":"connecting","member_reason":"none",
  "selected":true,"held":false,"holdable":true,"muted":false,"volume":42,"pin_pending":false,
- "at_ms":5532104}
+ "members_missing":0,"at_ms":5532104}
 ```
 
 | Member | Type | Value |
@@ -122,10 +122,10 @@ order as written:
 | `speaker.id` | string | The row id, as `GET /api/outputs` lists it |
 | `speaker.member_id` | string | The device that moved; the same as `speaker.id` for a device with its own row |
 | `speaker.name` | string or null | The row's name |
-| `state` | string | The row's `session.state` at this instant, exactly as `GET /api/outputs` would give it: `stopped`, `connecting`, `connected`, `streaming`, `stopping`, `failed` or `password`. For a stereo pair that is the visible speaker's own state; for an Apple TV enabled without itself, the HomePods' summary |
+| `state` | string | The row's `session.state` at this instant, exactly as `GET /api/outputs` would give it: `stopped`, `connecting`, `connected`, `streaming`, `stopping`, `failed` or `password`. For a group (a stereo pair, an Apple TV with its HomePods) that is the summary of every speaker of the group |
 | `reason` | string | The row's `session.failure` at this instant (see [the JSON API](json-api.md#session)) |
 | `member_state`, `member_reason` | string | The moved device's own state and reason, for logs |
-| `selected`, `held`, `holdable`, `muted`, `volume`, `pin_pending` | | The row's values at this instant, as `GET /api/outputs` gives them |
+| `selected`, `held`, `holdable`, `muted`, `volume`, `pin_pending`, `members_missing` | | The row's values at this instant, as `GET /api/outputs` gives them |
 
 A client applies `state` and the row values to the row named by
 `speaker.id`, never `member_state`. The values are taken on the player thread

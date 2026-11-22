@@ -45,9 +45,14 @@ struct player_speaker_info {
   bool prevent_playback;
   bool busy;
 
-  // The phase clients see for the row and why it failed, if it did
+  // The phase clients see for the row and why it failed, if it did, reduced
+  // from every member of the row's group
   enum output_phase phase;
   enum output_failure_reason last_failure;
+
+  // Members of the row's group that are not playing or about to, while
+  // another member is; 0 otherwise
+  int members_missing;
 
   // The speakers the row stands for paused themselves and are held, and
   // whether a hold would be accepted now

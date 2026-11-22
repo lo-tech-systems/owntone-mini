@@ -171,6 +171,7 @@ evchan_proto_output_state_json(uint64_t seq, const char *speaker_id, const char 
   json_object_object_add(obj, "muted", json_object_new_boolean(st->muted));
   json_object_object_add(obj, "volume", json_object_new_int(st->volume));
   json_object_object_add(obj, "pin_pending", json_object_new_boolean(st->pin_pending));
+  json_object_object_add(obj, "members_missing", json_object_new_int(st->members_missing));
   json_object_object_add(obj, "at_ms", json_object_new_int64((int64_t)at_ms));
 
   return object_finish(obj);

@@ -2130,6 +2130,7 @@ speaker_announce(struct output_device *device)
       st.muted = info.muted;
       st.volume = info.absvol;
       st.pin_pending = info.pin_pending;
+      st.members_missing = info.members_missing;
 
       evchan_event_output_state(row->id, device->id, info.name, &st);
     }
@@ -3505,88 +3506,70 @@ playback_flush(void *arg, int *retval)
   return flush_command_wait(retval);
 }
 
-// Replaces the session facts of an Apple TV's row with those of the HomePods it
-// leads, reduced to one phase: streaming if any streams, else connecting if any
-// is connecting or connected, else stopping, else password, else failed, else
-// stopped. A PIN is pending if any of them waits for one. A password or failed
-// phase carries the reason of the first of them in that phase.
+static enum output_phase
+summary_phase(enum speakers_summary summary)
+{
+  switch (summary)
+    {
+      case SPEAKERS_SUMMARY_STREAMING: return OUTPUT_PHASE_STREAMING;
+      case SPEAKERS_SUMMARY_STARTING:  return OUTPUT_PHASE_CONNECTING;
+      case SPEAKERS_SUMMARY_STOPPING:  return OUTPUT_PHASE_STOPPING;
+      case SPEAKERS_SUMMARY_PASSWORD:  return OUTPUT_PHASE_PASSWORD;
+      case SPEAKERS_SUMMARY_FAILED:    return OUTPUT_PHASE_FAILED;
+      default:                         return OUTPUT_PHASE_STOPPED;
+    }
+}
+
 static void
-homepods_session_of(struct player_speaker_info *spk, struct output_device *device)
+row_member_add(struct speakers_row *acc, struct output_device *cur, struct output_device *row)
+{
+  struct row_member m;
+
+  m.phase = cur->phase;
+  m.live = member_live(cur);
+  m.selected = OUTPUTS_DEVICE_DISPLAY_SELECTED(cur) || (m.live && cur->phase == OUTPUT_PHASE_FAILED);
+  m.pin_pending = cur->pin_pending;
+  m.reason = cur->last_failure;
+  m.is_row = (cur == row);
+
+  speakers_row_add(acc, &m);
+}
+
+// Sets the session facts of a row from every member of its group (a device in
+// no group is its only member): the phase by speakers_summary_resolve(), the
+// reason of the winning password or failed phase, the PIN if any member waits
+// for one, the selection if any member is selected or retried, and how many
+// members are missing while another plays. An Apple TV left out of its group
+// has no session and is passed over.
+static void
+row_session_of(struct player_speaker_info *spk, struct output_device *row)
 {
   struct output_device *cur;
+  struct speakers_row acc = { 0 };
+  struct speakers_row_view view;
   const char *group_id;
-  struct speakers_seen seen = { 0 };
-  bool pin_pending = false;
-  enum output_failure_reason password_reason = OUTPUT_FAILURE_NONE;
-  enum output_failure_reason failed_reason = OUTPUT_FAILURE_NONE;
 
-  group_id = outputs_device_group_id(device);
+  group_id = outputs_device_group_id(row);
   if (!group_id)
-    return;
+    row_member_add(&acc, row, row);
 
-  for (cur = outputs_list(); cur; cur = cur->next)
+  for (cur = outputs_list(); group_id && cur; cur = cur->next)
     {
       const char *cur_gid = outputs_device_group_id(cur);
 
-      if (cur == device || !cur_gid || strcmp(cur_gid, group_id) != 0)
+      if (!cur_gid || strcmp(cur_gid, group_id) != 0 || outputs_device_tv_proxy_excluded(cur))
         continue;
 
-      if (cur->pin_pending)
-        pin_pending = true;
-      switch (cur->phase)
-        {
-          case OUTPUT_PHASE_STREAMING:
-            seen.streaming = true;
-            break;
-          case OUTPUT_PHASE_CONNECTING:
-          case OUTPUT_PHASE_CONNECTED:
-            seen.starting = true;
-            break;
-          case OUTPUT_PHASE_STOPPING:
-            seen.stopping = true;
-            break;
-          case OUTPUT_PHASE_PASSWORD:
-            seen.password = true;
-            if (password_reason == OUTPUT_FAILURE_NONE)
-              password_reason = cur->last_failure;
-            break;
-          case OUTPUT_PHASE_FAILED:
-            seen.failed = true;
-            if (failed_reason == OUTPUT_FAILURE_NONE)
-              failed_reason = cur->last_failure;
-            break;
-          case OUTPUT_PHASE_STOPPED:
-            break;
-        }
+      row_member_add(&acc, cur, row);
     }
 
-  spk->last_failure = OUTPUT_FAILURE_NONE;
+  view = speakers_row_resolve(&acc);
 
-  switch (speakers_summary_resolve(seen))
-    {
-      case SPEAKERS_SUMMARY_STREAMING:
-        spk->phase = OUTPUT_PHASE_STREAMING;
-        break;
-      case SPEAKERS_SUMMARY_STARTING:
-        spk->phase = OUTPUT_PHASE_CONNECTING;
-        break;
-      case SPEAKERS_SUMMARY_STOPPING:
-        spk->phase = OUTPUT_PHASE_STOPPING;
-        break;
-      case SPEAKERS_SUMMARY_PASSWORD:
-        spk->phase = OUTPUT_PHASE_PASSWORD;
-        spk->last_failure = password_reason;
-        break;
-      case SPEAKERS_SUMMARY_FAILED:
-        spk->phase = OUTPUT_PHASE_FAILED;
-        spk->last_failure = failed_reason;
-        break;
-      case SPEAKERS_SUMMARY_STOPPED:
-        spk->phase = OUTPUT_PHASE_STOPPED;
-        break;
-    }
-
-  spk->pin_pending = pin_pending;
+  spk->phase = summary_phase(view.summary);
+  spk->last_failure = view.reason;
+  spk->selected = view.selected;
+  spk->pin_pending = view.pin_pending;
+  spk->members_missing = view.members_missing;
 }
 
 // Whether the speakers a row stands for are held: every member of its group
@@ -3732,10 +3715,9 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
   if (device->volume_follow == OUTPUT_VOLUME_FOLLOW_UPNP && device->upnp_scale_unknown)
     spk->volume_follow = OUTPUT_VOLUME_FOLLOW_UNKNOWN_SCALE;
 
-  // An Apple TV enabled without itself plays nothing: its row shows what its
-  // HomePods are doing
-  if (spk->has_homepods && outputs_device_tv_proxy_excluded(device))
-    homepods_session_of(spk, device);
+  // The row shows its whole group; an Apple TV enabled without itself plays
+  // nothing, so its row shows what its HomePods are doing
+  row_session_of(spk, device);
 }
 
 static bool

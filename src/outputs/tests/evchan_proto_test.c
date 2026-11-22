@@ -202,9 +202,9 @@ static void
 output_state_json(void)
 {
   static const char *order[] = { "type", "seq", "kind", "speaker", "state", "reason", "member_state", "member_reason",
-                                 "selected", "held", "holdable", "muted", "volume", "pin_pending", "at_ms" };
-  struct evchan_output_state st = { "streaming", "none", "connecting", "none", true, false, true, false, 42, false };
-  struct evchan_output_state st2 = { "password", "pin_invalid", "password", "pin_invalid", false, true, false, true, 0, true };
+                                 "selected", "held", "holdable", "muted", "volume", "pin_pending", "members_missing", "at_ms" };
+  struct evchan_output_state st = { "streaming", "none", "connecting", "none", true, false, true, false, 42, false, 1 };
+  struct evchan_output_state st2 = { "password", "pin_invalid", "password", "pin_invalid", false, true, false, true, 0, true, 0 };
   json_object *obj;
   json_object *speaker;
   char longname[256];
@@ -230,6 +230,7 @@ output_state_json(void)
   CHECK(member(obj, "muted") && !json_object_get_boolean(member(obj, "muted")));
   CHECK(int_is(obj, "volume", 42));
   CHECK(member(obj, "pin_pending") && !json_object_get_boolean(member(obj, "pin_pending")));
+  CHECK(int_is(obj, "members_missing", 1));
   CHECK(int_is(obj, "at_ms", 5532104));
 
   // Member order as written
@@ -251,6 +252,7 @@ output_state_json(void)
   CHECK(json_object_get_boolean(member(obj, "held")) && json_object_get_boolean(member(obj, "muted")));
   CHECK(json_object_get_boolean(member(obj, "pin_pending")) && !json_object_get_boolean(member(obj, "selected")));
   CHECK(int_is(obj, "volume", 0));
+  CHECK(int_is(obj, "members_missing", 0));
   json_object_put(obj);
 
   // A name of 255 bytes is sent whole

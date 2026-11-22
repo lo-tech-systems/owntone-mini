@@ -70,6 +70,8 @@ struct evchan_output_state
   bool muted;
   int volume;
   bool pin_pending;
+  // Members of the row's group not playing while another is
+  int members_missing;
 };
 
 enum evchan_proto_msg_type

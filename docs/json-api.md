@@ -173,7 +173,8 @@ curl -X PUT "http://localhost:3689/api/metadata" \
 | `has_password` | boolean | `true` if the output advertises password protection |
 | `requires_auth` | boolean | `true` if the output currently requires authorization |
 | `needs_auth_key` | boolean | `true` if the server does not have a valid stored auth key |
-| `pin_pending` | boolean | `true` if the last attempt to enable the output stopped because the device wants a PIN or password. Submit it with `pin` in [Update an output](#update-an-output). Cleared when a later activation attempt gets past that step, when the output is enabled or disabled again, and 2 minutes after the PIN was asked for if none was given. For an Apple TV enabled with `include_tv: false` it is true while any of its HomePods is waiting for one |
+| `pin_pending` | boolean | `true` if the last attempt to enable the output stopped because the device wants a PIN or password. Submit it with `pin` in [Update an output](#update-an-output). Cleared when a later activation attempt gets past that step, when the output is enabled or disabled again, and 2 minutes after the PIN was asked for if none was given. For a group (a stereo pair, an Apple TV with its HomePods) it is true while any speaker of the group is waiting for one |
+| `members_missing` | integer | How many speakers of the output's group are not playing or about to while another speaker of the group is; `0` otherwise, and always `0` for an output on its own. A client that wants the whole group back enables the output again: that starts only the missing speakers |
 | `volume` | integer | Output volume in percent. While the output is muted, or held by sending it 0, it is the level the speaker returns to |
 | `muted` | boolean | `true` while the output is muted with `muted` (see [Update an output](#update-an-output)): it is sent 0 and keeps `volume` |
 | `offset_ms` | integer | Timing offset in milliseconds |
@@ -187,12 +188,12 @@ curl -X PUT "http://localhost:3689/api/metadata" \
 
 #### Session
 
-The state of what the row plays. For an output on its own that is its own connection. For an Apple TV that was enabled with `include_tv: false` it is the HomePods it leads, as one: the Apple TV has no session of its own then, and `pin_pending` is likewise the HomePods'.
+The state of what the row plays. For an output on its own that is its own connection. For a group it is every speaker of the group, as one: a stereo pair's two speakers, or an Apple TV and the HomePods it leads (an Apple TV enabled with `include_tv: false` has no session of its own and is left out). `selected` and `pin_pending` are likewise the group's: the row is selected while any of its speakers is.
 
 | Key | Type | Value |
 | --- | ---- | ----- |
 | `state` | string | `"stopped"` (no connection), `"connecting"` (a start, a probe or a PIN pairing is under way), `"connected"` (connected, audio not flowing yet; a buffered AirPlay 2 speaker stays here until it has accepted its start time), `"streaming"`, `"stopping"` (a stop is waiting for the receiver to end its session), `"failed"`, or `"password"` (the device wants a PIN or password). `"startup"` is no longer sent |
-| `failure` | string | Why the state is `"failed"` or `"password"`, or `"cancelled"` on a `"stopped"` row whose start was ended by a disable; `"none"` otherwise. `"pin_required"` (the PIN start was sent, so the PIN is on the receiver's screen), `"pin_invalid"` (pair setup with the PIN given was refused), `"refused"` (the receiver answered no to something other than authentication, including a PIN start it refused outright), `"unreachable"` (no connection, or no answer before the receiver had answered anything), `"timeout"` (no answer after it had answered, or pair setup took too long), `"no_clock"` (buffered playback could not be started because the receiver never used our clock), `"capacity"` (the buffered-encode budget was used up), `"cancelled"` (a start ended because the output was disabled while it connected), `"lost"` (an established session failed with nothing in flight; the output is not deselected, and is started again later if the speaker is one that is brought back). A PIN given with `pin` whose pair setup times out is `"password"` with `"timeout"`: the receiver never judged the PIN, the start is not repeated, and the next start shows a new PIN. Clients treat any other value as `"refused"` on a `"failed"` row and `"pin_required"` on a `"password"` row |
+| `failure` | string | Why the state is `"failed"` or `"password"`, or `"cancelled"` on a `"stopped"` row whose start was ended by a disable; `"none"` otherwise. `"pin_required"` (the PIN start was sent, so the PIN is on the receiver's screen), `"pin_invalid"` (pair setup with the PIN given was refused), `"refused"` (the receiver answered no to something other than authentication, including a PIN start it refused outright), `"unreachable"` (no connection, or no answer before the receiver had answered anything), `"timeout"` (no answer after it had answered, or pair setup took too long), `"no_clock"` (buffered playback could not be started because the receiver never used our clock), `"capacity"` (the buffered-encode budget was used up), `"cancelled"` (a start ended because the output was disabled while it connected), `"lost"` (an established session failed with nothing in flight; the output is not deselected, and is retried once if the speaker is one that reconnects). A PIN given with `pin` whose pair setup times out is `"password"` with `"timeout"`: the receiver never judged the PIN, the start is not repeated, and the next start shows a new PIN. Clients treat any other value as `"refused"` on a `"failed"` row and `"pin_required"` on a `"password"` row |
 | `held` | boolean | `true` while the output is held with `hold` (see [Update an output](#update-an-output)): it paused itself and is paused in place (a buffered AirPlay 2 session) or sent 0 (any other). For a group it is `true` when every speaker of the group that has a session is held. Cleared when the hold ends or the session ends |
 | `holdable` | boolean | `true` if `hold` would be accepted now: the output, or a speaker of its group that plays audio, has a connected or streaming AirPlay 2 or AirPlay 1 session that is not being stopped |
 
@@ -202,10 +203,17 @@ from the pipe, the player plays at once, with or without speakers, and each
 selected speaker steps through `"connecting"`, `"connected"` and `"streaming"`, or
 ends at `"failed"`, as it joins. `GET /api/player` reports `play` about the
 start buffer (2.3 seconds) after the pipe opens, not when a speaker has
-started. For HomePods played
-without their Apple TV, `session.state` is `"streaming"` if any HomePod streams,
-otherwise `"connecting"` if any is connecting or connected, otherwise `"stopping"`, `"password"`,
+started. For a group, `session.state` is `"password"` if any speaker waits for
+a PIN (the user has to act, so it shows even while another speaker plays),
+otherwise `"streaming"` if any speaker streams, otherwise `"connecting"` if any
+is connecting, connected or about to be retried, otherwise `"stopping"`,
 `"failed"` or `"stopped"` in that order of precedence.
+
+A speaker that is lost while it plays, or whose start fails while another
+speaker of its group plays, is retried once, 5 seconds later, if it is one
+that reconnects (the `reconnect` option, on by default for HomePods and Apple
+TVs); it stays selected meanwhile and its row reads `"connecting"`. If the
+retry fails too, it is deselected, and further recovery is the client's.
 
 A pair is listed as one output; its second speaker is hidden. A group of
 HomePods that sits behind an Apple TV is listed as the Apple TV; the HomePods
