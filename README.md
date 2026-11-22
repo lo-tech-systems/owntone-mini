@@ -16,9 +16,9 @@ Apple TV.
   docs/audio-outputs/airplay.md)
 
 owntone-mini is an independent open-source project. It is not affiliated with,
-authorised, sponsored or endorsed by Apple Inc. AirPlay, Apple TV, HomePod and
-iTunes are trademarks of Apple Inc., registered in the U.S. and other
-countries. No claim is made that operation with any device is authorised or
+authorised, sponsored or endorsed by Apple Inc. AirPlay, Apple TV, Apple Home
+View, HomePod and iTunes are trademarks of Apple Inc., registered in the U.S.
+and other countries. No claim is made that operation with any device is authorised or
 will continue to work. No Apple SDK, NDA-covered specification, or confidential
 documentation was used in the development of features specific to this fork.
 
