@@ -94,6 +94,9 @@ struct output_phase_input
   bool explicit_request;
   // Mode switch only: the effective backend would change
   bool backend_changes;
+  // Reports only: a failure now would be retried by the player (its budget,
+  // its group and its settings allow it)
+  bool retry_allowed;
 };
 
 struct output_phase_result
@@ -108,8 +111,11 @@ struct output_phase_result
   enum output_op next_op;
   // The operation in flight has ended
   bool clear_op;
-  // A failed or refused start is deselected
+  // A failed or refused start is deselected, unless it is retried
   bool deselect;
+  // The failure is retried: the device stays selected and the player starts
+  // it again after a delay
+  bool retry;
   bool set_stop_after_start, clear_stop_after_start;
   bool set_restart_after_stop, clear_restart_after_stop;
   bool set_upgrade_after_probe, clear_upgrade_after_probe;

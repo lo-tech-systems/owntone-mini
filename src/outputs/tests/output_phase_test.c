@@ -56,7 +56,7 @@ static bool
 result_equal(const struct output_phase_result *a, const struct output_phase_result *b)
 {
   return a->phase == b->phase && a->mid_phase == b->mid_phase && a->next_op == b->next_op && a->clear_op == b->clear_op
-    && a->deselect == b->deselect
+    && a->deselect == b->deselect && a->retry == b->retry
     && a->set_stop_after_start == b->set_stop_after_start && a->clear_stop_after_start == b->clear_stop_after_start
     && a->set_restart_after_stop == b->set_restart_after_stop && a->clear_restart_after_stop == b->clear_restart_after_stop
     && a->set_upgrade_after_probe == b->set_upgrade_after_probe && a->clear_upgrade_after_probe == b->clear_upgrade_after_probe
@@ -68,9 +68,9 @@ result_equal(const struct output_phase_result *a, const struct output_phase_resu
 static void
 result_print(const char *label, const struct output_phase_result *r)
 {
-  printf("  %s: phase %s (via %s), next %s, clear_op %d, deselect %d, stop_after_start +%d -%d, restart +%d -%d, upgrade +%d -%d, "
-         "then_select -%d, pin +%d -%d, reason %s, announce %d\n",
-         label, output_phase_name(r->phase), output_phase_name(r->mid_phase), op_name(r->next_op), r->clear_op, r->deselect,
+  printf("  %s: phase %s (via %s), next %s, clear_op %d, deselect %d, retry %d, stop_after_start +%d -%d, restart +%d -%d, "
+         "upgrade +%d -%d, then_select -%d, pin +%d -%d, reason %s, announce %d\n",
+         label, output_phase_name(r->phase), output_phase_name(r->mid_phase), op_name(r->next_op), r->clear_op, r->deselect, r->retry,
          r->set_stop_after_start, r->clear_stop_after_start, r->set_restart_after_stop, r->clear_restart_after_stop,
          r->set_upgrade_after_probe, r->clear_upgrade_after_probe, r->clear_then_select, r->set_pin_pending, r->clear_pin_pending,
          output_failure_name(r->reason), r->announce);
@@ -167,6 +167,38 @@ test_report_table(void)
     R(PASSWORD),
     WANT(.phase = P(PASSWORD), .mid_phase = P(PASSWORD), .clear_op = true, .deselect = true, .set_pin_pending = true,
          .reason = F(PIN_REQUIRED), .announce = true));
+
+  // Retries: the player says whether a failure now would be retried
+  check_report("start fails, retry allowed: kept selected and retried",
+    IN(.phase = P(CONNECTING), .op = O(START), .selected = true, .playing = true, .report_reason = F(UNREACHABLE),
+       .retry_allowed = true),
+    R(FAILED),
+    WANT(.phase = P(FAILED), .mid_phase = P(FAILED), .clear_op = true, .retry = true, .reason = F(UNREACHABLE), .announce = true));
+  check_report("start refused at once, retry allowed: kept selected and retried",
+    IN(.phase = P(CONNECTING), .op = O(START), .selected = true, .playing = true, .report_current_gen = true,
+       .retry_allowed = true),
+    R(FAILED),
+    WANT(.phase = P(FAILED), .mid_phase = P(FAILED), .clear_op = true, .retry = true, .reason = F(REFUSED), .announce = true));
+  check_report("start needs a PIN, retry allowed: still deselected, never retried",
+    IN(.phase = P(CONNECTING), .op = O(START), .selected = true, .playing = true, .report_reason = F(PIN_REQUIRED),
+       .retry_allowed = true),
+    R(PASSWORD),
+    WANT(.phase = P(PASSWORD), .mid_phase = P(PASSWORD), .clear_op = true, .deselect = true, .set_pin_pending = true,
+         .reason = F(PIN_REQUIRED), .announce = true));
+  check_report("session lost, retry allowed: retried",
+    IN(.phase = P(STREAMING), .selected = true, .playing = true, .report_reason = F(TIMEOUT), .retry_allowed = true),
+    R(FAILED),
+    WANT(.phase = P(FAILED), .mid_phase = P(FAILED), .retry = true, .reason = F(LOST), .announce = true));
+  check_report("session lost, no retry: stays selected, not retried",
+    IN(.phase = P(STREAMING), .selected = true, .playing = true, .report_reason = F(TIMEOUT)),
+    R(FAILED),
+    WANT(.phase = P(FAILED), .mid_phase = P(FAILED), .reason = F(LOST), .announce = true));
+  check_report("start a deselect waits for fails, retry allowed: cancelled, not retried",
+    IN(.phase = P(STOPPING), .op = O(START), .stop_after_start = true, .playing = true, .report_reason = F(UNREACHABLE),
+       .retry_allowed = true),
+    R(FAILED),
+    WANT(.phase = P(STOPPED), .mid_phase = P(STOPPED), .clear_op = true, .clear_stop_after_start = true, .clear_pin_pending = true,
+         .reason = F(CANCELLED), .announce = true));
 
   // A deselect waits for the start
   check_report("start a deselect waits for connects: stop it",
@@ -446,10 +478,11 @@ test_stale_generation(void)
 	  {
 	    in = combo(phase, op, bits, bits & 1);
 	    in.report_current_gen = false;
+	    in.retry_allowed = true;
 	    output_phase_on_report(&in, report, &out);
 
 	    cases_run++;
-	    if (out.mid_phase != in.phase || out.clear_op || out.deselect || out.reason != OUTPUT_FAILURE_NONE
+	    if (out.mid_phase != in.phase || out.clear_op || out.deselect || out.retry || out.reason != OUTPUT_FAILURE_NONE
 		|| out.set_pin_pending || out.clear_pin_pending || out.clear_then_select
 		|| out.set_stop_after_start || out.clear_stop_after_start || out.clear_restart_after_stop)
 	      fail_combo("an older report moved something", &in, report, &out);
@@ -690,7 +723,12 @@ h_report(int i)
   in.report_reason = r.reason;
   in.playing = h_playing;
   in.has_session = d->session;
+  in.retry_allowed = h_rand(2);
   output_phase_on_report(&in, r.report, &out);
+  if (out.retry && out.deselect)
+    h_fail(i, "a retried failure was deselected");
+  if (out.retry && r.report != OUTPUT_REPORT_FAILED)
+    h_fail(i, "a retry came with a report that is not a failure");
   h_apply(i, &in, &out, true);
 
   if (d->st.selected && h_playing && !d->session && d->st.op == OUTPUT_OP_NONE && !d->st.pin_pending && d->st.phase == OUTPUT_PHASE_STOPPED)
