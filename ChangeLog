@@ -23,9 +23,11 @@
   them is. A new row value, `members_missing`, in the outputs list and in
   `output_state` events, counts the speakers not playing while another is
 - fix: a group no longer reads failed and off while part of it plays
-- change: every speaker gets two quick retries while the player plays, 2 s
-  after a failed start or a lost session and 3 s after the next failure, and
-  is then left to the client. A PIN, a start cancelled by a disable and a
+- change: every speaker gets two quick retries while the player plays, and
+  is then left to the client. A retry begins 2 s after the failed start
+  began (3 s for the second), or at once if that has passed, so a speaker
+  that refuses and one that does not answer are retried at the same moments;
+  a lost session is retried 2 s after the loss. A PIN, a start cancelled by a disable and a
   refusal for lack of buffered-encode capacity are not retried. The
   `reconnect` option is now on for every speaker unless set `false`. Before,
   only HomePods and Apple TVs reconnected, a lone speaker's failed start was
@@ -33,6 +35,9 @@
 - change: a HomePod pair's pair-setup rejection just after a stop is retried
   by the same two quick retries, rather than twice 3 s apart inside the
   start
+- change: the connection and each request up to pairing give up after 2 s,
+  not 4 s, when a speaker is started, so a speaker that is not there is
+  given up about 7 s after the first attempt. A flush keeps its 4 s
 - change: a speaker left on the `auto` mode plays AirPlay 2 whenever it
   offers it, buffered when it has shown a buffered format and realtime
   otherwise, and AirPlay 1 only when it has no AirPlay 2. Before, `auto`

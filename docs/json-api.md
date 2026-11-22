@@ -210,9 +210,12 @@ is connecting, connected or about to be retried, otherwise `"stopping"`,
 `"failed"` or `"stopped"` in that order of precedence.
 
 While the player plays, a speaker whose start fails or that is lost is
-retried 2 seconds later, and if that fails too, 3 seconds after that, if it
-is one that reconnects (the `reconnect` option, on unless set `false`). It
-stays selected meanwhile and its row reads `"connecting"`. A failure for
+retried twice, if it is one that reconnects (the `reconnect` option, on unless
+set `false`). A retry begins 2 seconds after the failed start began (3 seconds
+for the second), or at once if that has passed, so a speaker that refuses and
+one that does not answer are retried at the same moments: about 2 and 5
+seconds after the first attempt. A lost session's first retry is 2 seconds
+after the loss. It stays selected meanwhile and its row reads `"connecting"`. A failure for
 `"pin_required"`, `"pin_invalid"`, `"cancelled"` or `"capacity"` is not
 retried. When the retries are spent a failed start is deselected and a lost
 session stays failed, and further recovery is the client's.
@@ -410,8 +413,8 @@ An enable starts the output: `"connecting"`, then `"connected"` and
 `"password"` with `pin_pending` (the PIN is on the receiver's screen). With no
 playback it is only probed, and reads `"stopped"` and selected once the probe
 is done. The start makes one attempt: the connection and each request up to
-setting up the stream give up after 4 seconds, and a request after that after
-15, so a start that is accepted ends within about 37 seconds at worst.
+setting up the stream give up after 2 seconds, and a request after that after
+15.
 
 A disable of a connected or streaming output reads `"stopping"` at once and
 `"stopped"` when the receiver has ended its session: an AirPlay 2 output is

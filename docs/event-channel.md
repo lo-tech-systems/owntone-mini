@@ -200,14 +200,14 @@ Example:
 - No speaker write waits for the speaker: `PUT /api/outputs/{id}` and
   `PUT /api/outputs/set` answer within one turn of the player, and other
   requests are not held up by a speaker. A start makes one attempt: the
-  connection and each request up to setting up the stream give up after 4
-  seconds, and a request after that after 15, so a start ends in a final
-  state within about 37 seconds at worst. While the player plays, a speaker
-  whose start fails or that drops its session is tried again by the daemon,
-  2 seconds and then 3 seconds after its failures (the `reconnect` option);
-  its row reads `connecting` meanwhile. A typical give-up is about 17 seconds
-  after the first attempt, 116 seconds if every request runs to its limit.
-  After that, starting the speaker again is the supervisor's job.
+  connection and each request up to setting up the stream give up after 2
+  seconds, and a request after that after 15. While the player plays, a
+  speaker whose start fails or that drops its session is tried again twice
+  by the daemon (the `reconnect` option), about 2 and 5 seconds after its
+  first attempt began whether it refused or did not answer; its row reads
+  `connecting` meanwhile. A speaker that is not there is given up about 7
+  seconds after the first attempt. After that, starting the speaker again is
+  the supervisor's job.
 - The playback commands that flush the speakers (stop, pause, the pipe's
   flush) still wait for those speakers, at most 4 seconds.
 - `boot` tells a restart of the daemon from a dropped connection. `uptime_ms`

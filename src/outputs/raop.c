@@ -113,9 +113,9 @@
 // A speaker is started once: a failure is reported at once and whoever started
 // the speaker decides whether and when to try again. Until the session is set
 // up (SETUP), the connection and each request give up after this long; a
-// receiver that is there answers within it. From SETUP on the usual limits
-// apply.
-#define RAOP_START_TIMEOUT_SEC     4
+// receiver on the LAN answers within a fraction of it. From SETUP on the usual
+// limits apply.
+#define RAOP_START_TIMEOUT_SEC     2
 
 // A stopped speaker that does not answer its TEARDOWN is closed after this many
 // seconds

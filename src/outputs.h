@@ -153,6 +153,7 @@ struct output_device
   char issued_gid[37];
   uint64_t group_leader_id;
   unsigned reconnects;  // Automatic reconnects since it last streamed or was enabled
+  uint64_t attempt_started_ms;  // When its latest start or probe began (monotonic)
   // One-shot override set by the player to start a TV proxy leader's real
   // session even though no follower is streaming yet; consumed by
   // outputs_device_start().

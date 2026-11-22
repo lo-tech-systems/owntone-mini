@@ -188,9 +188,11 @@
 //   JOIN_SLACK_FRAMES                48       above the anchor round trip plus
 //                                             ANCHOR_HOLD_MAX_MS
 //   PAIR_COMPUTE_TIMEOUT_SEC         10       below the RTSP read timeout
-//   START_TIMEOUT_SEC                4        connect and each request up to
+//   START_TIMEOUT_SEC                2        connect and each request up to
 //                                             pairing; kept off SETUP, whose
 //                                             timeout would clear the keys
+//   FLUSH_TIMEOUT_SEC                4        a flush a player command waits
+//                                             for
 //
 // In order: ANCHOR_HOLD_MAX_MS < ANCHOR_MIN_AHEAD_MS, ANCHOR_MIN_AHEAD_MS <=
 // ANCHOR_RETRY_WAIT_MS, ANCHOR_RETRY_WAIT_MS < the anchor lead, and
@@ -272,9 +274,12 @@
 // TEARDOWN, which the player's retry a few seconds later gets past.
 
 // While a speaker is being started, the connection and each request up to
-// pairing give up after this long; a receiver that is there answers within it,
-// and whoever started the speaker starts it again later if it is not
-#define AIRPLAY_START_TIMEOUT_SEC     4
+// pairing give up after this long; a receiver on the LAN answers within a
+// fraction of it, and the player tries again a few seconds later if it is not
+// there. A playback flush, which a player command waits for, has the longer
+// limit
+#define AIRPLAY_START_TIMEOUT_SEC     2
+#define AIRPLAY_FLUSH_TIMEOUT_SEC     4
 
 // How long a sequence may stay suspended while its pairing request is being
 // computed elsewhere. Shorter than the RTSP read timeout, so we give up first
@@ -7741,16 +7746,27 @@ sequence_resume(struct airplay_session *session, bool ok)
   sequence_continue(seq_ctx);
 }
 
-// True for the sequences that start a speaker up to and including pairing,
-// and for a playback flush, which a player command waits for: these are
-// limited by AIRPLAY_START_TIMEOUT_SEC. The limit is the connection's, set at
-// each sequence start, so it holds while the flush is the newest sequence
-static bool
-sequence_start_limited(enum airplay_seq_type seq_type)
+// The connection's limit for a sequence: the sequences that start a speaker up
+// to and including pairing have AIRPLAY_START_TIMEOUT_SEC, a playback flush,
+// which a player command waits for, AIRPLAY_FLUSH_TIMEOUT_SEC, and the rest
+// the default (-1). The limit is the connection's, set at each sequence start,
+// so it holds while that sequence is the newest
+static int
+sequence_timeout(enum airplay_seq_type seq_type)
 {
-  return seq_type == AIRPLAY_SEQ_START || seq_type == AIRPLAY_SEQ_PROBE
-         || seq_type == AIRPLAY_SEQ_PAIR_TRANSIENT || seq_type == AIRPLAY_SEQ_PAIR_VERIFY
-         || seq_type == AIRPLAY_SEQ_FLUSH || seq_type == AIRPLAY_SEQ_FLUSH_BUFFERED;
+  switch (seq_type)
+    {
+      case AIRPLAY_SEQ_START:
+      case AIRPLAY_SEQ_PROBE:
+      case AIRPLAY_SEQ_PAIR_TRANSIENT:
+      case AIRPLAY_SEQ_PAIR_VERIFY:
+	return AIRPLAY_START_TIMEOUT_SEC;
+      case AIRPLAY_SEQ_FLUSH:
+      case AIRPLAY_SEQ_FLUSH_BUFFERED:
+	return AIRPLAY_FLUSH_TIMEOUT_SEC;
+      default:
+	return -1;
+    }
 }
 
 // All errors that may occur during a sequence are called back async
@@ -7767,7 +7783,7 @@ sequence_start(enum airplay_seq_type seq_type, struct airplay_session *session, 
   // time to be answered. The value is read each time a phase begins, and the
   // connection is made by the first request, so this covers the connect too.
   if (session->ctrl)
-    evrtsp_connection_set_timeout(session->ctrl, sequence_start_limited(seq_type) ? AIRPLAY_START_TIMEOUT_SEC : -1);
+    evrtsp_connection_set_timeout(session->ctrl, sequence_timeout(seq_type));
 
   seq_ctx->session = session;
   seq_ctx->cur_request = &airplay_seq_request[seq_type][0]; // First step of the sequence

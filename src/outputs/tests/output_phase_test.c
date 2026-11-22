@@ -1174,6 +1174,31 @@ test_sequences(void)
     }
 }
 
+static void
+check_delay(const char *what, uint64_t got, uint64_t want)
+{
+  cases_run++;
+  if (got == want)
+    return;
+
+  cases_failed++;
+  printf("FAIL retry delay, %s: got %llu ms, want %llu ms\n", what, (unsigned long long)got, (unsigned long long)want);
+}
+
+// A retry is due the gap after its attempt began, whenever the attempt failed
+static void
+test_retry_delay(void)
+{
+  check_delay("refused at once", output_retry_delay_ms(2000, 40, false), 1960);
+  check_delay("failed at the start limit", output_retry_delay_ms(2000, 2000, false), 0);
+  check_delay("failed after the gap", output_retry_delay_ms(2000, 2600, false), 0);
+  check_delay("second gap, failed at the limit", output_retry_delay_ms(3000, 2000, false), 1000);
+  check_delay("nothing elapsed", output_retry_delay_ms(3000, 0, false), 3000);
+  // A loss waits the whole gap, however long ago its start was
+  check_delay("lost session", output_retry_delay_ms(2000, 600000, true), 2000);
+  check_delay("lost session, second gap", output_retry_delay_ms(3000, 0, true), 3000);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -1188,6 +1213,7 @@ main(int argc, char *argv[])
   test_stale_generation();
   test_pin_never_automatic();
   test_names();
+  test_retry_delay();
 
   // The given (or time's) seed, then a few fixed ones so every run covers them
   test_harness_random(seed);

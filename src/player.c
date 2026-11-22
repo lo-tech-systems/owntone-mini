@@ -120,13 +120,16 @@
 #define PLAYER_WRITE_BEHIND_MAX 1500
 
 // A speaker that fails while the player plays, a start that fails or a session
-// that is lost, is started again after each of these numbers of seconds in
-// turn, counted since it last streamed or was enabled. After the last, recovery
+// that is lost, is started again, the retries counted since it last streamed
+// or was enabled. Each retry begins this many milliseconds after the attempt
+// that failed began, at once if that has passed, so a speaker that refuses at
+// once and one that never answers are tried at the same moments. A lost
+// session's retry waits the whole gap from the loss. After the last, recovery
 // is the client's. A failure that needs a person or that nobody wants any more
-// is not retried (output_failure_retriable), and a speaker can opt out with the
-// reconnect option. The count is not reset by a mode switch or an authorise,
-// only by audio flowing or the user's enable
-static const int player_speaker_retry_gaps[] = { 2, 3 };
+// is not retried (output_failure_retriable), and a speaker can opt out with
+// the reconnect option. The count is not reset by a mode switch or an
+// authorise, only by audio flowing or the user's enable
+static const int player_speaker_retry_gaps[] = { 2000, 3000 };
 #define PLAYER_SPEAKER_RETRY_MAX ARRAY_SIZE(player_speaker_retry_gaps)
 
 // A device that asked for a PIN waits this many seconds for it, about as long
@@ -1740,6 +1743,8 @@ static void
 device_volume_echo_cb(struct output_device *device, enum output_device_state status);
 static int
 device_start(struct output_device *device, bool only_probe, bool explicit_request);
+static uint64_t
+monotonic_ms(void);
 static void
 device_request(struct output_device *device, enum output_request req, bool explicit_request, bool backend_changes);
 static void
@@ -1793,9 +1798,9 @@ resurrect_cb(int fd, short what, void *arg)
 }
 
 static void
-resurrect_arm(struct output_device *device, int seconds)
+resurrect_arm(struct output_device *device, uint64_t delay_ms)
 {
-  struct timeval tv = { seconds, 0 };
+  struct timeval tv = { (time_t)(delay_ms / 1000), (suseconds_t)((delay_ms % 1000) * 1000) };
   uint64_t *id;
 
   if (!device->resurrect_ev)
@@ -2591,12 +2596,14 @@ flags_apply(struct output_device *device, const struct output_phase_result *res)
   // the device as about to start again
   if (res->retry)
     {
-      int gap = player_speaker_retry_gaps[device->reconnects];
+      uint64_t gap = player_speaker_retry_gaps[device->reconnects];
+      bool lost = (device->phase == OUTPUT_PHASE_CONNECTED || device->phase == OUTPUT_PHASE_STREAMING);
+      uint64_t delay = output_retry_delay_ms(gap, monotonic_ms() - device->attempt_started_ms, lost);
 
       device->reconnects++;
-      DPRINTF(E_LOG, L_PLAYER, "Retrying the %s device '%s' in %d sec (%u/%u)\n",
-	      device->type_name, device->name, gap, device->reconnects, PLAYER_SPEAKER_RETRY_MAX);
-      resurrect_arm(device, gap);
+      DPRINTF(E_LOG, L_PLAYER, "Retrying the %s device '%s' in %" PRIu64 " ms (%u/%u)\n",
+	      device->type_name, device->name, delay, device->reconnects, PLAYER_SPEAKER_RETRY_MAX);
+      resurrect_arm(device, delay);
     }
 
   if (res->deselect)
@@ -2809,6 +2816,9 @@ static int
 device_start(struct output_device *device, bool only_probe, bool explicit_request)
 {
   int ret;
+
+  // A retry after a failure is counted from here
+  device->attempt_started_ms = monotonic_ms();
 
   ret = outputs_device_start(device, device_op_cb, only_probe, explicit_request);
   if (ret < 0)

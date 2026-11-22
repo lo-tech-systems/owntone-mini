@@ -20,6 +20,7 @@
 #define __OUTPUT_PHASE_H__
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "output_failure.h"
 
@@ -137,5 +138,18 @@ output_phase_on_request(const struct output_phase_input *in, enum output_request
 // "password"
 const char *
 output_phase_name(enum output_phase phase);
+
+// How long a retry waits: the gap counted from when the failed attempt began,
+// so a retry is due at the same moment whether the attempt failed at once or
+// ran to its limit, and at once if that moment has passed. A lost session had
+// no attempt in flight, so its retry waits the whole gap from the loss
+static inline uint64_t
+output_retry_delay_ms(uint64_t gap_ms, uint64_t attempt_elapsed_ms, bool lost)
+{
+  if (lost)
+    return gap_ms;
+
+  return (attempt_elapsed_ms < gap_ms) ? gap_ms - attempt_elapsed_ms : 0;
+}
 
 #endif /* !__OUTPUT_PHASE_H__ */
