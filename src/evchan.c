@@ -199,6 +199,9 @@ conn_free(struct evchan_conn *c, const char *reason)
 {
   struct evchan_conn **pp;
 
+  if (!c)
+    return;
+
   for (pp = &conns; *pp; pp = &(*pp)->next)
     if (*pp == c)
       {

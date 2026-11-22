@@ -54,7 +54,9 @@ proc_status_kb(FILE *fp, const char *key, unsigned long *val)
   char line[256];
   size_t keylen = strlen(key);
 
-  rewind(fp);
+  if (fseek(fp, 0L, SEEK_SET) != 0)
+    return -1;
+  clearerr(fp);
   while (fgets(line, sizeof(line), fp))
     {
       if (strncmp(line, key, keylen) != 0)

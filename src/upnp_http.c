@@ -72,10 +72,10 @@ static struct upnp_http_req *reqs;
 static void
 req_unlink(struct upnp_http_req *req)
 {
-  if (req->prev)
-    req->prev->next = req->next;
-  else if (reqs == req)
+  if (reqs == req)
     reqs = req->next;
+  else if (req->prev)
+    req->prev->next = req->next;
   if (req->next)
     req->next->prev = req->prev;
   req->prev = req->next = NULL;
@@ -362,10 +362,10 @@ static int nconns;
 static void
 conn_free(struct notify_conn *c)
 {
-  if (c->prev)
-    c->prev->next = c->next;
-  else if (conns == c)
+  if (conns == c)
     conns = c->next;
+  else if (c->prev)
+    c->prev->next = c->next;
   if (c->next)
     c->next->prev = c->prev;
   nconns--;
