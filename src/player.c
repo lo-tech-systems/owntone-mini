@@ -2359,50 +2359,29 @@ tv_proxy_leader_start(struct output_device *follower)
     DPRINTF(E_WARN, L_PLAYER, "TV proxy: could not start Apple TV '%s'\n", outputs_device_display_name(leader));
 }
 
-// A member of a held group that comes back (its session was set up again)
-// plays, so the members still held are released, or the row would read not
-// held while some of it is, and could not be resumed. Run as a command so it
-// never replaces the callback of a device another command is waiting on.
+// A member of a held group that comes back (its session was set up again) is
+// held too, so the group stays paused until it is resumed, and its row reads
+// held. Run as a command so it never replaces the callback of a device another
+// command is waiting on.
 static enum command_state
-speaker_member_returned(void *arg, int *retval)
+speaker_member_hold(void *arg, int *retval)
 {
   uint64_t *id = arg;
   struct output_device *device;
-  struct output_device *cur;
-  const char *group_id;
-  int ended = 0;
 
   *retval = 0;
 
   device = outputs_device_get(*id);
-  if (!device || !device->session)
+  if (!device || !device->session || device->hold_kind != OUTPUT_HOLD_NONE)
     return COMMAND_END;
 
-  group_id = outputs_device_group_id(device);
-  if (!group_id)
+  if (!speaker_group_sibling_held(device))
     return COMMAND_END;
 
-  for (cur = outputs_list(); cur; cur = cur->next)
+  if (outputs_device_hold_set(device, true, "its group is held", device_level_edge_cb) == 0)
     {
-      const char *cur_gid = outputs_device_group_id(cur);
-
-      if (cur == device || !cur_gid || strcmp(cur_gid, group_id) != 0)
-	continue;
-
-      if (!cur->session || cur->hold_kind == OUTPUT_HOLD_NONE)
-	continue;
-
-      if (outputs_device_hold_set(cur, false, "a member came back", device_level_edge_cb) == 0)
-	{
-	  speaker_announce(cur);
-	  ended++;
-	}
-    }
-
-  if (ended)
-    {
-      DPRINTF(E_INFO, L_PLAYER, "'%s' came back while its group was held: hold ended for %d speaker(s)\n",
-	      outputs_device_display_name(device), ended);
+      DPRINTF(E_INFO, L_PLAYER, "'%s' came back while its group was held: held too\n", outputs_device_display_name(device));
+      speaker_announce(device);
       // An async command has no bottom half
       status_update(player_state, LISTENER_SPEAKER);
     }
@@ -2455,8 +2434,8 @@ handle_activate(struct output_device *device, enum output_device_state status, i
   if (status == OUTPUT_STATE_STREAMING)
     retval = handle_streaming(device, status, retval);
 
-  // A member back in a held group: its siblings' hold is ended once no
-  // command is waiting (see speaker_member_returned())
+  // A member back in a held group is held too once no command is waiting
+  // (see speaker_member_hold())
   if (device->session && outputs_device_group_id(device) && speaker_group_sibling_held(device))
     {
       uint64_t *id;
@@ -2465,9 +2444,9 @@ handle_activate(struct output_device *device, enum output_device_state status, i
       *id = device->id;
 
       // On success the command frees id
-      if (commands_exec_async(cmdbase, speaker_member_returned, id) < 0)
+      if (commands_exec_async(cmdbase, speaker_member_hold, id) < 0)
 	{
-	  DPRINTF(E_LOG, L_PLAYER, "Could not queue the end of the hold of the group of '%s'\n", device->name);
+	  DPRINTF(E_LOG, L_PLAYER, "Could not queue the hold of '%s', back in its held group\n", device->name);
 	  free(id);
 	}
     }
