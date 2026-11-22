@@ -1989,14 +1989,19 @@ handle_streaming(struct output_device *device, enum output_device_state status, 
   return retval;
 }
 
-// The answer to a level sent by a volume command
+// The answer to a level sent by a volume command. A session that fails while
+// the level is in flight is recovered as a streaming failure would be, since
+// the failure is often not the level's at all (a feedback timeout, say)
 static int
 handle_volume(struct output_device *device, enum output_device_state status, int retval)
 {
   if (status == OUTPUT_STATE_FAILED)
-    DPRINTF(E_LOG, L_PLAYER, "The %s device '%s' failed during execution of volume command\n", device->type_name, device->name);
-  else
-    DPRINTF(E_DBG, L_PLAYER, "Callback from %s device %s to device_volume_cb (status %d)\n", device->type_name, device->name, status);
+    {
+      DPRINTF(E_LOG, L_PLAYER, "The %s device '%s' failed during execution of volume command\n", device->type_name, device->name);
+      return handle_streaming(device, status, retval);
+    }
+
+  DPRINTF(E_DBG, L_PLAYER, "Callback from %s device %s to device_volume_cb (status %d)\n", device->type_name, device->name, status);
 
   // If a failure occurred when setting the volume, and we also don't have other
   // active sessions, then we suspend playback (but not for live pipe sources,
@@ -2024,14 +2029,15 @@ handle_level_edge(struct output_device *device, enum output_device_state status,
 }
 
 // A flushed device's answer. The command, if any, ends when the last device it
-// flushed has reported, whatever the report, see flush_done_cb()
+// flushed has reported, whatever the report, see flush_done_cb(). A session
+// that fails during the flush is recovered as a streaming failure would be
 static int
 handle_flush(struct output_device *device, enum output_device_state status, int retval)
 {
   if (status == OUTPUT_STATE_FAILED)
     {
       DPRINTF(E_LOG, L_PLAYER, "The %s device '%s' failed during execution of flush command\n", device->type_name, device->name);
-      return retval;
+      return handle_streaming(device, status, retval);
     }
 
   DPRINTF(E_DBG, L_PLAYER, "Callback from %s device %s to device_flush_cb (status %d)\n", device->type_name, device->name, status);

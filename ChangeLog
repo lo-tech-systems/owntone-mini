@@ -7,6 +7,9 @@
   crashed
 - fix: an AirPlay 2 speaker that cannot be reached when it is started is
   reported as unreachable, not as refusing
+- fix: a speaker whose session fails while a volume change or a flush is
+  waiting for its answer is reconnected like any other lost speaker. Before,
+  a HomePod or Apple TV lost this way was not tried again
 - fix: a malformed PTP signalling message from the network can no longer
   overrun a peer address on the stack
 - fix: pairing with an empty TLV no longer writes two bytes past the end of
