@@ -75,7 +75,7 @@ static AvahiEntryGroup *mdns_group = NULL;
 static AvahiIfIndex mdns_interface = AVAHI_IF_UNSPEC;
 static struct event *mdns_rescan_ev;
 static int mdns_rescan_pipe[2] = { -1, -1 };
-static atomic_bool mdns_rescan_pending = ATOMIC_VAR_INIT(false);
+static atomic_bool mdns_rescan_pending = false;
 
 // Rate-limits the "Avahi Resolver failure ... Timeout" WARN. The
 // resolver is intentionally kept alive after a failure (so we get notified
