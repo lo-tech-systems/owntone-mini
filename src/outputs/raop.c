@@ -4795,13 +4795,13 @@ raop_device_cb(const char *name, const char *type, const char *domain, const cha
   else if (*p == '\0')
     DPRINTF(E_LOG, L_RAOP, "AirPlay device '%s': am has no value\n", device_name);
 
-  // If the user didn't set any reconnect setting we enable for Apple TV and
-  // HomePods due to https://github.com/owntone/owntone-server/issues/734
+  // Every speaker is retried after a failure unless the user set reconnect
+  // false for it
   cfgopt = devcfg ? cfg_getopt(devcfg, "reconnect") : NULL;
   if (cfgopt && cfgopt->nvalues == 1)
     rd->resurrect = cfg_opt_getnbool(cfgopt, 0);
   else
-    rd->resurrect = (re->devtype == RAOP_DEV_APPLETV4) || (re->devtype == RAOP_DEV_HOMEPOD);
+    rd->resurrect = 1;
 
   // Encrypt stream
   p = keyval_get(txt, "ek");

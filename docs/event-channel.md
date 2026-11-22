@@ -202,11 +202,12 @@ Example:
   requests are not held up by a speaker. A start makes one attempt: the
   connection and each request up to setting up the stream give up after 4
   seconds, and a request after that after 15, so a start ends in a final
-  state within about 37 seconds at worst. The one retry is a stereo pair's
-  pair-setup rejection just after a stop, tried up to twice more 3 seconds
-  apart. Starting a speaker again after a failure is the supervisor's job,
-  except that a speaker that drops a session it had is brought back by the
-  daemon after a few seconds, as before.
+  state within about 37 seconds at worst. While the player plays, a speaker
+  whose start fails or that drops its session is tried again by the daemon,
+  2 seconds and then 3 seconds after its failures (the `reconnect` option);
+  its row reads `connecting` meanwhile. A typical give-up is about 17 seconds
+  after the first attempt, 116 seconds if every request runs to its limit.
+  After that, starting the speaker again is the supervisor's job.
 - The playback commands that flush the speakers (stop, pause, the pipe's
   flush) still wait for those speakers, at most 4 seconds.
 - `boot` tells a restart of the daemon from a dropped connection. `uptime_ms`

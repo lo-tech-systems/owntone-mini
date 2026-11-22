@@ -83,4 +83,22 @@ output_failure_reported(enum output_failure_reason recorded, bool password, bool
   return OUTPUT_FAILURE_REFUSED;
 }
 
+// Whether a failure for this reason is worth trying again a few seconds later.
+// Not one that needs a person (a PIN), not a start nobody wants any more, and
+// not our own encoder budget, which a few seconds do not change
+static inline bool
+output_failure_retriable(enum output_failure_reason reason)
+{
+  switch (reason)
+    {
+      case OUTPUT_FAILURE_PIN_REQUIRED:
+      case OUTPUT_FAILURE_PIN_INVALID:
+      case OUTPUT_FAILURE_CANCELLED:
+      case OUTPUT_FAILURE_CAPACITY:
+	return false;
+      default:
+	return true;
+    }
+}
+
 #endif /* !__OUTPUT_FAILURE_H__ */

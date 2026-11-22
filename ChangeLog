@@ -22,14 +22,17 @@
   password while any of them waits for a PIN; it is selected while any of
   them is. A new row value, `members_missing`, in the outputs list and in
   `output_state` events, counts the speakers not playing while another is
-- fix: a speaker of a group whose start fails while another speaker of the
-  group plays is retried, and the group no longer reads failed and off while
-  part of it plays
-- change: every speaker that reconnects (the `reconnect` option, on by
-  default for HomePods and Apple TVs) gets one quick retry, 5 s after it is
-  lost or after its start fails while its group plays, and is then left to
-  the client. An Apple TV leading HomePods used to get three retries 3 s
-  apart, and now needs the `reconnect` option like any other speaker
+- fix: a group no longer reads failed and off while part of it plays
+- change: every speaker gets two quick retries while the player plays, 2 s
+  after a failed start or a lost session and 3 s after the next failure, and
+  is then left to the client. A PIN, a start cancelled by a disable and a
+  refusal for lack of buffered-encode capacity are not retried. The
+  `reconnect` option is now on for every speaker unless set `false`. Before,
+  only HomePods and Apple TVs reconnected, a lone speaker's failed start was
+  not retried, and an Apple TV leading HomePods had three retries 3 s apart
+- change: a HomePod pair's pair-setup rejection just after a stop is retried
+  by the same two quick retries, rather than twice 3 s apart inside the
+  start
 - change: a speaker that comes back into a held group is held too, rather
   than ending the hold of the group
 

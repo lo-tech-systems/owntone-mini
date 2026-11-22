@@ -94,8 +94,8 @@ struct output_phase_input
   bool explicit_request;
   // Mode switch only: the effective backend would change
   bool backend_changes;
-  // Reports only: a failure now would be retried by the player (its budget,
-  // its group and its settings allow it)
+  // Reports only: the player may retry a failure now (its budget and its
+  // settings allow it); the rule adds whether the reason is worth retrying
   bool retry_allowed;
 };
 

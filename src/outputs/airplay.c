@@ -188,9 +188,6 @@
 //   JOIN_SLACK_FRAMES                48       above the anchor round trip plus
 //                                             ANCHOR_HOLD_MAX_MS
 //   PAIR_COMPUTE_TIMEOUT_SEC         10       below the RTSP read timeout
-//   START_RETRY_MAX x WAIT_SEC       2 x 3 s  transient pair-setup only; covers
-//                                             the refusal window after a
-//                                             TEARDOWN
 //   START_TIMEOUT_SEC                4        connect and each request up to
 //                                             pairing; kept off SETUP, whose
 //                                             timeout would clear the keys
@@ -269,14 +266,10 @@
 // milliseconds) or more before it is logged at info rather than debug level
 #define AIRPLAY_REQUEST_BUILD_SLOW_MS 5
 
-// A speaker is started once: a failure is reported at once and the caller
-// decides whether and when to try again. The one exception is the transient
-// pair-setup rejection. HomePod stereo pairs sporadically reject it shortly
-// after a TEARDOWN, and a delayed retry reliably succeeds. It is retried up to
-// AIRPLAY_START_RETRY_MAX times, AIRPLAY_START_RETRY_WAIT_SEC apart. Bounded
-// and delayed so the start path can never spin.
-#define AIRPLAY_START_RETRY_MAX       2
-#define AIRPLAY_START_RETRY_WAIT_SEC  3
+// A speaker is started once: a failure is reported at once and the player
+// decides whether and when to try again. That includes the transient
+// pair-setup that HomePod stereo pairs sporadically reject shortly after a
+// TEARDOWN, which the player's retry a few seconds later gets past.
 
 // While a speaker is being started, the connection and each request up to
 // pairing give up after this long; a receiver that is there answers within it,
@@ -528,11 +521,6 @@ struct airplay_session
   // leaves the player thread refers to the session by this and looks it up
   // again on return.
   uint64_t serial;
-
-  // Number of soft start retries already performed for this start attempt.
-  // Carried across session recreation so the backoff stays bounded (see
-  // start_retry()).
-  int start_retries;
 
   // NULL until the receiver's /info answer has decided which kind it gets,
   // see session_master_attach(). A session that only probes or prompts for a
@@ -5558,102 +5546,11 @@ buffered_connect_cb(void *arg, bool connected)
   sequence_resume(session, false); // May free the session, no use of it after this
 }
 
-// Context for a scheduled soft-start/probe retry. The session that failed has
-// already been torn down, so the retry is keyed by device id and the pending
-// player callback id, and carries the attempt counter forward to keep the
-// backoff bounded. seq_type records which sequence to re-run (AIRPLAY_SEQ_START
-// or AIRPLAY_SEQ_PROBE).
-struct airplay_start_retry_ctx
-{
-  uint64_t device_id;
-  int callback_id;
-  int attempt;
-  enum airplay_seq_type seq_type;
-  struct event *timer;
-};
-
 static void
-start_retry_timer_cb(int fd, short what, void *arg)
-{
-  struct airplay_start_retry_ctx *ctx = arg;
-  struct output_device *device;
-  struct airplay_session *session;
-
-  device = outputs_device_get(ctx->device_id);
-
-  // Device disappeared, something already started a session in the meantime,
-  // or the device has been moved to another backend between the attempts.
-  // Resolve the still-pending activation callback as failed so it never hangs.
-  if (!device || device->session || device->type != OUTPUT_TYPE_AIRPLAY)
-    {
-      outputs_cb(ctx->callback_id, ctx->device_id, OUTPUT_STATE_FAILED);
-      goto out;
-    }
-
-  // Deselected between the attempts: the start ends here
-  if (!device->selected)
-    {
-      DPRINTF(E_INFO, L_AIRPLAY, "Retry of '%s' dropped: it is no longer wanted\n", device->name);
-      device->last_failure = OUTPUT_FAILURE_CANCELLED;
-      outputs_cb(ctx->callback_id, ctx->device_id, OUTPUT_STATE_FAILED);
-      goto out;
-    }
-
-  session = session_make(device, ctx->callback_id);
-  if (!session)
-    {
-      outputs_cb(ctx->callback_id, ctx->device_id, OUTPUT_STATE_FAILED);
-      goto out;
-    }
-
-  session->start_retries = ctx->attempt;
-  session->probing = (ctx->seq_type == AIRPLAY_SEQ_PROBE);
-
-  DPRINTF(E_INFO, L_AIRPLAY, "Retrying %s for '%s' (attempt %d/%d)\n",
-          (ctx->seq_type == AIRPLAY_SEQ_PROBE) ? "probe" : "start",
-          device->name, ctx->attempt, AIRPLAY_START_RETRY_MAX);
-
-  if (ctx->seq_type == AIRPLAY_SEQ_PROBE)
-    sequence_start(AIRPLAY_SEQ_PROBE, session, NULL, "device_probe (retry)");
-  else
-    sequence_start(AIRPLAY_SEQ_START, session, NULL, "device_start (retry)");
-
- out:
-  event_free(ctx->timer);
-  free(ctx);
-}
-
-// Schedule a delayed soft-start/probe retry. On any failure to schedule, the
-// pending activation callback is resolved as failed rather than left hanging.
-static void
-start_retry_schedule(uint64_t device_id, int callback_id, int attempt, enum airplay_seq_type seq_type)
-{
-  struct airplay_start_retry_ctx *ctx;
-  struct timeval tv = { AIRPLAY_START_RETRY_WAIT_SEC, 0 };
-
-  CHECK_NULL(L_AIRPLAY, ctx = calloc(1, sizeof(struct airplay_start_retry_ctx)));
-
-  ctx->device_id = device_id;
-  ctx->callback_id = callback_id;
-  ctx->attempt = attempt;
-  ctx->seq_type = seq_type;
-  ctx->timer = evtimer_new(evbase_player, start_retry_timer_cb, ctx);
-  if (!ctx->timer)
-    {
-      free(ctx);
-      outputs_cb(callback_id, device_id, OUTPUT_STATE_FAILED);
-      return;
-    }
-
-  evtimer_add(ctx->timer, &tv);
-}
-
-static void
-start_retry_impl(struct airplay_session *session, enum airplay_seq_type seq_type, bool delayed_retry)
+start_retry_impl(struct airplay_session *session, enum airplay_seq_type seq_type)
 {
   struct output_device *device;
   int callback_id = session->callback_id;
-  int attempt = session->start_retries;
 
   device = outputs_device_get(session->device_id);
   if (!device)
@@ -5690,45 +5587,22 @@ start_retry_impl(struct airplay_session *session, enum airplay_seq_type seq_type
       return;
     }
 
-  // Hard failure (e.g. bad password): give up immediately, no backoff.
-  if (session->state & AIRPLAY_STATE_F_FAILED)
-    {
-      session_failure(session);
-      return;
-    }
-
-  // Soft failure (connection refused, GET /info negative, timeout): reported
-  // at once, unless the caller asked for a delayed retry. That is retried a
-  // bounded number of times with a fixed backoff - gives a HomePod stereo
-  // pair time to finish its post-TEARDOWN reset. session_cleanup() drops the
-  // dead session WITHOUT firing the callback, so the player's activation stays
-  // pending across the retry.
-  if (delayed_retry && attempt < AIRPLAY_START_RETRY_MAX)
-    {
-      start_retry_schedule(session->device_id, callback_id, attempt + 1, seq_type);
-      session_cleanup(session);
-      return;
-    }
-
+  // Anything else, a hard failure (a bad password) or a soft one (connection
+  // refused, GET /info negative, a timeout, a transient pair-setup rejected),
+  // is reported at once, and the player decides whether to try again
   session_failure(session);
 }
 
 static void
 start_retry(struct airplay_session *session)
 {
-  start_retry_impl(session, AIRPLAY_SEQ_START, false);
+  start_retry_impl(session, AIRPLAY_SEQ_START);
 }
 
 static void
 probe_retry(struct airplay_session *session)
 {
-  start_retry_impl(session, AIRPLAY_SEQ_PROBE, false);
-}
-
-static void
-pair_transient_retry(struct airplay_session *session)
-{
-  start_retry_impl(session, AIRPLAY_SEQ_START, true);
+  start_retry_impl(session, AIRPLAY_SEQ_PROBE);
 }
 
 
@@ -7422,11 +7296,10 @@ static struct airplay_seq_definition airplay_seq_definition[] =
   { AIRPLAY_SEQ_PAIR_SETUP, session_pair_success, session_failure },
   { AIRPLAY_SEQ_PAIR_VERIFY, session_pair_success, session_failure },
   // Transient pairing only runs during session start (probe converts it to
-  // CONTINUE), so a failure here is a start failure. It is the one start
-  // failure that is retried: HomePod stereo pairs sporadically reject transient
-  // pair-setup with an SRP auth error shortly after a TEARDOWN, and a delayed
-  // retry reliably succeeds.
-  { AIRPLAY_SEQ_PAIR_TRANSIENT, session_pair_success, pair_transient_retry },
+  // CONTINUE), so a failure here is a start failure. HomePod stereo pairs
+  // sporadically reject it shortly after a TEARDOWN; the player's retry gets
+  // past that
+  { AIRPLAY_SEQ_PAIR_TRANSIENT, session_pair_success, start_retry },
   { AIRPLAY_SEQ_FEEDBACK, NULL, session_failure },
   { AIRPLAY_SEQ_SEND_ANCHOR, NULL, session_failure },
   { AIRPLAY_SEQ_FLUSH_BUFFERED, session_status, session_failure },
@@ -8575,13 +8448,13 @@ airplay_device_cb(const char *name, const char *type, const char *domain, const 
 
   airplay_stereo_metadata_log(device, extra);
 
-  // If the user didn't set any reconnect setting we enable for Apple TV and
-  // HomePods due to https://github.com/owntone/owntone-server/issues/734
+  // Every speaker is retried after a failure unless the user set reconnect
+  // false for it
   cfgopt = devcfg ? cfg_getopt(devcfg, "reconnect") : NULL;
   if (cfgopt && cfgopt->nvalues == 1)
     device->resurrect = cfg_opt_getnbool(cfgopt, 0);
   else
-    device->resurrect = (extra->devtype == AIRPLAY_DEV_APPLETV4) || (extra->devtype == AIRPLAY_DEV_HOMEPOD);
+    device->resurrect = 1;
 
   // Demote to E_DBG when this is an unchanged re-resolve of an
   // already-known device (e.g. an Avahi TTL refresh), keep E_INFO for a

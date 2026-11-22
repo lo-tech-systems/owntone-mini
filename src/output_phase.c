@@ -30,8 +30,8 @@
 //    run on and stops it once it has a session
 //  - after every report, a selected device with no session and no operation
 //    is started again while the player plays
-//  - a failure the player may retry keeps the device selected; the retry is
-//    the player's timer, not a start begun here
+//  - a failure the player may retry, for a reason worth retrying, keeps the
+//    device selected; the retry is the player's timer, not a start begun here
 
 static void
 result_init(const struct output_phase_input *in, struct output_phase_result *out)
@@ -131,11 +131,11 @@ report_start(const struct output_phase_input *in, enum output_report report, str
       case OUTPUT_REPORT_FAILED:
 	reach(out, OUTPUT_PHASE_FAILED);
 	out->clear_op = true;
-	if (in->retry_allowed)
+	out->reason = reason_or(in->report_reason, OUTPUT_FAILURE_REFUSED);
+	if (in->retry_allowed && output_failure_retriable(out->reason))
 	  out->retry = true;
 	else
 	  out->deselect = true;
-	out->reason = reason_or(in->report_reason, OUTPUT_FAILURE_REFUSED);
 	break;
 
       case OUTPUT_REPORT_PASSWORD:
@@ -287,8 +287,8 @@ report_established(const struct output_phase_input *in, enum output_report repor
 
       case OUTPUT_REPORT_FAILED:
 	reach(out, OUTPUT_PHASE_FAILED);
-	out->retry = in->retry_allowed;
 	out->reason = lost_reason(in->report_reason);
+	out->retry = in->retry_allowed && output_failure_retriable(out->reason);
 	break;
 
       case OUTPUT_REPORT_PASSWORD:

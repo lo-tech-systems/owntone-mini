@@ -99,11 +99,40 @@ test_names(void)
     }
 }
 
+static void
+check_retriable(enum output_failure_reason reason, bool want)
+{
+  cases_run++;
+  if (output_failure_retriable(reason) == want)
+    return;
+
+  cases_failed++;
+  printf("FAIL retriable %s: got %d, want %d\n", output_failure_name(reason), !want, want);
+}
+
+static void
+test_retriable(void)
+{
+  // A connection or an answer that went wrong, or a session lost
+  check_retriable(OUTPUT_FAILURE_NONE, true);
+  check_retriable(OUTPUT_FAILURE_REFUSED, true);
+  check_retriable(OUTPUT_FAILURE_UNREACHABLE, true);
+  check_retriable(OUTPUT_FAILURE_TIMEOUT, true);
+  check_retriable(OUTPUT_FAILURE_NO_CLOCK, true);
+  check_retriable(OUTPUT_FAILURE_LOST, true);
+  // A person, nobody, or our own encoder budget
+  check_retriable(OUTPUT_FAILURE_PIN_REQUIRED, false);
+  check_retriable(OUTPUT_FAILURE_PIN_INVALID, false);
+  check_retriable(OUTPUT_FAILURE_CANCELLED, false);
+  check_retriable(OUTPUT_FAILURE_CAPACITY, false);
+}
+
 int
 main(void)
 {
   test_reported();
   test_names();
+  test_retriable();
 
   printf("%d cases, %d failed\n", cases_run, cases_failed);
   return cases_failed ? 1 : 0;

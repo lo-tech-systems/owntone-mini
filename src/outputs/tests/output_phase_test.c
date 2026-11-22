@@ -189,6 +189,25 @@ test_report_table(void)
     IN(.phase = P(STREAMING), .selected = true, .playing = true, .report_reason = F(TIMEOUT), .retry_allowed = true),
     R(FAILED),
     WANT(.phase = P(FAILED), .mid_phase = P(FAILED), .retry = true, .reason = F(LOST), .announce = true));
+  check_report("start out of encoder capacity, retry allowed: deselected, not retried",
+    IN(.phase = P(CONNECTING), .op = O(START), .selected = true, .playing = true, .report_reason = F(CAPACITY),
+       .retry_allowed = true),
+    R(FAILED),
+    WANT(.phase = P(FAILED), .mid_phase = P(FAILED), .clear_op = true, .deselect = true, .reason = F(CAPACITY), .announce = true));
+  check_report("start fails for a PIN, retry allowed: deselected, not retried",
+    IN(.phase = P(CONNECTING), .op = O(START), .selected = true, .playing = true, .report_reason = F(PIN_REQUIRED),
+       .retry_allowed = true),
+    R(FAILED),
+    WANT(.phase = P(FAILED), .mid_phase = P(FAILED), .clear_op = true, .deselect = true, .reason = F(PIN_REQUIRED), .announce = true));
+  check_report("start cancelled, retry allowed: deselected, not retried",
+    IN(.phase = P(CONNECTING), .op = O(START), .selected = true, .playing = true, .report_reason = F(CANCELLED),
+       .retry_allowed = true),
+    R(FAILED),
+    WANT(.phase = P(FAILED), .mid_phase = P(FAILED), .clear_op = true, .deselect = true, .reason = F(CANCELLED), .announce = true));
+  check_report("session ends for a refused PIN, retry allowed: stays selected, not retried",
+    IN(.phase = P(STREAMING), .selected = true, .playing = true, .report_reason = F(PIN_INVALID), .retry_allowed = true),
+    R(FAILED),
+    WANT(.phase = P(FAILED), .mid_phase = P(FAILED), .reason = F(PIN_INVALID), .announce = true));
   check_report("session lost, no retry: stays selected, not retried",
     IN(.phase = P(STREAMING), .selected = true, .playing = true, .report_reason = F(TIMEOUT)),
     R(FAILED),
@@ -621,7 +640,14 @@ h_begin(struct h_device *d, enum output_op op)
 	      h_push(d, OUTPUT_REPORT_STREAMING, OUTPUT_FAILURE_NONE, true);
 	  }
 	else if (r < 80)
-	  h_push(d, OUTPUT_REPORT_FAILED, h_rand(2) ? OUTPUT_FAILURE_UNREACHABLE : OUTPUT_FAILURE_TIMEOUT, false);
+	  {
+	    // Mostly what can be retried, sometimes what cannot
+	    static const enum output_failure_reason start_failures[] = {
+	      OUTPUT_FAILURE_UNREACHABLE, OUTPUT_FAILURE_TIMEOUT, OUTPUT_FAILURE_REFUSED, OUTPUT_FAILURE_UNREACHABLE,
+	      OUTPUT_FAILURE_CAPACITY, OUTPUT_FAILURE_PIN_REQUIRED, OUTPUT_FAILURE_CANCELLED,
+	    };
+	    h_push(d, OUTPUT_REPORT_FAILED, start_failures[h_rand(sizeof(start_failures) / sizeof(start_failures[0]))], false);
+	  }
 	else
 	  h_push(d, OUTPUT_REPORT_PASSWORD, OUTPUT_FAILURE_PIN_REQUIRED, false);
 	break;
@@ -729,6 +755,10 @@ h_report(int i)
     h_fail(i, "a retried failure was deselected");
   if (out.retry && r.report != OUTPUT_REPORT_FAILED)
     h_fail(i, "a retry came with a report that is not a failure");
+  if (out.retry && !output_failure_retriable(out.reason))
+    h_fail(i, "a failure that is not worth retrying was retried");
+  if (out.retry && !in.retry_allowed)
+    h_fail(i, "a retry the player did not allow");
   h_apply(i, &in, &out, true);
 
   if (d->st.selected && h_playing && !d->session && d->st.op == OUTPUT_OP_NONE && !d->st.pin_pending && d->st.phase == OUTPUT_PHASE_STOPPED)

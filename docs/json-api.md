@@ -193,7 +193,7 @@ The state of what the row plays. For an output on its own that is its own connec
 | Key | Type | Value |
 | --- | ---- | ----- |
 | `state` | string | `"stopped"` (no connection), `"connecting"` (a start, a probe or a PIN pairing is under way), `"connected"` (connected, audio not flowing yet; a buffered AirPlay 2 speaker stays here until it has accepted its start time), `"streaming"`, `"stopping"` (a stop is waiting for the receiver to end its session), `"failed"`, or `"password"` (the device wants a PIN or password). `"startup"` is no longer sent |
-| `failure` | string | Why the state is `"failed"` or `"password"`, or `"cancelled"` on a `"stopped"` row whose start was ended by a disable; `"none"` otherwise. `"pin_required"` (the PIN start was sent, so the PIN is on the receiver's screen), `"pin_invalid"` (pair setup with the PIN given was refused), `"refused"` (the receiver answered no to something other than authentication, including a PIN start it refused outright), `"unreachable"` (no connection, or no answer before the receiver had answered anything), `"timeout"` (no answer after it had answered, or pair setup took too long), `"no_clock"` (buffered playback could not be started because the receiver never used our clock), `"capacity"` (the buffered-encode budget was used up), `"cancelled"` (a start ended because the output was disabled while it connected), `"lost"` (an established session failed with nothing in flight; the output is not deselected, and is retried once if the speaker is one that reconnects). A PIN given with `pin` whose pair setup times out is `"password"` with `"timeout"`: the receiver never judged the PIN, the start is not repeated, and the next start shows a new PIN. Clients treat any other value as `"refused"` on a `"failed"` row and `"pin_required"` on a `"password"` row |
+| `failure` | string | Why the state is `"failed"` or `"password"`, or `"cancelled"` on a `"stopped"` row whose start was ended by a disable; `"none"` otherwise. `"pin_required"` (the PIN start was sent, so the PIN is on the receiver's screen), `"pin_invalid"` (pair setup with the PIN given was refused), `"refused"` (the receiver answered no to something other than authentication, including a PIN start it refused outright), `"unreachable"` (no connection, or no answer before the receiver had answered anything), `"timeout"` (no answer after it had answered, or pair setup took too long), `"no_clock"` (buffered playback could not be started because the receiver never used our clock), `"capacity"` (the buffered-encode budget was used up), `"cancelled"` (a start ended because the output was disabled while it connected), `"lost"` (an established session failed with nothing in flight; the output is not deselected, and is retried if the speaker is one that reconnects). A PIN given with `pin` whose pair setup times out is `"password"` with `"timeout"`: the receiver never judged the PIN, the start is not repeated, and the next start shows a new PIN. Clients treat any other value as `"refused"` on a `"failed"` row and `"pin_required"` on a `"password"` row |
 | `held` | boolean | `true` while the output is held with `hold` (see [Update an output](#update-an-output)): it paused itself and is paused in place (a buffered AirPlay 2 session) or sent 0 (any other). For a group it is `true` when every speaker of the group that has a session is held. Cleared when the hold ends or the session ends |
 | `holdable` | boolean | `true` if `hold` would be accepted now: the output, or a speaker of its group that plays audio, has a connected or streaming AirPlay 2 or AirPlay 1 session that is not being stopped |
 
@@ -209,11 +209,13 @@ otherwise `"streaming"` if any speaker streams, otherwise `"connecting"` if any
 is connecting, connected or about to be retried, otherwise `"stopping"`,
 `"failed"` or `"stopped"` in that order of precedence.
 
-A speaker that is lost while it plays, or whose start fails while another
-speaker of its group plays, is retried once, 5 seconds later, if it is one
-that reconnects (the `reconnect` option, on by default for HomePods and Apple
-TVs); it stays selected meanwhile and its row reads `"connecting"`. If the
-retry fails too, it is deselected, and further recovery is the client's.
+While the player plays, a speaker whose start fails or that is lost is
+retried 2 seconds later, and if that fails too, 3 seconds after that, if it
+is one that reconnects (the `reconnect` option, on unless set `false`). It
+stays selected meanwhile and its row reads `"connecting"`. A failure for
+`"pin_required"`, `"pin_invalid"`, `"cancelled"` or `"capacity"` is not
+retried. When the retries are spent a failed start is deselected and a lost
+session stays failed, and further recovery is the client's.
 
 A pair is listed as one output; its second speaker is hidden. A group of
 HomePods that sits behind an Apple TV is listed as the Apple TV; the HomePods

@@ -119,14 +119,15 @@
 // (value is in milliseconds)
 #define PLAYER_WRITE_BEHIND_MAX 1500
 
-// A speaker that fails during playback, when it is lost or when its start
-// fails while another member of its group plays, is started again after this
-// number of seconds, at most this many times since it last streamed or was
-// enabled. After that quick retry, recovery is the client's. Speakers that
-// reconnect are those with the reconnect option, on by default for HomePods
-// and Apple TVs, which tend to drop connections.
-#define PLAYER_SPEAKER_RESURRECT_TIME 5
-#define PLAYER_SPEAKER_RECONNECT_MAX 1
+// A speaker that fails while the player plays, a start that fails or a session
+// that is lost, is started again after each of these numbers of seconds in
+// turn, counted since it last streamed or was enabled. After the last, recovery
+// is the client's. A failure that needs a person or that nobody wants any more
+// is not retried (output_failure_retriable), and a speaker can opt out with the
+// reconnect option. The count is not reset by a mode switch or an authorise,
+// only by audio flowing or the user's enable
+static const int player_speaker_retry_gaps[] = { 2, 3 };
+#define PLAYER_SPEAKER_RETRY_MAX ARRAY_SIZE(player_speaker_retry_gaps)
 
 // A device that asked for a PIN waits this many seconds for it, about as long
 // as a receiver keeps the PIN on its screen. A wait that ends with an
@@ -163,8 +164,8 @@
 // When HomePods are routed via an Apple TV ("TV proxy" topology), the Apple
 // TV is the primary session: it owns pairing/PIN, artwork and now-playing,
 // and every start path talks to it. The HomePod members are hidden followers
-// that no start path may touch directly - tv_proxy_follower_skip() gates
-// this. An Apple TV session that already exists when the HomePods connect is
+// that no start path may touch directly - group_start_skip() and
+// start_left_to_others() gate this. An Apple TV session that already exists when the HomePods connect is
 // closed by the Apple TV a moment later, whereas one started after the
 // HomePods are streaming joins cleanly, so the two are started in a specific
 // order: the Apple TV is only probed first (outputs_device_start()), which
@@ -175,8 +176,9 @@
 // once any of them reports streaming, tv_proxy_leader_start() starts the
 // Apple TV's real session. If no follower can be started at all, the Apple TV
 // is started directly instead, as a fallback. A leader or a follower that then
-// drops its session is retried like any other speaker (see
-// PLAYER_SPEAKER_RESURRECT_TIME).
+// fails is retried like any other speaker (see player_speaker_retry_gaps); a
+// follower's retry waiting counts as live, so the direct fallback waits for
+// the followers' retries to be spent.
 // Followers are stopped together with the leader, and volume commands go to
 // the leader and then fan out to the followers.
 
@@ -1773,6 +1775,19 @@ resurrect_cb(int fd, short what, void *arg)
       return;
     }
 
+  // A TV proxy follower is started only through its Apple TV, as in
+  // start_left_to_others(): not while the Apple TV is off or waits for a PIN
+  if (outputs_device_is_tv_proxy_follower(device))
+    {
+      struct output_device *leader = tv_proxy_leader_of(device);
+
+      if (!leader || !leader->selected || leader->pin_pending)
+	{
+	  speaker_announce(device);
+	  return;
+	}
+    }
+
   device_request(device, OUTPUT_REQ_SELECT, false, false);
   status_update(player_state, LISTENER_SPEAKER | LISTENER_VOLUME);
 }
@@ -1820,47 +1835,16 @@ member_live(struct output_device *device)
     }
 }
 
-// Whether another member of the device's group is live. An Apple TV left out
-// of its group has no session and does not count
-static bool
-group_sibling_live(struct output_device *device)
-{
-  struct output_device *cur;
-  const char *group_id;
-
-  group_id = outputs_device_group_id(device);
-  if (!group_id)
-    return false;
-
-  for (cur = outputs_list(); cur; cur = cur->next)
-    {
-      const char *cur_gid = outputs_device_group_id(cur);
-
-      if (cur == device || !cur_gid || strcmp(cur_gid, group_id) != 0 || outputs_device_tv_proxy_excluded(cur))
-	continue;
-
-      if (member_live(cur))
-	return true;
-    }
-
-  return false;
-}
-
-// Whether a failure of the device reported now would be retried: a device
-// that reconnects (the reconnect option), still wanted and able to play, with
-// its quick retry unspent, that was lost while playing or whose group still
-// has a member live. Read before the report moves the device's phase
+// Whether a failure of the device reported now may be retried: a device that
+// reconnects (the reconnect option), still wanted and able to play, with
+// retries left. The phase rule adds whether the failure's reason is worth it
 static bool
 retry_allowed(struct output_device *device)
 {
   if (!device->resurrect || !device->selected || device->pin_pending || device->busy || device->prevent_playback)
     return false;
-  if (player_state != PLAY_PLAYING || device->reconnects >= PLAYER_SPEAKER_RECONNECT_MAX)
-    return false;
-  if (device->phase == OUTPUT_PHASE_CONNECTED || device->phase == OUTPUT_PHASE_STREAMING)
-    return true;
 
-  return group_sibling_live(device);
+  return player_state == PLAY_PLAYING && device->reconnects < PLAYER_SPEAKER_RETRY_MAX;
 }
 
 static void
@@ -2607,9 +2591,12 @@ flags_apply(struct output_device *device, const struct output_phase_result *res)
   // the device as about to start again
   if (res->retry)
     {
+      int gap = player_speaker_retry_gaps[device->reconnects];
+
       device->reconnects++;
-      DPRINTF(E_LOG, L_PLAYER, "Attempting reconnection in %d sec to the %s device '%s'\n", PLAYER_SPEAKER_RESURRECT_TIME, device->type_name, device->name);
-      resurrect_arm(device, PLAYER_SPEAKER_RESURRECT_TIME);
+      DPRINTF(E_LOG, L_PLAYER, "Retrying the %s device '%s' in %d sec (%u/%u)\n",
+	      device->type_name, device->name, gap, device->reconnects, PLAYER_SPEAKER_RETRY_MAX);
+      resurrect_arm(device, gap);
     }
 
   if (res->deselect)
@@ -3780,8 +3767,8 @@ group_start_skip(struct output_device *device)
   return true;
 }
 
-// An enable gives the device a fresh reconnect budget: a start of its own that
-// fails is reported at once, not taken for a retry
+// An enable gives the device a fresh reconnect budget, and a retry still
+// waiting gives way to the start the enable asks for
 static void
 member_select(struct output_device *device, int max_volume)
 {
