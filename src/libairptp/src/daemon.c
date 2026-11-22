@@ -41,6 +41,11 @@ SOFTWARE.
 #include "ptp_msg_handle.h"
 
 #define DAEMON_INTERVAL_SECS_SHM_UPDATE 5
+// A gap in a peer's Delay_Req longer than this ends its probe streak
+#define DAEMON_PROBE_STREAK_GAP_MS 3000
+// How long a probing peer may keep announcing its own grandmaster before it is
+// logged as not following our clock (a following one stops within ~0.4 s)
+#define DAEMON_OWN_GM_SPAN_MS 5000
 
 struct daemon_start_result
 {
@@ -255,6 +260,23 @@ peer_stats_update(struct airptp_daemon *daemon, struct airptp_peer *peer, uint8_
 }
 
 static void
+peer_probe_update(struct airptp_peer *peer, uint8_t msg_type)
+{
+  uint64_t now;
+
+  if (msg_type != PTP_MSGTYPE_DELAY_REQ && msg_type != PTP_MSGTYPE_PDELAY_REQ)
+    return;
+
+  now = now_ms();
+  if (peer->probe_last_ms == 0 || now - peer->probe_last_ms > DAEMON_PROBE_STREAK_GAP_MS) {
+    peer->probe_streak_ms = now;
+    peer->own_gm_ms = 0;
+    peer->own_gm_noted = false;
+  }
+  peer->probe_last_ms = now;
+}
+
+static void
 peer_seen_update(struct airptp_daemon *daemon, union utils_net_sockaddr *peer_addr, socklen_t peer_addrlen, uint8_t msg_type)
 {
   int i;
@@ -263,9 +285,53 @@ peer_seen_update(struct airptp_daemon *daemon, union utils_net_sockaddr *peer_ad
     if (utils_net_address_is_same(peer_addr, &daemon->peers[i].naddr)) {
       daemon->peers[i].last_seen = time(NULL);
       peer_stats_update(daemon, &daemon->peers[i], msg_type);
+      peer_probe_update(&daemon->peers[i], msg_type);
       break;
     }
   }
+}
+
+// A receiver that takes our clock announces a grandmaster of its own only in
+// the first moments of a session. One that still does so while it has been
+// probing our clock for DAEMON_OWN_GM_SPAN_MS measures our clock without
+// following it, so it plays on its own clock or stays silent. Logged once per
+// probe streak, nothing acts on it.
+void
+daemon_peer_announce(struct airptp_daemon *daemon, union utils_net_sockaddr *peer_addr, uint64_t sender_clock_id, uint64_t gm_clock_id)
+{
+  struct airptp_peer *peer;
+  char straddr[64];
+  uint64_t now;
+  int i;
+
+  if (gm_clock_id == daemon->clock_id)
+    return;
+
+  for (i = 0, peer = NULL; i < daemon->num_peers; i++) {
+    if (utils_net_address_is_same(peer_addr, &daemon->peers[i].naddr)) {
+      peer = &daemon->peers[i];
+      break;
+    }
+  }
+
+  // Only within a live streak: an Announce outside one says nothing about a
+  // receiver measuring our clock
+  now = now_ms();
+  if (!peer || peer->own_gm_noted || peer->probe_last_ms == 0 || now - peer->probe_last_ms > DAEMON_PROBE_STREAK_GAP_MS)
+    return;
+
+  if (peer->own_gm_ms == 0) {
+    peer->own_gm_ms = now;
+    return;
+  }
+
+  if (now - peer->own_gm_ms < DAEMON_OWN_GM_SPAN_MS)
+    return;
+
+  peer->own_gm_noted = true;
+  utils_net_address_get(straddr, sizeof(straddr), &peer->naddr);
+  airptp_logmsg("PTP peer %s probes our clock (for %" PRIu64 " ms) but keeps announcing grandmaster %" PRIx64 " (sender %" PRIx64 ", ours %" PRIx64 "), so it is not following our clock",
+    straddr, now - peer->probe_streak_ms, gm_clock_id, sender_clock_id, daemon->clock_id);
 }
 
 static bool

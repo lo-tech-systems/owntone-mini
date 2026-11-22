@@ -582,12 +582,11 @@ delay_msg_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, un
 }
 
 // Since we are announcing ourselves as a very precise clock we always expect to
-// become master clock. Given that assumption holds true, we can just ignore
-// other announcements.
+// become master clock. Given that assumption holds true, we can ignore other
+// announcements, except to note a peer that keeps announcing its own.
 static void
 announce_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, union utils_net_sockaddr *peer_addr, socklen_t peer_addr_len)
 {
-#if AIRPTP_LOG_RECEIVED
   struct ptp_announce_message *in = (struct ptp_announce_message *)req;
   struct ptp_announce_message announce = { 0 };
   uint64_t clock_id;
@@ -600,6 +599,10 @@ announce_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, uni
   header_read(&announce.header, &clock_id, req);
 
   announce.grandmasterIdentity = be64toh(in->grandmasterIdentity);
+
+  daemon_peer_announce(daemon, peer_addr, clock_id, announce.grandmasterIdentity);
+
+#if AIRPTP_LOG_RECEIVED
   announce.grandmasterClockQuality = be32toh(in->grandmasterClockQuality);
   announce.stepsRemoved = be16toh(in->stepsRemoved);
   announce.currentUtcOffset = be16toh(in->currentUtcOffset);

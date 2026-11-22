@@ -8,6 +8,9 @@
   overrun a peer address on the stack
 - fix: pairing with an empty TLV no longer writes two bytes past the end of
   its buffer
+- new: a debug log line names a receiver that has probed our PTP clock for
+  5 s but still announces a grandmaster of its own, so it is not following
+  our clock. It is logged once per run of clock probes
 
 ## Version 1.6.0 - 2026-11-18
 

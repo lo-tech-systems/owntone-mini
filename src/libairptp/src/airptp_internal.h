@@ -89,6 +89,12 @@ struct airptp_peer
   uint64_t last_seen;
   // Index of this peer's slot in the daemon's statistics array, -1 if none
   int stats_slot;
+  // Clock probes and Announces from this peer, daemon thread only. A streak is
+  // a run of Delay_Req with no gap longer than DAEMON_PROBE_STREAK_GAP_MS
+  uint64_t probe_streak_ms;
+  uint64_t probe_last_ms;
+  uint64_t own_gm_ms; // First Announce of its own grandmaster in this streak
+  bool own_gm_noted;
 };
 
 // Written only by the daemon thread, read without locking by any other thread.
