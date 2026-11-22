@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- fix: owntone-mini no longer stops when a speaker is started while the
+  network is down. The failed request was freed twice and libevent aborted
+- fix: a malformed PTP signalling message from the network can no longer
+  overrun a peer address on the stack
+- fix: pairing with an empty TLV no longer writes two bytes past the end of
+  its buffer
+
 ## Version 1.6.0 - 2026-11-18
 
 - new: an event channel, a local Unix socket (setting `event_socket`, users
