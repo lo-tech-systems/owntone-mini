@@ -23,6 +23,9 @@
   them is. A new row value, `members_missing`, in the outputs list and in
   `output_state` events, counts the speakers not playing while another is
 - fix: a group no longer reads failed and off while part of it plays
+- fix: an AirPlay 2 speaker reads streaming again when playback resumes
+  after a stop. Before, it played but its row stayed connecting until it was
+  switched off
 - change: every speaker gets two quick retries while the player plays, and
   is then left to the client. A retry begins 2 s after the failed start
   began (3 s for the second), or at once if that has passed, so a speaker

@@ -728,7 +728,9 @@ struct airplay_session
   // speaker's clock peer to mature. Cleared when the anchor is sent
   bool anchor_sibling_waited;
   // Set once session_streaming_report() has told the player
-  // OUTPUT_STATE_STREAMING for this session, so it is only reported once.
+  // OUTPUT_STATE_STREAMING, so it is reported once per CONNECTED->STREAMING
+  // transition: a flush moves the player's device back to connected, and the
+  // next start of audio must report streaming again
   bool streaming_reported;
   // The rtptime named by this session's anchor - delivery starts exactly at
   // this frame (see the gate in buffered_frame_send). Equals the write head
@@ -1659,8 +1661,8 @@ session_status(struct airplay_session *session)
   session->callback_id = -1;
 }
 
-// Reports OUTPUT_STATE_STREAMING to the player once per session, when audio
-// is actually flowing: for a realtime session on the first write in
+// Reports OUTPUT_STATE_STREAMING to the player once per CONNECTED->STREAMING
+// transition, when audio is actually flowing: for a realtime session on the first write in
 // STREAMING state, for a buffered session once the receiver has accepted
 // the SETRATEANCHORTIME anchor. Deferred until the player has registered a
 // callback, so it is re-checked on every write.
@@ -8972,6 +8974,7 @@ airplay_write(struct output_buffer *obuf)
 	    evtimer_add(keep_alive_timer, &keep_alive_tv);
 
 	  session->state = AIRPLAY_STATE_STREAMING;
+	  session->streaming_reported = false;
 
 	  // MediaRemote resume: this CONNECTED->STREAMING transition also
 	  // covers a session coming back from a flush/pause (see
